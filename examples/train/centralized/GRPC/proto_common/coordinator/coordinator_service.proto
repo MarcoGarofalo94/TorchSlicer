@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package tensor;
+
+service CoordinatorService {
+
+    rpc batch_done(Empty) returns (Empty);
+
+    rpc show_loss(LossMessage) returns (Empty);
+}
+
+message Empty {
+
+}
+
+message LossMessage {
+    
+}

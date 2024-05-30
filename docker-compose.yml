@@ -1,0 +1,29 @@
+version: "3.7"
+services:
+  coordinator:
+    container_name: coordinator
+    image: marcog94/torchslicer:coordinator-grpc-cpu
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./examples/train/centralized/GRPC/coordinator:/train/centralized/GRPC/coordinator
+      - ./examples/train/centralized/GRPC/proto_common/:/train/centralized/GRPC/proto_common
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+  worker1:
+    container_name: worker1
+    image: marcog94/torchslicer:worker-grpc-cpu
+    ports:
+      - "50052:50051"
+    volumes:
+      - ./examples/train/centralized/GRPC/worker:/train/centralized/GRPC/worker
+      - ./examples/train/centralized/GRPC/proto_common/:/train/centralized/GRPC/proto_common
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+  worker2:
+    container_name: worker2
+    image: marcog94/torchslicer:worker-grpc-cpu
+    ports:
+      - "50053:50051"
+    volumes:
+      - ./examples/train/centralized/GRPC/worker:/train/centralized/GRPC/worker
+      - ./examples/train/centralized/GRPC/proto_common/:/train/centralized/GRPC/proto_common
+      - ./lib/torchslicer:/usr/local/lib/torchslicer

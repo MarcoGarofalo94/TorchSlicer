@@ -1,0 +1,13 @@
+FROM marcog94/torchslicer:base-cpu
+
+RUN apt install protobuf-compiler -y
+
+# RUN pip3 install fastapi
+RUN pip3 install protobuf
+RUN pip3 install grpcio grpcio-tools
+RUN pip3 install kubernetes
+
+# Upgrade numpy
+RUN pip3 install --upgrade numpy
+
+ENV PROTOCOL=GRPC

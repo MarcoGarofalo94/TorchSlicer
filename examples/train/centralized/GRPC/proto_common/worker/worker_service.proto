@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package tensor;
+
+import "google/protobuf/struct.proto";
+
+
+service WorkerService {
+
+    rpc init (Config) returns (LogMessage);
+
+    rpc set_label(Tensor) returns (LogMessage);
+
+    rpc forward(ForwardMessage) returns (ForwardStatusMessage);
+
+    rpc backward(BackwardMessage) returns (BackwardStatusMessage);
+}
+
+message TensorMessage {
+    Tensor tensor = 1;
+}
+
+message Config {
+    repeated google.protobuf.Struct layers = 1;
+    optional google.protobuf.Struct criterion = 3;
+    google.protobuf.Struct optimizer = 4;
+    optional bool is_last = 5; 
+    optional string prev_layer = 6;
+    optional string next_layer = 7;
+    optional bool init_state_dict = 8;
+}
+
+message Tensor {
+    bytes data = 1;
+}
+
+message ForwardMessage {
+    Tensor input = 1;
+    optional Tensor label = 2;
+    // optional string prev_layer = 3;
+    // optional string next_layer = 4;
+}
+
+message BackwardMessage {
+    Tensor gradient = 1;
+    // optional string prev_layer = 2;
+    // optional Tensor label = 2;
+}
+
+message LogMessage {
+    string message = 1;
+    string hostname = 2;
+    string ip_addr = 3;
+}
+
+message ForwardStatusMessage {
+    optional string status = 1;
+    optional string message = 2;
+}
+
+message BackwardStatusMessage {
+    optional string status = 1;
+    optional string message = 2;
+}

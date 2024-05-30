@@ -1,0 +1,9 @@
+setup.py
+torchslicer/SplitLayer.py
+torchslicer/TorchSlicer.py
+torchslicer/__init__.py
+torchslicer.egg-info/PKG-INFO
+torchslicer.egg-info/SOURCES.txt
+torchslicer.egg-info/dependency_links.txt
+torchslicer.egg-info/requires.txt
+torchslicer.egg-info/top_level.txt

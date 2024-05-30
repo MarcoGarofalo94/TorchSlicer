@@ -1,0 +1,30 @@
+model: # model settings
+  path: ""
+  name: ""
+  serialized: false # if true, the model will be loaded from a file with torch.load
+
+dataset:  # dataset settings
+  path: ""
+  name: ""
+  serialized: false
+  batch_size: 32
+
+reproducibility: # reproducibility settings
+  random_seed: 42
+  deterministic: true
+  cudnn_benchmark: false
+  cudnn_deterministic: true
+
+params: # initial weights and biases for the model, useful for transfer learning or reproducibility
+  path: ""
+  serialized: true
+
+criterion: # loss function settings
+  name: "CrossEntropyLoss"
+  params: {}
+
+optimizer: # optimizer settings
+  name: "Adam"
+  params:
+    lr: 0.001
+    weight_decay: 0.0001
