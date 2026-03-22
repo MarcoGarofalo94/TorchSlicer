@@ -2,4 +2,4 @@ torchslicer/build
 torchslicer/torchslicer/__pycache__
 torchslicer/torchslicer.egg-info
 examples/train/server_.py
-config
+configCLAUDE.md
