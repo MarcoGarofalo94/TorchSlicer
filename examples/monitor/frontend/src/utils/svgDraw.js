@@ -9,7 +9,7 @@ function el(tag, attrs, text) {
   return e
 }
 
-function drawBox(svg, cx, y, bw, bh, accent, title, layers, sub) {
+function drawBox(svg, cx, y, bw, bh, accent, title, layers, sub, mem) {
   svg.appendChild(el('rect', { x: cx-bw/2, y, width: bw, height: bh, rx: 6, fill: C.surface2, stroke: accent, 'stroke-width': 1.5 }))
   svg.appendChild(el('rect', { x: cx-bw/2+1, y: y+1, width: bw-2, height: 3, rx: 3, fill: accent, opacity: .35 }))
   svg.appendChild(el('text', { x: cx, y: y+20, 'text-anchor': 'middle', fill: C.text, 'font-size': 12, 'font-weight': 700 }, title))
@@ -17,6 +17,10 @@ function drawBox(svg, cx, y, bw, bh, accent, title, layers, sub) {
   if (layers?.length) layers.forEach((l, i) =>
     svg.appendChild(el('text', { x: cx, y: y+50+i*14, 'text-anchor': 'middle', fill: accent, 'font-size': 10, 'font-family': C.mono }, l))
   )
+  if (mem) {
+    const mx = cx + bw/2 - 6, my = y + bh - 8
+    svg.appendChild(el('text', { x: mx, y: my, 'text-anchor': 'end', fill: C.muted, 'font-size': 9, 'font-family': C.mono }, mem))
+  }
 }
 
 export function drawTopology(svg, topology, W) {
@@ -28,7 +32,7 @@ export function drawTopology(svg, topology, W) {
   }
 
   const BW      = Math.min(W - 88, 178)
-  const BH_MIN  = 72, LH = 14, GAP = 52, CX = W / 2
+  const BH_MIN  = 82, LH = 14, GAP = 52, CX = W / 2
   const ARROW_R = CX + BW/2 + 14
   const ARROW_L = CX - BW/2 - 14
 
@@ -51,7 +55,11 @@ export function drawTopology(svg, topology, W) {
     const wi  = i + 1
     const col = w.is_last ? C.orange : C.blue
     const sub = w.is_last ? 'last slice · computes loss' : (w.next ? `→ ${w.next.split(':')[0]}` : '')
-    drawBox(svg, CX, ys[wi], BW, heights[wi], col, w.hostname, w.layers, sub)
+    const memParts = []
+    if (w.param_mb)      memParts.push(`${w.param_mb} MB params`)
+    if (w.cuda_alloc_mb) memParts.push(`${w.cuda_alloc_mb} MB GPU`)
+    const mem = memParts.join('  ') || null
+    drawBox(svg, CX, ys[wi], BW, heights[wi], col, w.hostname, w.layers, sub, mem)
 
     const prevBottom = ys[wi-1] + heights[wi-1]
     const midY       = (prevBottom + ys[wi]) / 2

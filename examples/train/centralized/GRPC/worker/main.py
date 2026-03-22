@@ -98,8 +98,16 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
             if self.loss_fn:
                 self.loss_fn = self.loss_fn.to(self.device)
             layer_names = [type(l).__name__ for l in self.layer.layers]
+
+            param_bytes = sum(p.numel() * p.element_size() for p in self.layer.parameters())
+            param_mb    = round(param_bytes / (1024 * 1024), 2)
+            cuda_alloc_mb = round(
+                torch.cuda.memory_allocated(self.device) / (1024 * 1024), 2
+            ) if self.device.type == 'cuda' else 0.0
+
             print(f"[init] layers={layer_names}  is_last={self.is_last}  device={self.device}")
             print(f"       prev={self.prev_worker}  next={self.next_worker}")
+            print(f"       param_mb={param_mb}  cuda_alloc_mb={cuda_alloc_mb}")
 
             with _tracer.span(
                 "torchslicer.worker.init",
@@ -109,6 +117,8 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
                 is_last=self.is_last,
                 prev_worker=self.prev_worker or "",
                 next_worker=self.next_worker or "",
+                param_mb=param_mb,
+                cuda_alloc_mb=cuda_alloc_mb,
             ):
                 pass  # span records topology info; work already done above
 

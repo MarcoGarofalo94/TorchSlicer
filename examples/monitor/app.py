@@ -66,12 +66,14 @@ def _fetch_topology() -> list[dict]:
                 raw    = tags.get("layers", "")
                 layers = [l.strip().strip("'\"") for l in raw.split(",") if l.strip()]
                 workers[host] = {
-                    "hostname": host,
-                    "layers":   layers,
-                    "n_layers": int(tags.get("n_layers", len(layers))),
-                    "is_last":  tags.get("is_last") in (True, "True", "true"),
-                    "prev":     tags.get("prev_worker") or None,
-                    "next":     tags.get("next_worker") or None,
+                    "hostname":     host,
+                    "layers":       layers,
+                    "n_layers":     int(tags.get("n_layers", len(layers))),
+                    "is_last":      tags.get("is_last") in (True, "True", "true"),
+                    "prev":         tags.get("prev_worker") or None,
+                    "next":         tags.get("next_worker") or None,
+                    "param_mb":     float(tags.get("param_mb", 0.0)),
+                    "cuda_alloc_mb": float(tags.get("cuda_alloc_mb", 0.0)),
                 }
 
     # Order chain: start from worker with no prev
