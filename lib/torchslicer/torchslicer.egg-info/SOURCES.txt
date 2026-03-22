@@ -1,3 +1,4 @@
+pyproject.toml
 setup.py
 torchslicer/SplitLayer.py
 torchslicer/TorchSlicer.py
@@ -7,3 +8,20 @@ torchslicer.egg-info/SOURCES.txt
 torchslicer.egg-info/dependency_links.txt
 torchslicer.egg-info/requires.txt
 torchslicer.egg-info/top_level.txt
+torchslicer/core/__init__.py
+torchslicer/core/model_graph.py
+torchslicer/core/slicer.py
+torchslicer/core/split_layer.py
+torchslicer/executors/__init__.py
+torchslicer/executors/base.py
+torchslicer/executors/local.py
+torchslicer/monitor/__init__.py
+torchslicer/monitor/base.py
+torchslicer/strategies/__init__.py
+torchslicer/strategies/base.py
+torchslicer/strategies/registry.py
+torchslicer/strategies/uniform.py
+torchslicer/topology/__init__.py
+torchslicer/topology/base.py
+torchslicer/transport/__init__.py
+torchslicer/transport/base.py

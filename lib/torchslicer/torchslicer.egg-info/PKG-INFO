@@ -1,21 +1,11 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: torchslicer
-Version: 0.1
-Summary: This is a python package that allows you to slice a neural network and train it in a distributed way. It is based on PyTorch.
+Version: 0.2.0
+Summary: Split learning framework for PyTorch.
 Home-page: https://github.com/MarcoGarofalo94/TorchSlicer
 Author: Marco Garofalo
-Author-email: garofalomarco58@gmail.com
-License: UNKNOWN
-Platform: UNKNOWN
-Classifier: Development Status :: 1 - Planning
-Classifier: Intended Audience :: Science/Research
-Classifier: License :: OSI Approved :: BSD License
-Classifier: Operating System :: POSIX :: Linux
-Classifier: Programming Language :: Python :: 2
-Classifier: Programming Language :: Python :: 2.7
-Classifier: Programming Language :: Python :: 3
-Classifier: Programming Language :: Python :: 3.4
-Classifier: Programming Language :: Python :: 3.5
-
-UNKNOWN
-
+Author-email: Marco Garofalo <garofalomarco58@gmail.com>
+Requires-Python: >=3.10
+Requires-Dist: numpy
+Dynamic: author
+Dynamic: home-page
