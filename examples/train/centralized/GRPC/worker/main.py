@@ -1,9 +1,7 @@
 import io
 import sys
-import os
 import threading
 import socket
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import grpc
 import torch
@@ -11,10 +9,8 @@ from torch import nn
 from torch import optim
 from concurrent import futures
 
-from proto_common.coordinator import coordinator_service_pb2_grpc
-from proto_common.coordinator import coordinator_service_pb2
-from proto_common.worker import worker_service_pb2_grpc
-from proto_common.worker import worker_service_pb2
+from torchslicer.transport.grpc.coordinator import coordinator_service_pb2_grpc, coordinator_service_pb2
+from torchslicer.transport.grpc.worker import worker_service_pb2_grpc, worker_service_pb2
 
 from torchslicer.core.split_layer import SplitLayer
 
