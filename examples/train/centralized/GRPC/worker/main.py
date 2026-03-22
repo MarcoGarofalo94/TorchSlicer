@@ -88,6 +88,18 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
             layer_names = [type(l).__name__ for l in self.layer.layers]
             print(f"[init] layers={layer_names}  is_last={self.is_last}")
             print(f"       prev={self.prev_worker}  next={self.next_worker}")
+
+            with _tracer.span(
+                "torchslicer.worker.init",
+                worker=socket.gethostname(),
+                layers=", ".join(layer_names),
+                n_layers=len(layer_names),
+                is_last=self.is_last,
+                prev_worker=self.prev_worker or "",
+                next_worker=self.next_worker or "",
+            ):
+                pass  # span records topology info; work already done above
+
             return worker_service_pb2.StatusMessage(
                 ok=True, message="Initialized", hostname=socket.gethostname())
         except Exception as e:

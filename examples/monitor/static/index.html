@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>TorchSlicer Monitor</title>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --surface: #161b22;
+    --border:  #30363d;
+    --text:    #e6edf3;
+    --muted:   #8b949e;
+    --blue:    #58a6ff;
+    --orange:  #f0883e;
+    --green:   #3fb950;
+    --purple:  #bc8cff;
+    --red:     #f85149;
+    --yellow:  #d29922;
+    --radius:  8px;
+    --font:    'SF Mono', 'Fira Code', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+    min-height: 100vh;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .02em; }
+  header h1 span { color: var(--blue); }
+
+  #status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); display: inline-block; margin-right: 6px;
+    transition: background .3s;
+  }
+  #status-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  #status-dot.error { background: var(--red); }
+  #status-label { color: var(--muted); font-size: 12px; }
+
+  main {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    grid-template-rows: auto auto 1fr;
+    gap: 1px;
+    background: var(--border);
+    height: calc(100vh - 45px);
+  }
+
+  .panel {
+    background: var(--bg);
+    padding: 16px;
+    overflow: hidden;
+  }
+  .panel-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+
+  /* ── topology ─────────────────────────────────────────────── */
+  #topology-panel {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    display: flex;
+    flex-direction: column;
+  }
+  #topology-svg { flex: 1; width: 100%; }
+
+  .node-box {
+    rx: 6; ry: 6;
+    fill: var(--surface);
+    stroke: var(--border);
+    stroke-width: 1.5;
+  }
+  .node-box.coordinator { stroke: var(--purple); }
+  .node-box.worker { stroke: var(--blue); }
+  .node-box.last { stroke: var(--orange); }
+  .node-title { font-size: 12px; font-weight: 600; fill: var(--text); }
+  .node-sub   { font-size: 10px; fill: var(--muted); }
+  .node-layer { font-size: 10px; fill: var(--blue); font-family: var(--font); }
+  .arrow { stroke: var(--border); stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+  .arrow.fwd  { stroke: var(--blue); }
+  .arrow.bwd  { stroke: var(--orange); stroke-dasharray: 4 3; }
+
+  /* ── swimlane ─────────────────────────────────────────────── */
+  #swimlane-panel {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  #swimlane-svg { width: 100%; height: 200px; }
+
+  .lane-label { font-size: 11px; fill: var(--muted); font-family: var(--font); }
+  .bar-fwd  { fill: var(--blue);   opacity: .85; rx: 3; ry: 3; }
+  .bar-bwd  { fill: var(--orange); opacity: .85; rx: 3; ry: 3; }
+  .bar-coord { fill: var(--purple); opacity: .25; rx: 3; ry: 3; }
+  .bar-label { font-size: 9px; fill: var(--text); text-anchor: middle; }
+  .grid-line { stroke: var(--border); stroke-width: 1; }
+  .axis-tick { font-size: 9px; fill: var(--muted); text-anchor: middle; }
+
+  /* ── history table ────────────────────────────────────────── */
+  #history-panel {
+    grid-column: 2;
+    grid-row: 2;
+    overflow-y: auto;
+  }
+  table { width: 100%; border-collapse: collapse; font-family: var(--font); font-size: 11px; }
+  th {
+    text-align: left; padding: 4px 8px;
+    color: var(--muted); font-weight: 500; font-size: 10px;
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: var(--bg);
+  }
+  td { padding: 3px 8px; border-bottom: 1px solid rgba(48,54,61,.4); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(88,166,255,.05); }
+  .loss-val  { color: var(--yellow); }
+  .ms-val    { color: var(--green); }
+  .ms-slow   { color: var(--red); }
+  .epoch-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 10px;
+    background: rgba(188,140,255,.15); color: var(--purple); font-size: 10px;
+  }
+
+  /* ── loss chart ───────────────────────────────────────────── */
+  #loss-panel {
+    grid-column: 1;
+    grid-row: 3;
+    display: flex;
+    flex-direction: column;
+  }
+  #loss-svg { flex: 1; width: 100%; }
+  .loss-line { fill: none; stroke: var(--green); stroke-width: 2; }
+  .loss-dot  { fill: var(--green); }
+  .loss-area { fill: url(#lossGrad); }
+  .chart-label { font-size: 9px; fill: var(--muted); }
+
+  /* ── empty state ──────────────────────────────────────────── */
+  .empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; color: var(--muted); gap: 8px; text-align: center;
+  }
+  .empty-icon { font-size: 28px; opacity: .4; }
+  .empty-text { font-size: 12px; }
+
+  /* ── legend ───────────────────────────────────────────────── */
+  .legend { display: flex; gap: 14px; margin-bottom: 10px; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+  .legend-dot { width: 10px; height: 10px; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Torch<span>Slicer</span> Monitor</h1>
+  <div style="display:flex;align-items:center;gap:8px">
+    <span id="status-dot"></span>
+    <span id="status-label">connecting…</span>
+    <span id="last-update" style="color:var(--border);font-size:11px;margin-left:8px"></span>
+  </div>
+</header>
+
+<main>
+
+  <!-- topology -->
+  <div class="panel" id="topology-panel">
+    <div class="panel-title">Topology</div>
+    <svg id="topology-svg">
+      <defs>
+        <marker id="arrowhead" markerWidth="8" markerHeight="6"
+                refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="var(--border)"/>
+        </marker>
+        <marker id="arrowhead-fwd" markerWidth="8" markerHeight="6"
+                refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="var(--blue)"/>
+        </marker>
+        <marker id="arrowhead-bwd" markerWidth="8" markerHeight="6"
+                refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="var(--orange)"/>
+        </marker>
+      </defs>
+      <g id="topology-g">
+        <text x="50%" y="50%" text-anchor="middle" fill="var(--muted)" font-size="12">
+          Waiting for data…
+        </text>
+      </g>
+    </svg>
+  </div>
+
+  <!-- swimlane -->
+  <div class="panel" id="swimlane-panel">
+    <div class="panel-title">Latest Batch — Forward &amp; Backward Flow</div>
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-dot" style="background:var(--purple);opacity:.4"></div> Coordinator
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:var(--blue)"></div> Forward
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:var(--orange)"></div> Backward
+      </div>
+    </div>
+    <svg id="swimlane-svg">
+      <defs>
+        <filter id="glow">
+          <feGaussianBlur stdDeviation="2" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <g id="swimlane-g">
+        <text x="50%" y="50%" text-anchor="middle" fill="var(--muted)" font-size="12">
+          Waiting for batch data…
+        </text>
+      </g>
+    </svg>
+  </div>
+
+  <!-- history -->
+  <div class="panel" id="history-panel">
+    <div class="panel-title">Batch History</div>
+    <table>
+      <thead>
+        <tr id="table-head"></tr>
+      </thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </div>
+
+  <!-- loss -->
+  <div class="panel" id="loss-panel">
+    <div class="panel-title">Avg Loss per Epoch</div>
+    <svg id="loss-svg">
+      <defs>
+        <linearGradient id="lossGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="var(--green)" stop-opacity=".3"/>
+          <stop offset="100%" stop-color="var(--green)" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <g id="loss-g">
+        <text x="50%" y="50%" text-anchor="middle" fill="var(--muted)" font-size="12">
+          Waiting for epoch data…
+        </text>
+      </g>
+    </svg>
+  </div>
+
+</main>
+
+<script>
+// ── utils ──────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs = {}, text = null) {
+  const e = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (text !== null) e.textContent = text;
+  return e;
+}
+function div(cls, text = '') {
+  const d = document.createElement('div');
+  d.className = cls; d.textContent = text; return d;
+}
+function msColor(ms, slow = 10) {
+  return ms > slow ? 'ms-slow' : 'ms-val';
+}
+
+// ── WebSocket ──────────────────────────────────────────────────────────────────
+const dot   = $('status-dot');
+const label = $('status-label');
+let state = null;
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => {
+    dot.className = 'live';
+    label.textContent = 'live';
+  };
+  ws.onmessage = e => {
+    state = JSON.parse(e.data);
+    $('last-update').textContent = new Date().toLocaleTimeString();
+    render(state);
+  };
+  ws.onerror = () => {
+    dot.className = 'error';
+    label.textContent = 'error';
+  };
+  ws.onclose = () => {
+    dot.className = '';
+    label.textContent = 'reconnecting…';
+    setTimeout(connect, 3000);
+  };
+}
+connect();
+
+// ── topology renderer ─────────────────────────────────────────────────────────
+function renderTopology(topology) {
+  const svg = $('topology-svg');
+  const g   = $('topology-g');
+  g.innerHTML = '';
+
+  const W  = svg.clientWidth  || 288;
+  const cx = W / 2;
+  const BW = 220, BH_BASE = 70, ROW_H = 16;
+  const GAP = 50;
+
+  // Coordinator box
+  const coordH = BH_BASE;
+  const coordY = 16;
+  drawBox(g, cx, coordY, BW, coordH, 'coordinator', 'Coordinator', null,
+          ['orchestrates training loop'], 'coord');
+
+  // Worker boxes
+  topology.forEach((w, i) => {
+    const y = coordY + coordH + GAP + i * (BH_BASE + ROW_H * w.layers.length + GAP);
+    const cls = w.is_last ? 'last' : 'worker';
+    const sublabel = w.is_last ? 'last slice — computes loss' : `→ ${w.next || '?'}`;
+    drawBox(g, cx, y, BW, BH_BASE + ROW_H * w.layers.length,
+            cls, w.hostname, w.layers, sublabel, `w${i}`);
+
+    // Arrow coord → worker (fwd)
+    drawArrow(g, cx, coordY + coordH, cx - 20, y, 'fwd', 'forward');
+    // Arrow worker → coord (bwd)
+    drawArrow(g, cx + 20, y, cx + 20, coordY + coordH, 'bwd', 'backward');
+  });
+}
+
+function drawBox(g, cx, y, w, h, cls, title, layers, sub, id) {
+  const x = cx - w / 2;
+  g.appendChild(el('rect', { x, y, width: w, height: h,
+    rx: 6, ry: 6,
+    fill: '#161b22',
+    stroke: cls === 'coordinator' ? '#bc8cff' : cls === 'last' ? '#f0883e' : '#58a6ff',
+    'stroke-width': 1.5
+  }));
+  g.appendChild(el('text', { x: cx, y: y + 18, 'text-anchor': 'middle',
+    fill: '#e6edf3', 'font-size': 12, 'font-weight': 600 }, title));
+  if (sub) {
+    g.appendChild(el('text', { x: cx, y: y + 32, 'text-anchor': 'middle',
+      fill: '#8b949e', 'font-size': 10 }, sub));
+  }
+  if (layers && layers.length) {
+    layers.forEach((l, i) => {
+      g.appendChild(el('text', {
+        x: cx, y: y + 48 + i * 14, 'text-anchor': 'middle',
+        fill: '#58a6ff', 'font-size': 10, 'font-family': 'monospace'
+      }, l));
+    });
+  }
+}
+
+function drawArrow(g, x1, y1, x2, y2, cls, label) {
+  const mid_x = (x1 + x2) / 2;
+  const mid_y = (y1 + y2) / 2;
+  const color = cls === 'fwd' ? '#58a6ff' : '#f0883e';
+  const dash  = cls === 'bwd' ? '4 3' : '';
+  const markId = cls === 'fwd' ? 'arrowhead-fwd' : 'arrowhead-bwd';
+
+  g.appendChild(el('line', {
+    x1, y1, x2, y2,
+    stroke: color, 'stroke-width': 1.5,
+    'stroke-dasharray': dash,
+    'marker-end': `url(#${markId})`
+  }));
+  g.appendChild(el('text', {
+    x: mid_x + (cls === 'bwd' ? 30 : -30), y: mid_y + 4,
+    'text-anchor': 'middle', fill: color, 'font-size': 9
+  }, label));
+}
+
+// ── swimlane renderer ─────────────────────────────────────────────────────────
+function renderSwimlane(batches, topology) {
+  const svg = $('swimlane-svg');
+  const g   = $('swimlane-g');
+  g.innerHTML = '';
+
+  const batch = batches[batches.length - 1];
+  if (!batch) return;
+
+  const W = svg.clientWidth || 700;
+  const LABEL_W = 100;
+  const chartW  = W - LABEL_W - 16;
+  const ROW_H   = 32;
+  const ROW_PAD = 8;
+  const TOP     = 20;
+
+  // Collect rows: coordinator + workers in order
+  const rows = [{ key: 'coordinator', label: 'Coordinator', color: '#bc8cff' }];
+  topology.forEach(w => rows.push({ key: w.hostname, label: w.hostname, color: '#58a6ff' }));
+
+  // Build a serial timing model:
+  // coord_start=0, w1_fwd, w2_fwd, w2_bwd, w1_bwd, coord_end
+  const workers = batch.workers || {};
+  const hostnames = topology.map(w => w.hostname);
+
+  let t = 0;
+  const timeline = {}; // host → [{start, dur, type, label}]
+
+  hostnames.forEach(h => { timeline[h] = []; });
+
+  // Forward pass (left to right)
+  hostnames.forEach(h => {
+    const fwd = (workers[h] || {}).fwd_ms || 0;
+    if (fwd) timeline[h].push({ start: t, dur: fwd, type: 'fwd', label: `${fwd}ms` });
+    t += fwd;
+  });
+
+  // Backward pass (right to left)
+  [...hostnames].reverse().forEach(h => {
+    const bwd = (workers[h] || {}).bwd_ms || 0;
+    if (bwd) timeline[h].push({ start: t, dur: bwd, type: 'bwd', label: `${bwd}ms` });
+    t += bwd;
+  });
+
+  const totalMs = Math.max(t, batch.total_ms || 1);
+  const scale   = chartW / totalMs;
+
+  // Axis ticks
+  const ticks = 5;
+  for (let i = 0; i <= ticks; i++) {
+    const x = LABEL_W + (i / ticks) * chartW;
+    g.appendChild(el('line', {
+      x1: x, y1: TOP - 4, x2: x, y2: TOP + rows.length * (ROW_H + ROW_PAD) + 4,
+      stroke: '#30363d', 'stroke-width': 1
+    }));
+    g.appendChild(el('text', {
+      x, y: TOP - 6, 'text-anchor': 'middle', fill: '#8b949e', 'font-size': 9
+    }, `${Math.round(i / ticks * totalMs)}ms`));
+  }
+
+  rows.forEach((row, ri) => {
+    const rowY = TOP + ri * (ROW_H + ROW_PAD);
+
+    // Row label
+    g.appendChild(el('text', {
+      x: LABEL_W - 8, y: rowY + ROW_H / 2 + 4,
+      'text-anchor': 'end', fill: '#8b949e', 'font-size': 10, 'font-family': 'monospace'
+    }, row.label));
+
+    // Row background
+    g.appendChild(el('rect', {
+      x: LABEL_W, y: rowY, width: chartW, height: ROW_H,
+      fill: '#161b22', rx: 3, ry: 3
+    }));
+
+    if (row.key === 'coordinator') {
+      // Full batch span
+      const dur = batch.total_ms || totalMs;
+      g.appendChild(el('rect', {
+        x: LABEL_W, y: rowY + 4,
+        width: Math.max(dur * scale, 2), height: ROW_H - 8,
+        fill: '#bc8cff', opacity: .25, rx: 3, ry: 3
+      }));
+      g.appendChild(el('text', {
+        x: LABEL_W + (dur * scale) / 2, y: rowY + ROW_H / 2 + 4,
+        'text-anchor': 'middle', fill: '#bc8cff', 'font-size': 9
+      }, `batch total: ${batch.total_ms}ms  loss: ${batch.loss.toFixed(4)}`));
+    } else {
+      (timeline[row.key] || []).forEach(seg => {
+        const x = LABEL_W + seg.start * scale;
+        const w = Math.max(seg.dur * scale, 2);
+        const fill = seg.type === 'fwd' ? '#58a6ff' : '#f0883e';
+        g.appendChild(el('rect', {
+          x, y: rowY + 4, width: w, height: ROW_H - 8,
+          fill, opacity: .85, rx: 3, ry: 3
+        }));
+        if (w > 20) {
+          g.appendChild(el('text', {
+            x: x + w / 2, y: rowY + ROW_H / 2 + 4,
+            'text-anchor': 'middle', fill: '#0d1117', 'font-size': 9, 'font-weight': 600
+          }, seg.label));
+        }
+      });
+    }
+  });
+}
+
+// ── history table ─────────────────────────────────────────────────────────────
+function renderTable(batches, topology) {
+  const head = $('table-head');
+  const body = $('table-body');
+
+  const workers = topology.map(w => w.hostname);
+
+  // Build header
+  let headHtml = '<th>Epoch</th><th>Batch</th><th>Loss</th><th>Total</th>';
+  workers.forEach(h => {
+    headHtml += `<th>${h} fwd</th><th>${h} bwd</th>`;
+  });
+  head.innerHTML = headHtml;
+
+  // Build rows (most recent first)
+  body.innerHTML = [...batches].reverse().map(b => {
+    const workerCells = workers.map(h => {
+      const w = (b.workers || {})[h] || {};
+      const fwd = w.fwd_ms != null ? `<td class="${msColor(w.fwd_ms)}">${w.fwd_ms}ms</td>` : '<td class="muted">—</td>';
+      const bwd = w.bwd_ms != null ? `<td class="${msColor(w.bwd_ms)}">${w.bwd_ms}ms</td>` : '<td class="muted">—</td>';
+      return fwd + bwd;
+    }).join('');
+
+    return `<tr>
+      <td><span class="epoch-badge">${b.epoch}</span></td>
+      <td>${b.batch_id}</td>
+      <td class="loss-val">${b.loss.toFixed(4)}</td>
+      <td class="${msColor(b.total_ms, 50)}">${b.total_ms}ms</td>
+      ${workerCells}
+    </tr>`;
+  }).join('');
+}
+
+// ── loss chart ────────────────────────────────────────────────────────────────
+function renderLoss(epochs) {
+  const svg = $('loss-svg');
+  const g   = $('loss-g');
+  g.innerHTML = '';
+
+  if (!epochs.length) return;
+
+  const W   = svg.clientWidth  || 288;
+  const H   = svg.clientHeight || 160;
+  const PAD = { top: 16, right: 16, bottom: 24, left: 40 };
+  const cW  = W - PAD.left - PAD.right;
+  const cH  = H - PAD.top  - PAD.bottom;
+
+  const losses = epochs.map(e => e.avg_loss);
+  const minL   = Math.min(...losses) * 0.98;
+  const maxL   = Math.max(...losses) * 1.02;
+
+  const xScale = i => PAD.left + (epochs.length < 2 ? cW / 2 : i / (epochs.length - 1) * cW);
+  const yScale = v => PAD.top + cH - ((v - minL) / (maxL - minL)) * cH;
+
+  // Grid lines
+  [0, .25, .5, .75, 1].forEach(f => {
+    const y = PAD.top + f * cH;
+    const v = maxL - f * (maxL - minL);
+    g.appendChild(el('line', { x1: PAD.left, y1: y, x2: W - PAD.right, y2: y,
+      stroke: '#21262d', 'stroke-width': 1 }));
+    g.appendChild(el('text', { x: PAD.left - 4, y: y + 3,
+      'text-anchor': 'end', fill: '#8b949e', 'font-size': 9 }, v.toFixed(3)));
+  });
+
+  // X axis labels
+  epochs.forEach((e, i) => {
+    g.appendChild(el('text', { x: xScale(i), y: H - PAD.bottom + 12,
+      'text-anchor': 'middle', fill: '#8b949e', 'font-size': 9 }, `E${e.epoch}`));
+  });
+
+  if (epochs.length === 1) {
+    const x = xScale(0), y = yScale(losses[0]);
+    g.appendChild(el('circle', { cx: x, cy: y, r: 4, fill: '#3fb950' }));
+    return;
+  }
+
+  // Area fill
+  const aPoints = epochs.map((e, i) => `${xScale(i)},${yScale(losses[i])}`).join(' ');
+  const area = `M${xScale(0)},${yScale(losses[0])} L${aPoints} L${xScale(epochs.length-1)},${PAD.top+cH} L${xScale(0)},${PAD.top+cH} Z`;
+  const areaPoly = document.createElementNS(SVG_NS, 'path');
+  areaPoly.setAttribute('d', area);
+  areaPoly.setAttribute('fill', 'url(#lossGrad)');
+  g.appendChild(areaPoly);
+
+  // Line
+  const pts = epochs.map((e, i) => `${xScale(i)},${yScale(losses[i])}`).join(' ');
+  const poly = document.createElementNS(SVG_NS, 'polyline');
+  poly.setAttribute('points', pts);
+  poly.setAttribute('fill', 'none');
+  poly.setAttribute('stroke', '#3fb950');
+  poly.setAttribute('stroke-width', '2');
+  g.appendChild(poly);
+
+  // Dots + value labels
+  epochs.forEach((e, i) => {
+    const x = xScale(i), y = yScale(losses[i]);
+    g.appendChild(el('circle', { cx: x, cy: y, r: 3, fill: '#3fb950' }));
+    g.appendChild(el('text', { x, y: y - 6, 'text-anchor': 'middle',
+      fill: '#3fb950', 'font-size': 9 }, losses[i].toFixed(4)));
+  });
+}
+
+// ── master render ─────────────────────────────────────────────────────────────
+function render(s) {
+  renderTopology(s.topology || []);
+  renderSwimlane(s.batches || [], s.topology || []);
+  renderTable(s.batches || [], s.topology || []);
+  renderLoss(s.epochs || []);
+}
+
+// Re-render on resize to reflow SVG
+window.addEventListener('resize', () => { if (state) render(state); });
+</script>
+</body>
+</html>
