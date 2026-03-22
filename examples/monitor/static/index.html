@@ -16,248 +16,158 @@
     --green:   #3fb950;
     --purple:  #bc8cff;
     --red:     #f85149;
-    --yellow:  #d29922;
-    --radius:  8px;
-    --font:    'SF Mono', 'Fira Code', monospace;
+    --yellow:  #e3b341;
+    --mono:    'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   }
-
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
-    background: var(--bg);
-    color: var(--text);
+    background: var(--bg); color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 13px;
-    min-height: 100vh;
+    font-size: 13px; height: 100vh; overflow: hidden;
+    display: flex; flex-direction: column;
   }
 
+  /* ── header ───────────────────────────────────────────────── */
   header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 24px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 20px; border-bottom: 1px solid var(--border);
+    background: var(--surface); flex-shrink: 0; height: 44px;
   }
-  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .02em; }
-  header h1 span { color: var(--blue); }
-
-  #status-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--muted); display: inline-block; margin-right: 6px;
-    transition: background .3s;
+  header h1 { font-size: 15px; font-weight: 700; letter-spacing: .03em; }
+  header h1 em { color: var(--blue); font-style: normal; }
+  .hdr-right { display: flex; align-items: center; gap: 16px; }
+  #stat-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--muted);
+    transition: background .4s;
   }
-  #status-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  #status-dot.error { background: var(--red); }
-  #status-label { color: var(--muted); font-size: 12px; }
+  #stat-dot.live  { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  #stat-dot.err   { background: var(--red); }
+  #stat-label { color: var(--muted); font-size: 11px; }
+  #stat-time  { color: var(--border); font-size: 11px; font-family: var(--mono); }
 
+  /* ── main grid ─────────────────────────────────────────────── */
   main {
-    display: grid;
-    grid-template-columns: 320px 1fr;
-    grid-template-rows: auto auto 1fr;
-    gap: 1px;
-    background: var(--border);
-    height: calc(100vh - 45px);
+    flex: 1; display: grid; overflow: hidden;
+    grid-template-columns: 280px 1fr;
+    grid-template-rows: 1fr 1fr 150px;
+    gap: 1px; background: var(--border);
   }
 
+  /* ── panels ────────────────────────────────────────────────── */
   .panel {
-    background: var(--bg);
-    padding: 16px;
-    overflow: hidden;
+    background: var(--bg); overflow: hidden;
+    display: flex; flex-direction: column; padding: 14px;
   }
   .panel-title {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: .08em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 14px;
+    font-size: 10px; font-weight: 700; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 12px;
+    flex-shrink: 0;
   }
 
-  /* ── topology ─────────────────────────────────────────────── */
-  #topology-panel {
-    grid-column: 1;
-    grid-row: 1 / 3;
-    display: flex;
-    flex-direction: column;
-  }
-  #topology-svg { flex: 1; width: 100%; }
+  /* topology spans both top rows */
+  #topo-panel  { grid-column: 1; grid-row: 1 / 3; }
+  #swim-panel  { grid-column: 2; grid-row: 1; }
+  #hist-panel  { grid-column: 2; grid-row: 2; overflow-y: auto; }
+  #loss-panel  { grid-column: 1 / 3; grid-row: 3; }
 
-  .node-box {
-    rx: 6; ry: 6;
-    fill: var(--surface);
-    stroke: var(--border);
-    stroke-width: 1.5;
-  }
-  .node-box.coordinator { stroke: var(--purple); }
-  .node-box.worker { stroke: var(--blue); }
-  .node-box.last { stroke: var(--orange); }
-  .node-title { font-size: 12px; font-weight: 600; fill: var(--text); }
-  .node-sub   { font-size: 10px; fill: var(--muted); }
-  .node-layer { font-size: 10px; fill: var(--blue); font-family: var(--font); }
-  .arrow { stroke: var(--border); stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
-  .arrow.fwd  { stroke: var(--blue); }
-  .arrow.bwd  { stroke: var(--orange); stroke-dasharray: 4 3; }
+  /* ── topology SVG ──────────────────────────────────────────── */
+  #topo-svg { flex: 1; width: 100%; display: block; }
 
-  /* ── swimlane ─────────────────────────────────────────────── */
-  #swimlane-panel {
-    grid-column: 2;
-    grid-row: 1;
+  /* ── swimlane ──────────────────────────────────────────────── */
+  #swim-panel { padding-bottom: 8px; }
+  .legend {
+    display: flex; gap: 14px; margin-bottom: 10px; flex-shrink: 0;
   }
-  #swimlane-svg { width: 100%; height: 200px; }
+  .leg-item { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+  .leg-dot  { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  #swim-svg { flex: 1; width: 100%; display: block; min-height: 0; }
 
-  .lane-label { font-size: 11px; fill: var(--muted); font-family: var(--font); }
-  .bar-fwd  { fill: var(--blue);   opacity: .85; rx: 3; ry: 3; }
-  .bar-bwd  { fill: var(--orange); opacity: .85; rx: 3; ry: 3; }
-  .bar-coord { fill: var(--purple); opacity: .25; rx: 3; ry: 3; }
-  .bar-label { font-size: 9px; fill: var(--text); text-anchor: middle; }
-  .grid-line { stroke: var(--border); stroke-width: 1; }
-  .axis-tick { font-size: 9px; fill: var(--muted); text-anchor: middle; }
-
-  /* ── history table ────────────────────────────────────────── */
-  #history-panel {
-    grid-column: 2;
-    grid-row: 2;
-    overflow-y: auto;
-  }
-  table { width: 100%; border-collapse: collapse; font-family: var(--font); font-size: 11px; }
-  th {
-    text-align: left; padding: 4px 8px;
-    color: var(--muted); font-weight: 500; font-size: 10px;
-    border-bottom: 1px solid var(--border);
-    position: sticky; top: 0; background: var(--bg);
-  }
-  td { padding: 3px 8px; border-bottom: 1px solid rgba(48,54,61,.4); }
+  /* ── history table ─────────────────────────────────────────── */
+  table  { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
+  thead  { position: sticky; top: 0; z-index: 1; }
+  th     { padding: 4px 10px; text-align: left; color: var(--muted); font-size: 10px;
+           font-weight: 500; background: var(--bg); border-bottom: 1px solid var(--border); }
+  td     { padding: 3px 10px; border-bottom: 1px solid rgba(48,54,61,.35); }
+  tr:hover td { background: rgba(88,166,255,.04); }
   tr:last-child td { border-bottom: none; }
-  tr:hover td { background: rgba(88,166,255,.05); }
-  .loss-val  { color: var(--yellow); }
-  .ms-val    { color: var(--green); }
-  .ms-slow   { color: var(--red); }
-  .epoch-badge {
-    display: inline-block; padding: 1px 6px; border-radius: 10px;
-    background: rgba(188,140,255,.15); color: var(--purple); font-size: 10px;
-  }
+  .c-ep  { color: var(--purple); }
+  .c-ms  { color: var(--green); }
+  .c-slw { color: var(--red); }
+  .c-ls  { color: var(--yellow); }
 
-  /* ── loss chart ───────────────────────────────────────────── */
-  #loss-panel {
-    grid-column: 1;
-    grid-row: 3;
-    display: flex;
-    flex-direction: column;
-  }
-  #loss-svg { flex: 1; width: 100%; }
-  .loss-line { fill: none; stroke: var(--green); stroke-width: 2; }
-  .loss-dot  { fill: var(--green); }
-  .loss-area { fill: url(#lossGrad); }
-  .chart-label { font-size: 9px; fill: var(--muted); }
-
-  /* ── empty state ──────────────────────────────────────────── */
-  .empty {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    height: 100%; color: var(--muted); gap: 8px; text-align: center;
-  }
-  .empty-icon { font-size: 28px; opacity: .4; }
-  .empty-text { font-size: 12px; }
-
-  /* ── legend ───────────────────────────────────────────────── */
-  .legend { display: flex; gap: 14px; margin-bottom: 10px; }
-  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
-  .legend-dot { width: 10px; height: 10px; border-radius: 2px; }
+  /* ── loss chart ────────────────────────────────────────────── */
+  #loss-panel { flex-direction: row; gap: 16px; align-items: stretch; }
+  #loss-panel .panel-title { writing-mode: initial; margin-bottom: 0; margin-right: 4px; align-self: flex-start; }
+  #loss-svg { flex: 1; display: block; height: 100%; }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>Torch<span>Slicer</span> Monitor</h1>
-  <div style="display:flex;align-items:center;gap:8px">
-    <span id="status-dot"></span>
-    <span id="status-label">connecting…</span>
-    <span id="last-update" style="color:var(--border);font-size:11px;margin-left:8px"></span>
+  <h1>Torch<em>Slicer</em> Monitor</h1>
+  <div class="hdr-right">
+    <div id="stat-time"></div>
+    <div style="display:flex;align-items:center;gap:6px">
+      <span id="stat-dot"></span>
+      <span id="stat-label">connecting…</span>
+    </div>
   </div>
 </header>
 
 <main>
 
   <!-- topology -->
-  <div class="panel" id="topology-panel">
+  <div class="panel" id="topo-panel">
     <div class="panel-title">Topology</div>
-    <svg id="topology-svg">
+    <svg id="topo-svg">
       <defs>
-        <marker id="arrowhead" markerWidth="8" markerHeight="6"
-                refX="8" refY="3" orient="auto">
-          <polygon points="0 0, 8 3, 0 6" fill="var(--border)"/>
+        <marker id="mfwd" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+          <polygon points="0 0,7 2.5,0 5" fill="#58a6ff"/>
         </marker>
-        <marker id="arrowhead-fwd" markerWidth="8" markerHeight="6"
-                refX="8" refY="3" orient="auto">
-          <polygon points="0 0, 8 3, 0 6" fill="var(--blue)"/>
-        </marker>
-        <marker id="arrowhead-bwd" markerWidth="8" markerHeight="6"
-                refX="8" refY="3" orient="auto">
-          <polygon points="0 0, 8 3, 0 6" fill="var(--orange)"/>
+        <marker id="mbwd" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+          <polygon points="0 0,7 2.5,0 5" fill="#f0883e"/>
         </marker>
       </defs>
-      <g id="topology-g">
-        <text x="50%" y="50%" text-anchor="middle" fill="var(--muted)" font-size="12">
-          Waiting for data…
-        </text>
+      <g id="topo-g">
+        <text x="50%" y="50%" text-anchor="middle" fill="#8b949e" font-size="12">Waiting…</text>
       </g>
     </svg>
   </div>
 
   <!-- swimlane -->
-  <div class="panel" id="swimlane-panel">
+  <div class="panel" id="swim-panel">
     <div class="panel-title">Latest Batch — Forward &amp; Backward Flow</div>
     <div class="legend">
-      <div class="legend-item">
-        <div class="legend-dot" style="background:var(--purple);opacity:.4"></div> Coordinator
-      </div>
-      <div class="legend-item">
-        <div class="legend-dot" style="background:var(--blue)"></div> Forward
-      </div>
-      <div class="legend-item">
-        <div class="legend-dot" style="background:var(--orange)"></div> Backward
-      </div>
+      <div class="leg-item"><div class="leg-dot" style="background:var(--purple);opacity:.5"></div>Coordinator</div>
+      <div class="leg-item"><div class="leg-dot" style="background:var(--blue)"></div>Forward</div>
+      <div class="leg-item"><div class="leg-dot" style="background:var(--orange)"></div>Backward</div>
     </div>
-    <svg id="swimlane-svg">
-      <defs>
-        <filter id="glow">
-          <feGaussianBlur stdDeviation="2" result="blur"/>
-          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-        </filter>
-      </defs>
-      <g id="swimlane-g">
-        <text x="50%" y="50%" text-anchor="middle" fill="var(--muted)" font-size="12">
-          Waiting for batch data…
-        </text>
+    <svg id="swim-svg">
+      <g id="swim-g">
+        <text x="50%" y="50%" text-anchor="middle" fill="#8b949e" font-size="12">Waiting…</text>
       </g>
     </svg>
   </div>
 
   <!-- history -->
-  <div class="panel" id="history-panel">
+  <div class="panel" id="hist-panel">
     <div class="panel-title">Batch History</div>
-    <table>
-      <thead>
-        <tr id="table-head"></tr>
-      </thead>
-      <tbody id="table-body"></tbody>
-    </table>
+    <table><thead><tr id="t-head"></tr></thead><tbody id="t-body"></tbody></table>
   </div>
 
   <!-- loss -->
   <div class="panel" id="loss-panel">
-    <div class="panel-title">Avg Loss per Epoch</div>
+    <div class="panel-title">Avg Loss / Epoch</div>
     <svg id="loss-svg">
       <defs>
-        <linearGradient id="lossGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%"   stop-color="var(--green)" stop-opacity=".3"/>
-          <stop offset="100%" stop-color="var(--green)" stop-opacity="0"/>
+        <linearGradient id="lg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="#3fb950" stop-opacity=".35"/>
+          <stop offset="100%" stop-color="#3fb950" stop-opacity="0"/>
         </linearGradient>
       </defs>
       <g id="loss-g">
-        <text x="50%" y="50%" text-anchor="middle" fill="var(--muted)" font-size="12">
-          Waiting for epoch data…
-        </text>
+        <text x="50%" y="50%" text-anchor="middle" fill="#8b949e" font-size="12">Waiting…</text>
       </g>
     </svg>
   </div>
@@ -265,346 +175,342 @@
 </main>
 
 <script>
-// ── utils ──────────────────────────────────────────────────────────────────────
+const SVG = 'http://www.w3.org/2000/svg';
 const $ = id => document.getElementById(id);
-const SVG_NS = 'http://www.w3.org/2000/svg';
-function el(tag, attrs = {}, text = null) {
-  const e = document.createElementNS(SVG_NS, tag);
-  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
-  if (text !== null) e.textContent = text;
+
+function svgEl(tag, attrs, text) {
+  const e = document.createElementNS(SVG, tag);
+  for (const [k,v] of Object.entries(attrs||{})) e.setAttribute(k,v);
+  if (text != null) e.textContent = text;
   return e;
 }
-function div(cls, text = '') {
-  const d = document.createElement('div');
-  d.className = cls; d.textContent = text; return d;
-}
-function msColor(ms, slow = 10) {
-  return ms > slow ? 'ms-slow' : 'ms-val';
-}
 
-// ── WebSocket ──────────────────────────────────────────────────────────────────
-const dot   = $('status-dot');
-const label = $('status-label');
+// ── WebSocket ──────────────────────────────────────────────────────────────
 let state = null;
-
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
-
-  ws.onopen = () => {
-    dot.className = 'live';
-    label.textContent = 'live';
-  };
+  ws.onopen  = () => { $('stat-dot').className='live'; $('stat-label').textContent='live'; };
   ws.onmessage = e => {
     state = JSON.parse(e.data);
-    $('last-update').textContent = new Date().toLocaleTimeString();
+    $('stat-time').textContent = new Date().toLocaleTimeString();
     render(state);
   };
-  ws.onerror = () => {
-    dot.className = 'error';
-    label.textContent = 'error';
-  };
+  ws.onerror = () => { $('stat-dot').className='err'; $('stat-label').textContent='error'; };
   ws.onclose = () => {
-    dot.className = '';
-    label.textContent = 'reconnecting…';
+    $('stat-dot').className='';
+    $('stat-label').textContent='reconnecting…';
     setTimeout(connect, 3000);
   };
 }
 connect();
 
-// ── topology renderer ─────────────────────────────────────────────────────────
+// ── topology ───────────────────────────────────────────────────────────────
 function renderTopology(topology) {
-  const svg = $('topology-svg');
-  const g   = $('topology-g');
+  const g = $('topo-g');
   g.innerHTML = '';
+  if (!topology.length) {
+    g.appendChild(svgEl('text',{x:'50%',y:'50%','text-anchor':'middle',fill:'#8b949e','font-size':12},'Waiting for workers…'));
+    return;
+  }
 
-  const W  = svg.clientWidth  || 288;
-  const cx = W / 2;
-  const BW = 220, BH_BASE = 70, ROW_H = 16;
-  const GAP = 50;
+  const svg  = $('topo-svg');
+  const rect = svg.getBoundingClientRect();
+  const W    = rect.width  || 260;
+  const H    = rect.height || 400;
 
-  // Coordinator box
-  const coordH = BH_BASE;
-  const coordY = 16;
-  drawBox(g, cx, coordY, BW, coordH, 'coordinator', 'Coordinator', null,
-          ['orchestrates training loop'], 'coord');
+  const BW     = Math.min(200, W - 60);  // box width
+  const BH_MIN = 72;
+  const LH     = 14;    // per-layer line height
+  const GAP    = 56;    // vertical gap between boxes
+  const CX     = W / 2;
+  const ARROW_X_R = CX + BW / 2 + 18;   // right arrow X
+  const ARROW_X_L = CX - BW / 2 - 18;   // left arrow X
 
-  // Worker boxes
+  // Compute heights
+  const allNodes = [null, ...topology];  // null = coordinator slot
+  const heights  = allNodes.map((w,i) =>
+    i === 0 ? BH_MIN : BH_MIN + Math.max(0, w.layers.length - 2) * LH
+  );
+
+  // Y positions (top edge of each box)
+  const ys = [];
+  let y = 20;
+  heights.forEach(h => { ys.push(y); y += h + GAP; });
+
+  // ── draw coordinator ──────────────────────────────────────────
+  drawBox(g, CX, ys[0], BW, heights[0], '#bc8cff', 'Coordinator', null, 'orchestrates training loop');
+
+  // ── draw workers + arrows ─────────────────────────────────────
   topology.forEach((w, i) => {
-    const y = coordY + coordH + GAP + i * (BH_BASE + ROW_H * w.layers.length + GAP);
-    const cls = w.is_last ? 'last' : 'worker';
-    const sublabel = w.is_last ? 'last slice — computes loss' : `→ ${w.next || '?'}`;
-    drawBox(g, cx, y, BW, BH_BASE + ROW_H * w.layers.length,
-            cls, w.hostname, w.layers, sublabel, `w${i}`);
+    const wi  = i + 1;
+    const bx  = CX - BW / 2;
+    const by  = ys[wi];
+    const bh  = heights[wi];
+    const col = w.is_last ? '#f0883e' : '#58a6ff';
+    const sub = w.is_last ? 'last slice — computes loss' : (w.next ? `→ ${w.next.split(':')[0]}` : '');
+    drawBox(g, CX, by, BW, bh, col, w.hostname, w.layers, sub);
 
-    // Arrow coord → worker (fwd)
-    drawArrow(g, cx, coordY + coordH, cx - 20, y, 'fwd', 'forward');
-    // Arrow worker → coord (bwd)
-    drawArrow(g, cx + 20, y, cx + 20, coordY + coordH, 'bwd', 'backward');
+    // gap space: from bottom of previous box to top of this box
+    const prevBottom = ys[wi - 1] + heights[wi - 1];
+    const midY       = (prevBottom + by) / 2;
+
+    // Forward arrow: right side, downward
+    g.appendChild(svgEl('line', {
+      x1: ARROW_X_R, y1: prevBottom + 4,
+      x2: ARROW_X_R, y2: by - 4,
+      stroke: '#58a6ff', 'stroke-width': 1.5,
+      'marker-end': 'url(#mfwd)'
+    }));
+    g.appendChild(svgEl('text', {
+      x: ARROW_X_R + 5, y: midY + 4,
+      fill: '#58a6ff', 'font-size': 9,
+      'text-anchor': 'start'
+    }, 'fwd'));
+
+    // Backward arrow: left side, upward
+    g.appendChild(svgEl('line', {
+      x1: ARROW_X_L, y1: by - 4,
+      x2: ARROW_X_L, y2: prevBottom + 4,
+      stroke: '#f0883e', 'stroke-width': 1.5,
+      'stroke-dasharray': '4 2',
+      'marker-end': 'url(#mbwd)'
+    }));
+    g.appendChild(svgEl('text', {
+      x: ARROW_X_L - 5, y: midY + 4,
+      fill: '#f0883e', 'font-size': 9,
+      'text-anchor': 'end'
+    }, 'bwd'));
   });
 }
 
-function drawBox(g, cx, y, w, h, cls, title, layers, sub, id) {
-  const x = cx - w / 2;
-  g.appendChild(el('rect', { x, y, width: w, height: h,
-    rx: 6, ry: 6,
-    fill: '#161b22',
-    stroke: cls === 'coordinator' ? '#bc8cff' : cls === 'last' ? '#f0883e' : '#58a6ff',
-    'stroke-width': 1.5
+function drawBox(g, cx, y, bw, bh, accent, title, layers, sub) {
+  // Background rect
+  g.appendChild(svgEl('rect', {
+    x: cx - bw/2, y, width: bw, height: bh,
+    rx: 6, ry: 6, fill: '#161b22', stroke: accent, 'stroke-width': 1.5
   }));
-  g.appendChild(el('text', { x: cx, y: y + 18, 'text-anchor': 'middle',
-    fill: '#e6edf3', 'font-size': 12, 'font-weight': 600 }, title));
-  if (sub) {
-    g.appendChild(el('text', { x: cx, y: y + 32, 'text-anchor': 'middle',
-      fill: '#8b949e', 'font-size': 10 }, sub));
-  }
+  // Accent top bar
+  g.appendChild(svgEl('rect', {
+    x: cx - bw/2 + 1, y: y + 1, width: bw - 2, height: 3,
+    rx: 3, ry: 3, fill: accent, opacity: .35
+  }));
+  // Title
+  g.appendChild(svgEl('text', {
+    x: cx, y: y + 20, 'text-anchor': 'middle',
+    fill: '#e6edf3', 'font-size': 12, 'font-weight': 700
+  }, title));
+  // Sub
+  if (sub) g.appendChild(svgEl('text', {
+    x: cx, y: y + 34, 'text-anchor': 'middle',
+    fill: '#8b949e', 'font-size': 10
+  }, sub));
+  // Layers
   if (layers && layers.length) {
-    layers.forEach((l, i) => {
-      g.appendChild(el('text', {
-        x: cx, y: y + 48 + i * 14, 'text-anchor': 'middle',
-        fill: '#58a6ff', 'font-size': 10, 'font-family': 'monospace'
-      }, l));
-    });
+    layers.forEach((l, i) => g.appendChild(svgEl('text', {
+      x: cx, y: y + 50 + i * 14, 'text-anchor': 'middle',
+      fill: accent, 'font-size': 10, 'font-family': "'SF Mono', monospace"
+    }, l)));
   }
 }
 
-function drawArrow(g, x1, y1, x2, y2, cls, label) {
-  const mid_x = (x1 + x2) / 2;
-  const mid_y = (y1 + y2) / 2;
-  const color = cls === 'fwd' ? '#58a6ff' : '#f0883e';
-  const dash  = cls === 'bwd' ? '4 3' : '';
-  const markId = cls === 'fwd' ? 'arrowhead-fwd' : 'arrowhead-bwd';
-
-  g.appendChild(el('line', {
-    x1, y1, x2, y2,
-    stroke: color, 'stroke-width': 1.5,
-    'stroke-dasharray': dash,
-    'marker-end': `url(#${markId})`
-  }));
-  g.appendChild(el('text', {
-    x: mid_x + (cls === 'bwd' ? 30 : -30), y: mid_y + 4,
-    'text-anchor': 'middle', fill: color, 'font-size': 9
-  }, label));
-}
-
-// ── swimlane renderer ─────────────────────────────────────────────────────────
+// ── swimlane ───────────────────────────────────────────────────────────────
 function renderSwimlane(batches, topology) {
-  const svg = $('swimlane-svg');
-  const g   = $('swimlane-g');
+  const g = $('swim-g');
   g.innerHTML = '';
 
   const batch = batches[batches.length - 1];
-  if (!batch) return;
+  if (!batch) {
+    g.appendChild(svgEl('text',{x:'50%',y:'50%','text-anchor':'middle',fill:'#8b949e','font-size':12},'Waiting…'));
+    return;
+  }
 
-  const W = svg.clientWidth || 700;
-  const LABEL_W = 100;
-  const chartW  = W - LABEL_W - 16;
-  const ROW_H   = 32;
-  const ROW_PAD = 8;
-  const TOP     = 20;
-
-  // Collect rows: coordinator + workers in order
-  const rows = [{ key: 'coordinator', label: 'Coordinator', color: '#bc8cff' }];
-  topology.forEach(w => rows.push({ key: w.hostname, label: w.hostname, color: '#58a6ff' }));
-
-  // Build a serial timing model:
-  // coord_start=0, w1_fwd, w2_fwd, w2_bwd, w1_bwd, coord_end
+  const svg     = $('swim-svg');
+  const rect    = svg.getBoundingClientRect();
+  const W       = rect.width  || 700;
+  const H       = rect.height || 120;
+  const LABEL_W = 110;
+  const chartW  = W - LABEL_W - 12;
   const workers = batch.workers || {};
-  const hostnames = topology.map(w => w.hostname);
+  const hosts   = topology.map(w => w.hostname);
 
+  // Build serial timing model
   let t = 0;
-  const timeline = {}; // host → [{start, dur, type, label}]
+  const timeline = {};
+  hosts.forEach(h => { timeline[h] = []; });
 
-  hostnames.forEach(h => { timeline[h] = []; });
-
-  // Forward pass (left to right)
-  hostnames.forEach(h => {
-    const fwd = (workers[h] || {}).fwd_ms || 0;
-    if (fwd) timeline[h].push({ start: t, dur: fwd, type: 'fwd', label: `${fwd}ms` });
-    t += fwd;
+  hosts.forEach(h => {
+    const d = (workers[h]||{}).fwd_ms || 0;
+    if (d) { timeline[h].push({s: t, d, type:'fwd'}); }
+    t += d;
   });
-
-  // Backward pass (right to left)
-  [...hostnames].reverse().forEach(h => {
-    const bwd = (workers[h] || {}).bwd_ms || 0;
-    if (bwd) timeline[h].push({ start: t, dur: bwd, type: 'bwd', label: `${bwd}ms` });
-    t += bwd;
+  [...hosts].reverse().forEach(h => {
+    const d = (workers[h]||{}).bwd_ms || 0;
+    if (d) { timeline[h].push({s: t, d, type:'bwd'}); }
+    t += d;
   });
 
   const totalMs = Math.max(t, batch.total_ms || 1);
   const scale   = chartW / totalMs;
 
+  // All rows
+  const rows = [
+    { key: 'coordinator', label: 'Coordinator' },
+    ...hosts.map(h => ({ key: h, label: h.length > 14 ? h.slice(0,12)+'…' : h }))
+  ];
+  const ROW_H   = Math.max(28, Math.floor((H - 24) / rows.length));
+  const TOP     = 18;
+
   // Axis ticks
-  const ticks = 5;
-  for (let i = 0; i <= ticks; i++) {
-    const x = LABEL_W + (i / ticks) * chartW;
-    g.appendChild(el('line', {
-      x1: x, y1: TOP - 4, x2: x, y2: TOP + rows.length * (ROW_H + ROW_PAD) + 4,
-      stroke: '#30363d', 'stroke-width': 1
-    }));
-    g.appendChild(el('text', {
-      x, y: TOP - 6, 'text-anchor': 'middle', fill: '#8b949e', 'font-size': 9
-    }, `${Math.round(i / ticks * totalMs)}ms`));
+  const TICKS = 5;
+  for (let i = 0; i <= TICKS; i++) {
+    const x = LABEL_W + (i / TICKS) * chartW;
+    g.appendChild(svgEl('line', { x1:x, y1:TOP-4, x2:x, y2:TOP + rows.length * ROW_H + 2, stroke:'#21262d', 'stroke-width':1 }));
+    g.appendChild(svgEl('text', { x, y:TOP-6, 'text-anchor':'middle', fill:'#8b949e', 'font-size':9 },
+      `${Math.round(i/TICKS*totalMs)}ms`));
   }
 
   rows.forEach((row, ri) => {
-    const rowY = TOP + ri * (ROW_H + ROW_PAD);
+    const ry = TOP + ri * ROW_H;
 
-    // Row label
-    g.appendChild(el('text', {
-      x: LABEL_W - 8, y: rowY + ROW_H / 2 + 4,
-      'text-anchor': 'end', fill: '#8b949e', 'font-size': 10, 'font-family': 'monospace'
+    // Label
+    g.appendChild(svgEl('text', {
+      x: LABEL_W - 8, y: ry + ROW_H/2 + 4,
+      'text-anchor': 'end', fill: '#8b949e', 'font-size': 10,
+      'font-family': "'SF Mono', monospace"
     }, row.label));
 
-    // Row background
-    g.appendChild(el('rect', {
-      x: LABEL_W, y: rowY, width: chartW, height: ROW_H,
-      fill: '#161b22', rx: 3, ry: 3
-    }));
+    // Row bg
+    g.appendChild(svgEl('rect', { x: LABEL_W, y: ry + 2, width: chartW, height: ROW_H - 4, fill: '#161b22', rx:3, ry:3 }));
 
     if (row.key === 'coordinator') {
-      // Full batch span
-      const dur = batch.total_ms || totalMs;
-      g.appendChild(el('rect', {
-        x: LABEL_W, y: rowY + 4,
-        width: Math.max(dur * scale, 2), height: ROW_H - 8,
-        fill: '#bc8cff', opacity: .25, rx: 3, ry: 3
+      const bw = Math.max((batch.total_ms||0) * scale, 4);
+      g.appendChild(svgEl('rect', {
+        x: LABEL_W, y: ry + 4, width: bw, height: ROW_H - 8,
+        fill: '#bc8cff', opacity: .3, rx:3, ry:3
       }));
-      g.appendChild(el('text', {
-        x: LABEL_W + (dur * scale) / 2, y: rowY + ROW_H / 2 + 4,
-        'text-anchor': 'middle', fill: '#bc8cff', 'font-size': 9
-      }, `batch total: ${batch.total_ms}ms  loss: ${batch.loss.toFixed(4)}`));
+      if (bw > 60) g.appendChild(svgEl('text', {
+        x: LABEL_W + bw/2, y: ry + ROW_H/2 + 4,
+        'text-anchor':'middle', fill:'#bc8cff', 'font-size':9
+      }, `${batch.total_ms}ms  loss ${batch.loss.toFixed(4)}`));
     } else {
-      (timeline[row.key] || []).forEach(seg => {
-        const x = LABEL_W + seg.start * scale;
-        const w = Math.max(seg.dur * scale, 2);
+      (timeline[row.key]||[]).forEach(seg => {
+        const x  = LABEL_W + seg.s * scale;
+        const bw = Math.max(seg.d * scale, 2);
         const fill = seg.type === 'fwd' ? '#58a6ff' : '#f0883e';
-        g.appendChild(el('rect', {
-          x, y: rowY + 4, width: w, height: ROW_H - 8,
-          fill, opacity: .85, rx: 3, ry: 3
-        }));
-        if (w > 20) {
-          g.appendChild(el('text', {
-            x: x + w / 2, y: rowY + ROW_H / 2 + 4,
-            'text-anchor': 'middle', fill: '#0d1117', 'font-size': 9, 'font-weight': 600
-          }, seg.label));
-        }
+        g.appendChild(svgEl('rect', { x, y: ry+4, width:bw, height: ROW_H-8, fill, opacity:.88, rx:3, ry:3 }));
+        if (bw > 24) g.appendChild(svgEl('text', {
+          x: x + bw/2, y: ry + ROW_H/2 + 4,
+          'text-anchor':'middle', fill:'#0d1117', 'font-size':9, 'font-weight':600
+        }, `${seg.d}ms`));
       });
     }
   });
 }
 
-// ── history table ─────────────────────────────────────────────────────────────
+// ── history table ──────────────────────────────────────────────────────────
 function renderTable(batches, topology) {
-  const head = $('table-head');
-  const body = $('table-body');
+  const hosts = topology.map(w => w.hostname);
+  const short = h => h.length > 10 ? h.slice(0,8)+'…' : h;
 
-  const workers = topology.map(w => w.hostname);
+  let hh = '<th>Epoch</th><th>Batch</th><th>Loss</th><th>Total</th>';
+  hosts.forEach(h => { hh += `<th>${short(h)} fwd</th><th>${short(h)} bwd</th>`; });
+  $('t-head').innerHTML = hh;
 
-  // Build header
-  let headHtml = '<th>Epoch</th><th>Batch</th><th>Loss</th><th>Total</th>';
-  workers.forEach(h => {
-    headHtml += `<th>${h} fwd</th><th>${h} bwd</th>`;
-  });
-  head.innerHTML = headHtml;
-
-  // Build rows (most recent first)
-  body.innerHTML = [...batches].reverse().map(b => {
-    const workerCells = workers.map(h => {
-      const w = (b.workers || {})[h] || {};
-      const fwd = w.fwd_ms != null ? `<td class="${msColor(w.fwd_ms)}">${w.fwd_ms}ms</td>` : '<td class="muted">—</td>';
-      const bwd = w.bwd_ms != null ? `<td class="${msColor(w.bwd_ms)}">${w.bwd_ms}ms</td>` : '<td class="muted">—</td>';
-      return fwd + bwd;
+  $('t-body').innerHTML = [...batches].reverse().map(b => {
+    const wCells = hosts.map(h => {
+      const w = (b.workers||{})[h]||{};
+      const f = w.fwd_ms != null ? `<td class="${w.fwd_ms>20?'c-slw':'c-ms'}">${w.fwd_ms}ms</td>` : '<td>—</td>';
+      const bk= w.bwd_ms != null ? `<td class="${w.bwd_ms>20?'c-slw':'c-ms'}">${w.bwd_ms}ms</td>` : '<td>—</td>';
+      return f + bk;
     }).join('');
-
     return `<tr>
-      <td><span class="epoch-badge">${b.epoch}</span></td>
+      <td class="c-ep">${b.epoch}</td>
       <td>${b.batch_id}</td>
-      <td class="loss-val">${b.loss.toFixed(4)}</td>
-      <td class="${msColor(b.total_ms, 50)}">${b.total_ms}ms</td>
-      ${workerCells}
+      <td class="c-ls">${b.loss.toFixed(4)}</td>
+      <td class="${b.total_ms>100?'c-slw':'c-ms'}">${b.total_ms}ms</td>
+      ${wCells}
     </tr>`;
   }).join('');
 }
 
-// ── loss chart ────────────────────────────────────────────────────────────────
+// ── loss chart ─────────────────────────────────────────────────────────────
 function renderLoss(epochs) {
-  const svg = $('loss-svg');
-  const g   = $('loss-g');
+  const g = $('loss-g');
   g.innerHTML = '';
 
-  if (!epochs.length) return;
-
-  const W   = svg.clientWidth  || 288;
-  const H   = svg.clientHeight || 160;
-  const PAD = { top: 16, right: 16, bottom: 24, left: 40 };
-  const cW  = W - PAD.left - PAD.right;
-  const cH  = H - PAD.top  - PAD.bottom;
-
-  const losses = epochs.map(e => e.avg_loss);
-  const minL   = Math.min(...losses) * 0.98;
-  const maxL   = Math.max(...losses) * 1.02;
-
-  const xScale = i => PAD.left + (epochs.length < 2 ? cW / 2 : i / (epochs.length - 1) * cW);
-  const yScale = v => PAD.top + cH - ((v - minL) / (maxL - minL)) * cH;
-
-  // Grid lines
-  [0, .25, .5, .75, 1].forEach(f => {
-    const y = PAD.top + f * cH;
-    const v = maxL - f * (maxL - minL);
-    g.appendChild(el('line', { x1: PAD.left, y1: y, x2: W - PAD.right, y2: y,
-      stroke: '#21262d', 'stroke-width': 1 }));
-    g.appendChild(el('text', { x: PAD.left - 4, y: y + 3,
-      'text-anchor': 'end', fill: '#8b949e', 'font-size': 9 }, v.toFixed(3)));
-  });
-
-  // X axis labels
-  epochs.forEach((e, i) => {
-    g.appendChild(el('text', { x: xScale(i), y: H - PAD.bottom + 12,
-      'text-anchor': 'middle', fill: '#8b949e', 'font-size': 9 }, `E${e.epoch}`));
-  });
-
-  if (epochs.length === 1) {
-    const x = xScale(0), y = yScale(losses[0]);
-    g.appendChild(el('circle', { cx: x, cy: y, r: 4, fill: '#3fb950' }));
+  if (!epochs.length) {
+    g.appendChild(svgEl('text',{x:'50%',y:'50%','text-anchor':'middle',fill:'#8b949e','font-size':12},'No epoch data yet'));
     return;
   }
 
-  // Area fill
-  const aPoints = epochs.map((e, i) => `${xScale(i)},${yScale(losses[i])}`).join(' ');
-  const area = `M${xScale(0)},${yScale(losses[0])} L${aPoints} L${xScale(epochs.length-1)},${PAD.top+cH} L${xScale(0)},${PAD.top+cH} Z`;
-  const areaPoly = document.createElementNS(SVG_NS, 'path');
-  areaPoly.setAttribute('d', area);
-  areaPoly.setAttribute('fill', 'url(#lossGrad)');
-  g.appendChild(areaPoly);
+  const svg  = $('loss-svg');
+  const rect = svg.getBoundingClientRect();
+  const W    = rect.width  || 600;
+  const H    = rect.height || 130;
+  const P    = { t:14, r:16, b:28, l:46 };
+  const cW   = W - P.l - P.r;
+  const cH   = H - P.t - P.b;
+
+  const losses = epochs.map(e => e.avg_loss);
+  const minL   = losses.length > 1 ? Math.min(...losses) * 0.97 : 0;
+  const maxL   = Math.max(...losses) * 1.03;
+
+  const xS = i => P.l + (epochs.length < 2 ? cW/2 : i / (epochs.length-1) * cW);
+  const yS = v => P.t + cH - ((v - minL) / (maxL - minL || 1)) * cH;
+
+  // Grid
+  [0, .25, .5, .75, 1].forEach(f => {
+    const y = P.t + f * cH;
+    const v = maxL - f * (maxL - minL);
+    g.appendChild(svgEl('line', { x1:P.l, y1:y, x2:W-P.r, y2:y, stroke:'#21262d', 'stroke-width':1 }));
+    g.appendChild(svgEl('text', { x:P.l-4, y:y+3, 'text-anchor':'end', fill:'#8b949e', 'font-size':9 }, v.toFixed(3)));
+  });
+
+  // X labels
+  epochs.forEach((e, i) => g.appendChild(svgEl('text', {
+    x: xS(i), y: H-P.b+12, 'text-anchor':'middle', fill:'#8b949e', 'font-size':9
+  }, `E${e.epoch}`)));
+
+  if (epochs.length === 1) {
+    g.appendChild(svgEl('circle',{cx:xS(0),cy:yS(losses[0]),r:4,fill:'#3fb950'}));
+    return;
+  }
+
+  // Area
+  const pts = epochs.map((e,i) => `${xS(i)},${yS(losses[i])}`);
+  const area = document.createElementNS(SVG,'path');
+  area.setAttribute('d', `M${pts.join(' L')} L${xS(epochs.length-1)},${P.t+cH} L${xS(0)},${P.t+cH} Z`);
+  area.setAttribute('fill','url(#lg)');
+  g.appendChild(area);
 
   // Line
-  const pts = epochs.map((e, i) => `${xScale(i)},${yScale(losses[i])}`).join(' ');
-  const poly = document.createElementNS(SVG_NS, 'polyline');
-  poly.setAttribute('points', pts);
-  poly.setAttribute('fill', 'none');
-  poly.setAttribute('stroke', '#3fb950');
-  poly.setAttribute('stroke-width', '2');
+  const poly = document.createElementNS(SVG,'polyline');
+  poly.setAttribute('points', pts.join(' '));
+  poly.setAttribute('fill','none');
+  poly.setAttribute('stroke','#3fb950');
+  poly.setAttribute('stroke-width','2');
+  poly.setAttribute('stroke-linejoin','round');
   g.appendChild(poly);
 
   // Dots + value labels
-  epochs.forEach((e, i) => {
-    const x = xScale(i), y = yScale(losses[i]);
-    g.appendChild(el('circle', { cx: x, cy: y, r: 3, fill: '#3fb950' }));
-    g.appendChild(el('text', { x, y: y - 6, 'text-anchor': 'middle',
-      fill: '#3fb950', 'font-size': 9 }, losses[i].toFixed(4)));
+  epochs.forEach((e,i) => {
+    const x = xS(i), y = yS(losses[i]);
+    g.appendChild(svgEl('circle',{cx:x, cy:y, r:3, fill:'#3fb950'}));
+    g.appendChild(svgEl('text',{x, y:y-6, 'text-anchor':'middle', fill:'#3fb950', 'font-size':9}, losses[i].toFixed(4)));
   });
 }
 
-// ── master render ─────────────────────────────────────────────────────────────
+// ── master render ──────────────────────────────────────────────────────────
 function render(s) {
-  renderTopology(s.topology || []);
-  renderSwimlane(s.batches || [], s.topology || []);
-  renderTable(s.batches || [], s.topology || []);
-  renderLoss(s.epochs || []);
+  renderTopology(s.topology||[]);
+  renderSwimlane(s.batches||[], s.topology||[]);
+  renderTable(s.batches||[], s.topology||[]);
+  renderLoss(s.epochs||[]);
 }
 
-// Re-render on resize to reflow SVG
 window.addEventListener('resize', () => { if (state) render(state); });
+// Give SVGs time to paint before first query
+setTimeout(() => { if (state) render(state); }, 100);
 </script>
 </body>
 </html>
