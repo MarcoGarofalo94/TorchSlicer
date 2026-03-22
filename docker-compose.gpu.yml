@@ -27,3 +27,27 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+  worker3:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  worker4:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -6,6 +6,10 @@ services:
     container_name: coordinator
     environment:
       - PYTHONUNBUFFERED=1
+      - EPOCHS
+      - USE_GPIPE
+      - N_MICRO
+      - N_WORKERS
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
@@ -13,6 +17,8 @@ services:
     depends_on:
       - worker1
       - worker2
+      - worker3
+      - worker4
     networks:
       - torchslicer-net
 
@@ -35,6 +41,34 @@ services:
       context: .
       dockerfile: docker-images/Dockerfile.cpu
     container_name: worker2
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/centralized/GRPC/worker/main.py
+    networks:
+      - torchslicer-net
+
+  worker3:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: worker3
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/centralized/GRPC/worker/main.py
+    networks:
+      - torchslicer-net
+
+  worker4:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: worker4
     environment:
       - PYTHONUNBUFFERED=1
     volumes:

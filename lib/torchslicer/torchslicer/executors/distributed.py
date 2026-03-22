@@ -178,6 +178,7 @@ class DistributedExecutor(BaseExecutor):
 
         self._proxies: list[_WorkerProxy] = []
         self._grpc_server = None
+        self._n_micro = 1
 
         # Synchronisation between gRPC callbacks and train_epoch loop
         self._batch_done = threading.Event()
@@ -186,9 +187,10 @@ class DistributedExecutor(BaseExecutor):
 
     # ── BaseExecutor interface ─────────────────────────────────────────────────
 
-    def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict, mixed_precision: bool = False) -> None:
+    def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict, mixed_precision: bool = False, n_micro_batches: int = 1) -> None:
         layers = model_graph.get_layers()
         n = len(partitions)
+        self._n_micro = max(1, n_micro_batches)
 
         # Start embedded coordinator gRPC server
         self._grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=4), options=_GRPC_OPTS)
@@ -221,6 +223,7 @@ class DistributedExecutor(BaseExecutor):
                 prev_worker=self._proxies[i - 1].url() if i > 0 else "",
                 next_worker=self._proxies[i + 1].url() if i < n - 1 else "",
                 coordinator=self.coordinator_addr,
+                n_micro=self._n_micro,
             )
             for attempt in range(10):
                 try:
@@ -279,13 +282,28 @@ class DistributedExecutor(BaseExecutor):
     # ── internal ───────────────────────────────────────────────────────────────
 
     def _send_batch(self, batch_id: int, inputs: torch.Tensor, labels: torch.Tensor):
-        # Label goes directly to last worker
-        self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
-            batch_id=batch_id,
-            label=_serialize_tensor(labels),
-        ))
-        # Input goes to first worker, which chains forward through the slice pipeline
-        self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
-            batch_id=batch_id,
-            input=_serialize_tensor(inputs),
-        ))
+        M = self._n_micro
+        if M > 1:
+            micro_inputs = inputs.chunk(M)
+            micro_labels = labels.chunk(M)
+            for m in range(M):
+                mbid = batch_id * M + m
+                self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
+                    batch_id=mbid,
+                    label=_serialize_tensor(micro_labels[m]),
+                ))
+                self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
+                    batch_id=mbid,
+                    input=_serialize_tensor(micro_inputs[m]),
+                ))
+        else:
+            # Label goes directly to last worker
+            self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
+                batch_id=batch_id,
+                label=_serialize_tensor(labels),
+            ))
+            # Input goes to first worker, which chains forward through the slice pipeline
+            self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
+                batch_id=batch_id,
+                input=_serialize_tensor(inputs),
+            ))

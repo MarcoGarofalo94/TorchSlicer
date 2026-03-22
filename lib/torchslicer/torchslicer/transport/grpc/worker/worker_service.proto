@@ -53,6 +53,7 @@ message SliceConfig {
     string  prev_worker            = 5;  // host:port, empty if first
     string  next_worker            = 6;  // host:port, empty if last
     string  coordinator            = 7;  // host:port
+    uint32  n_micro                = 8;  // GPipe micro-batch count; 0/1 = disabled
 }
 
 // ── forward / backward ────────────────────────────────────────────────────────

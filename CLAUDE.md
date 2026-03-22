@@ -77,7 +77,9 @@ sliced.train(train_loader, devices=[...])
 - `UniformSplitter` + strategy registry
 - Top-level `ts.slice()` + `SlicedModel.train()` API
 - ResNet18/50 work natively via `from_module()` — `torch.flatten` auto-wrapped, no manual wrapper needed
-- gRPC centralized example: coordinator + 2 workers, automatic partitioning via `UniformSplitter`
+- gRPC centralized example: coordinator + 2–4 workers, automatic partitioning via `UniformSplitter`
+- GPipe micro-batch pipeline parallelism — opt-in via `use_gpipe=True, n_micro_batches=4`; benchmarked 1.9× speedup with 4 workers (ResNet18/CIFAR-10 GPU)
+- `N_WORKERS`, `EPOCHS`, `USE_GPIPE`, `N_MICRO` env vars — configure stack from outside without rebuilding
 - Docker stack: `docker compose up` (CPU) or `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up` (GPU)
 - Tested on: RTX 3060 (WSL2 + NVIDIA Container Toolkit)
 
@@ -102,8 +104,13 @@ conda run -n torchslicer python3 examples/test_local_dnn.py
 ```bash
 docker compose up --build
 ```
-Starts coordinator (port 50054) + worker1 + worker2 (port 50051) on a bridged Docker network.
+Starts coordinator (port 50054) + worker1–4 (port 50051) on a bridged Docker network.
 Source and lib are volume-mounted; proto files are regenerated at container startup via `entrypoint.sh`.
+
+Environment variables (pass via shell or `.env`):
+```bash
+N_WORKERS=4 EPOCHS=20 USE_GPIPE=1 N_MICRO=4 docker compose up
+```
 
 ### Run the full gRPC stack (GPU)
 ```bash
@@ -178,5 +185,5 @@ Key design points:
 - **ModelGraph tracing**: `from_module()` uses `torch.fx` with a `_ShallowTracer` that treats direct children as leaves. Functional ops (`torch.flatten`, `operator.add`) are wrapped in thin `nn.Module`s. Falls back to `from_sequential()` on trace failure.
 - **Cross-partition skip connections**: Not supported. `BaseSplitter.validate()` raises `ValueError` if a multi-input node's predecessors span partitions. Workaround: choose `n` so skip connections stay within one partition, or wrap the skip block in a single `nn.Module`.
 - **Tensor serialisation**: `torch.save()` → `bytes`. Simple but not the most efficient; revisit for optimization.
-- **Gradient flow**: Each `SplitLayer` stores its input as a `Variable(requires_grad=True)` to enable `x.grad` retrieval after backward.
+- **Gradient flow**: Each `SplitLayer` stores its input with `detach().requires_grad_(True)` to enable `x.grad` retrieval after backward. For GPipe, `x_ref = self.layer.x` is captured immediately after each forward and keyed by batch_id to avoid overwrite across micro-batches.
 - **Hybrid clusters**: For GPU workers, `torch.save(layer)` serialises on CPU; the worker can `.to(device)` after loading. Device placement is the worker's responsibility.

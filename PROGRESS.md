@@ -27,7 +27,9 @@
 - [x] Embedded gRPC coordinator server (`_CoordinatorServicer`) with `threading.Event` synchronisation
 - [x] Sends `SliceConfig` to each worker at setup (layers serialized via `torch.save`, optimizer, criterion)
 - [x] Synchronous training loop: sends batch → waits for `batch_done` callback → accumulates loss
-- [x] Full Docker stack verified: GPU stack runs coordinator + 2 workers (`device=cuda`), all 20 epochs complete cleanly (loss 2.16 → 0.56 on ResNet18/CIFAR-10)
+- [x] Full Docker stack verified: GPU stack runs coordinator + 2–4 workers (`device=cuda`), all 20 epochs complete cleanly (loss 2.16 → 0.56 on ResNet18/CIFAR-10)
+- [x] `N_WORKERS` env var — coordinator dynamically builds worker list; `docker-compose.yml` ships with worker1–worker4; scale up without rebuilding images
+- [x] `EPOCHS`, `USE_GPIPE`, `N_MICRO`, `N_WORKERS` all forwarded into coordinator container via `environment:` in compose
 - [x] Proto files live in `lib/torchslicer/torchslicer/transport/grpc/` (not in examples); auto-compiled at container startup
 
 ## Splitting strategies (partial) ✅
@@ -75,10 +77,10 @@
 - [x] Replace deprecated `Variable` with `detach().requires_grad_(True)` in `SplitLayer`
 - [x] Raw-bytes tensor serialization — activation/gradient tensors now sent as contiguous buffer; `torch.frombuffer` on receive; `torch.save` kept only for layer/optimizer config (one-time startup)
 - [x] Persistent gRPC stubs — `_next_stub`, `_prev_stub`, `_coord_stub` created at `init()`, reused across all batches
-- [x] ThreadPoolExecutor at worker — pre-warmed pool (4 workers) replaces per-RPC thread spawn
+- [x] ThreadPoolExecutor at worker — pre-warmed pool (max_workers=1 for compute serialization) replaces per-RPC thread spawn; gRPC server retains 10-worker pool for RPC handling
 - [x] Mixed-precision opt-in — `mixed_precision=True` on `SlicedModel.train()` / `executor.setup()`; wraps partition forward in `torch.autocast(bfloat16)`; no GradScaler needed (bfloat16 stable range)
 - [x] GPU OOM fix for long runs — `SplitLayer.optimize()` nulls `self.x` after each batch; worker calls `torch.cuda.empty_cache()` after every backward; validated over 20 epochs without OOM
-- [ ] Micro-batch pipeline parallelism (GPipe-style) — overlap next batch's forward with current batch's backward; `batch_id` keying already supports it
+- [x] GPipe micro-batch pipeline parallelism — opt-in via `use_gpipe=True, n_micro_batches=4` on `SlicedModel.train()`; `USE_GPIPE=1 N_MICRO=4` env vars for Docker; each micro-batch loss scaled by 1/M for correct gradient accumulation; single optimizer step after all M micro-batches; **benchmarked: 1.9× speedup with 4 workers** (282s → 149s / 5 epochs, ResNet18/CIFAR-10 GPU); 2-worker case is slower due to gRPC overhead exceeding pipeline gain; compute pool serialized (max_workers=1) to prevent concurrent backward races on shared model weights; x_ref saved per batch_id to avoid cut-point tensor overwrite across micro-batches
 - [ ] More efficient gradient propagation beyond basic autograd
 
 ## Platform support

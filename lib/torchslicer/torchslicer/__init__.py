@@ -20,8 +20,9 @@ class SlicedModel:
         self.partitions = partitions
         self.executor = executor
 
-    def train(self, data_loader, optimizer, criterion, epochs=1, devices=None, verbose=False, mixed_precision=False) -> list:
-        self.executor.setup(self.graph, self.partitions, optimizer, criterion, mixed_precision=mixed_precision)
+    def train(self, data_loader, optimizer, criterion, epochs=1, devices=None, verbose=False, mixed_precision=False, use_gpipe=False, n_micro_batches=4) -> list:
+        n_micro = n_micro_batches if use_gpipe else 1
+        self.executor.setup(self.graph, self.partitions, optimizer, criterion, mixed_precision=mixed_precision, n_micro_batches=n_micro)
         history = []
         for epoch in range(1, epochs + 1):
             history.append(self.executor.train_epoch(data_loader, epoch=epoch, verbose=verbose))

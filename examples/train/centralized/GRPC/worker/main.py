@@ -71,19 +71,26 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         self.prev_worker: str = None
         self.next_worker: str = None
         self.coordinator: str = None
+        self._n_micro: int = 1
 
         # Persistent stubs — created once in init(), reused across all batches
         self._next_stub = None
         self._prev_stub = None
         self._coord_stub = None
 
-        # Pre-warmed thread pool for forward/backward dispatch
-        self._pool = futures.ThreadPoolExecutor(max_workers=4)
+        # Single-worker compute pool: serialises all forward/backward ops on
+        # this worker so concurrent micro-batch RPCs never race on self.layer.x
+        # or the model's .grad tensors.  Pipeline parallelism still happens
+        # because DIFFERENT workers run their compute pools concurrently.
+        self._pool = futures.ThreadPoolExecutor(max_workers=1)
 
         # Per-batch state, keyed by batch_id.
-        # Both dicts are always accessed under self._lock.
-        self._labels: dict[int, torch.Tensor] = {}
-        self._outputs: dict[int, torch.Tensor] = {}
+        # _outputs stores (out_tensor, x_ref) tuples so each backward uses the
+        # correct cut-point tensor even after subsequent forwards overwrite self.layer.x.
+        self._labels:  dict[int, torch.Tensor]                    = {}
+        self._outputs: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        # GPipe: accumulated unscaled losses keyed by full_batch_id (last worker)
+        self._micro_losses: dict[int, float] = {}
         self._lock = threading.Lock()
 
     # ── init ───────────────────────────────────────────────────────────────────
@@ -108,6 +115,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
             self.prev_worker = request.prev_worker or None
             self.next_worker = request.next_worker or None
             self.coordinator = request.coordinator
+            self._n_micro = max(1, request.n_micro) if request.n_micro else 1
 
             # Build persistent stubs now so forward/backward never open a channel
             if self.next_worker:
@@ -129,7 +137,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
 
             print(f"[init] layers={layer_names}  is_last={self.is_last}  device={self.device}")
             print(f"       prev={self.prev_worker}  next={self.next_worker}")
-            print(f"       param_mb={param_mb}  cuda_alloc_mb={cuda_alloc_mb}")
+            print(f"       param_mb={param_mb}  cuda_alloc_mb={cuda_alloc_mb}  n_micro={self._n_micro}")
 
             with _tracer.span(
                 "torchslicer.worker.init",
@@ -142,7 +150,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
                 param_mb=param_mb,
                 cuda_alloc_mb=cuda_alloc_mb,
             ):
-                pass  # span records topology info; work already done above
+                pass
 
             return worker_service_pb2.StatusMessage(
                 ok=True, message="Initialized", hostname=socket.gethostname())
@@ -164,116 +172,168 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
     # ── internal forward ───────────────────────────────────────────────────────
 
     def _forward(self, request: worker_service_pb2.ForwardRequest):
-        batch_id = request.batch_id
+        try:
+            batch_id = request.batch_id
 
-        if self.is_last:
-            self._forward_last(batch_id, request)
-            return
+            if self.is_last:
+                self._forward_last(batch_id, request)
+                return
 
-        # Non-last: run forward, send activation to next worker
-        tensor = deserialize_tensor(request.input).to(self.device)
-        with _tracer.span(
-            "torchslicer.worker.forward",
-            batch_id=batch_id,
-            worker=socket.gethostname(),
-            input_shape=str(tuple(tensor.shape)),
-        ) as s:
-            out = self.layer(tensor)
-            if s:
-                s.set_attribute("output_shape", str(tuple(out.shape)))
-        with self._lock:
-            self._outputs[batch_id] = out
+            # Non-last: run forward, save (out, x_ref), send activation to next worker
+            tensor = deserialize_tensor(request.input).to(self.device)
+            with _tracer.span(
+                "torchslicer.worker.forward",
+                batch_id=batch_id,
+                worker=socket.gethostname(),
+                input_shape=str(tuple(tensor.shape)),
+            ) as s:
+                out = self.layer(tensor)
+                x_ref = self.layer.x   # save cut-point before next forward can overwrite it
+                if s:
+                    s.set_attribute("output_shape", str(tuple(out.shape)))
 
-        self._next_stub.forward(worker_service_pb2.ForwardRequest(
-            batch_id=batch_id,
-            input=serialize_tensor(out),
-        ))
+            with self._lock:
+                self._outputs[batch_id] = (out, x_ref)
+
+            self._next_stub.forward(worker_service_pb2.ForwardRequest(
+                batch_id=batch_id,
+                input=serialize_tensor(out),
+            ))
+        except Exception as e:
+            print(f"[forward] ERROR batch_id={request.batch_id}: {e}")
+            import traceback; traceback.print_exc()
 
     def _forward_last(self, batch_id: int, request: worker_service_pb2.ForwardRequest):
         """
-        The last worker receives two ForwardRequests per batch:
-          1. from coordinator: label only (input.data is empty)
-          2. from previous worker: activation only (label.data is empty)
-        Both paths store their payload and trigger backward once both arrive.
+        Last worker receives two messages per micro-batch:
+          1. coordinator → label only
+          2. previous worker → activation only
+        Whichever arrives second triggers forward+backward.
         """
-        is_label_msg = bool(request.label.data)
+        try:
+            is_label = bool(request.label.data)
 
-        if is_label_msg:
-            label = deserialize_tensor(request.label).to(self.device)
-            with self._lock:
-                self._labels[batch_id] = label
-                out = self._outputs.pop(batch_id, None)
-        else:
-            tensor = deserialize_tensor(request.input).to(self.device)
-            out = self.layer(tensor)
-            with self._lock:
-                label = self._labels.pop(batch_id, None)
-                if label is None:
-                    self._outputs[batch_id] = out
+            if is_label:
+                label = deserialize_tensor(request.label).to(self.device)
+                with self._lock:
+                    self._labels[batch_id] = label
+                    cached = self._outputs.pop(batch_id, None)
+                if cached is not None:
+                    out, x_ref = cached
+                    self._run_backward_last(batch_id, out, x_ref, label)
+            else:
+                tensor = deserialize_tensor(request.input).to(self.device)
+                with _tracer.span(
+                    "torchslicer.worker.forward",
+                    batch_id=batch_id,
+                    worker=socket.gethostname(),
+                    is_last=True,
+                    input_shape=str(tuple(tensor.shape)),
+                ):
+                    out = self.layer(tensor)
+                    x_ref = self.layer.x   # save cut-point immediately
 
-        if out is not None and label is not None:
-            self._run_backward_last(batch_id, out, label)
+                with self._lock:
+                    label = self._labels.pop(batch_id, None)
+                    if label is None:
+                        self._outputs[batch_id] = (out, x_ref)
+
+                if label is not None:
+                    self._run_backward_last(batch_id, out, x_ref, label)
+        except Exception as e:
+            print(f"[forward_last] ERROR batch_id={batch_id}: {e}")
+            import traceback; traceback.print_exc()
 
     # ── internal backward ──────────────────────────────────────────────────────
 
     def _backward(self, request: worker_service_pb2.BackwardRequest):
-        batch_id = request.batch_id
-        grad_in = deserialize_tensor(request.gradient).to(self.device)
+        try:
+            batch_id  = request.batch_id
+            n_micro   = self._n_micro
+            is_last_micro = (n_micro <= 1) or (batch_id % n_micro == n_micro - 1)
 
-        with self._lock:
-            out = self._outputs.pop(batch_id, None)
+            grad_in = deserialize_tensor(request.gradient).to(self.device)
 
-        if out is None:
-            print(f"[backward] WARNING: no cached output for batch_id={batch_id}")
-            return
+            with self._lock:
+                cached = self._outputs.pop(batch_id, None)
 
-        with _tracer.span(
-            "torchslicer.worker.backward",
-            batch_id=batch_id,
-            worker=socket.gethostname(),
-            is_last=False,
-        ):
-            grad = self.layer.backward(prev_g=grad_in, out=out)
-            self.layer.optimize()
-        del out
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
-        self._send_backward(batch_id, grad)
+            if cached is None:
+                print(f"[backward] WARNING: no cached output for batch_id={batch_id}")
+                return
 
-    def _run_backward_last(self, batch_id: int, out: torch.Tensor, label: torch.Tensor):
-        with _tracer.span(
-            "torchslicer.worker.forward",
-            batch_id=batch_id,
-            worker=socket.gethostname(),
-            is_last=True,
-            input_shape=str(tuple(out.shape)),
-        ):
-            loss = self.loss_fn(out, label)
+            out, x_ref = cached
 
-        self._coord_stub.report_metrics(coordinator_service_pb2.MetricsMessage(
-            batch_id=batch_id, loss=loss.item(), worker=socket.gethostname()))
+            with _tracer.span(
+                "torchslicer.worker.backward",
+                batch_id=batch_id,
+                worker=socket.gethostname(),
+                is_last=False,
+            ):
+                # Propagate gradient through this partition; use saved x_ref
+                # so we get the correct cut-point gradient even after subsequent
+                # micro-batch forwards overwrote self.layer.x
+                out.backward(grad_in)
+                grad = x_ref.grad
+                if is_last_micro:
+                    self.layer.optimize()
 
-        with _tracer.span(
-            "torchslicer.worker.backward",
-            batch_id=batch_id,
-            worker=socket.gethostname(),
-            is_last=True,
-            loss=loss.item(),
-        ):
-            grad = self.layer.backward(loss=loss)
-            self.layer.optimize()
-        del out, label, loss
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
-        self._send_backward(batch_id, grad)
+            del out
+            if is_last_micro and self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            self._send_backward(batch_id, grad, is_last_micro)
+        except Exception as e:
+            print(f"[backward] ERROR batch_id={request.batch_id}: {e}")
+            import traceback; traceback.print_exc()
 
-    def _send_backward(self, batch_id: int, grad: torch.Tensor):
+    def _run_backward_last(self, batch_id: int, out: torch.Tensor,
+                           x_ref: torch.Tensor, label: torch.Tensor):
+        try:
+            n_micro   = self._n_micro
+            is_last_micro = (n_micro <= 1) or (batch_id % n_micro == n_micro - 1)
+            full_batch_id = batch_id // n_micro if n_micro > 1 else batch_id
+
+            loss_unscaled = self.loss_fn(out, label)
+            # Scale loss by 1/M so accumulated gradients match full-batch magnitude
+            loss = loss_unscaled / n_micro
+
+            with self._lock:
+                self._micro_losses[full_batch_id] = (
+                    self._micro_losses.get(full_batch_id, 0.0) + loss_unscaled.item()
+                )
+
+            if is_last_micro:
+                avg_loss = self._micro_losses.pop(full_batch_id) / n_micro
+                self._coord_stub.report_metrics(coordinator_service_pb2.MetricsMessage(
+                    batch_id=batch_id, loss=avg_loss, worker=socket.gethostname()))
+
+            with _tracer.span(
+                "torchslicer.worker.backward",
+                batch_id=batch_id,
+                worker=socket.gethostname(),
+                is_last=True,
+                loss=loss_unscaled.item(),
+            ):
+                loss.backward()
+                grad = x_ref.grad   # use saved x_ref, not self.layer.x
+                if is_last_micro:
+                    self.layer.optimize()
+
+            del out, label, loss, loss_unscaled
+            if is_last_micro and self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            self._send_backward(batch_id, grad, is_last_micro)
+        except Exception as e:
+            print(f"[backward_last] ERROR batch_id={batch_id}: {e}")
+            import traceback; traceback.print_exc()
+
+    def _send_backward(self, batch_id: int, grad: torch.Tensor, is_last_micro: bool = True):
         if self._prev_stub:
             self._prev_stub.backward(worker_service_pb2.BackwardRequest(
                 batch_id=batch_id,
                 gradient=serialize_tensor(grad),
             ))
-        else:
+        elif is_last_micro:
+            # First worker signals batch_done only on the last micro-batch
             self._coord_stub.batch_done(coordinator_service_pb2.BatchDoneRequest(
                 batch_id=batch_id))
 
@@ -289,7 +349,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
 # ── entrypoint ─────────────────────────────────────────────────────────────────
 
 def serve():
-    _tracer.auto_configure_if_env()   # no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set
+    _tracer.auto_configure_if_env()
     port = sys.argv[1] if len(sys.argv) > 1 else "50051"
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10), options=_GRPC_OPTS)
     worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(

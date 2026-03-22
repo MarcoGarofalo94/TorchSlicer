@@ -14,15 +14,15 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n6torchslicer/transport/grpc/worker/worker_service.proto\x12\x12torchslicer.worker\"O\n\x06Tensor\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\r\n\x05shape\x18\x02 \x03(\x03\x12(\n\x05\x64type\x18\x03 \x01(\x0e\x32\x19.torchslicer.worker.DType\"5\n\x0bLayerConfig\x12\x12\n\nlayer_type\x18\x01 \x01(\t\x12\x12\n\nserialized\x18\x02 \x01(\x0c\"A\n\x0fOptimizerConfig\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\n\n\x02lr\x18\x02 \x01(\x02\x12\x14\n\x0c\x65xtra_params\x18\x03 \x01(\x0c\"5\n\x0f\x43riterionConfig\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x14\n\x0c\x65xtra_params\x18\x02 \x01(\x0c\"\x91\x02\n\x0bSliceConfig\x12/\n\x06layers\x18\x01 \x03(\x0b\x32\x1f.torchslicer.worker.LayerConfig\x12\x36\n\toptimizer\x18\x02 \x01(\x0b\x32#.torchslicer.worker.OptimizerConfig\x12;\n\tcriterion\x18\x03 \x01(\x0b\x32#.torchslicer.worker.CriterionConfigH\x00\x88\x01\x01\x12\x0f\n\x07is_last\x18\x04 \x01(\x08\x12\x13\n\x0bprev_worker\x18\x05 \x01(\t\x12\x13\n\x0bnext_worker\x18\x06 \x01(\t\x12\x13\n\x0b\x63oordinator\x18\x07 \x01(\tB\x0c\n\n_criterion\"x\n\x0e\x46orwardRequest\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\x12)\n\x05input\x18\x02 \x01(\x0b\x32\x1a.torchslicer.worker.Tensor\x12)\n\x05label\x18\x03 \x01(\x0b\x32\x1a.torchslicer.worker.Tensor\"Q\n\x0f\x42\x61\x63kwardRequest\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\x12,\n\x08gradient\x18\x02 \x01(\x0b\x32\x1a.torchslicer.worker.Tensor\"\x17\n\x03\x41\x63k\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\">\n\rStatusMessage\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x10\n\x08hostname\x18\x03 \x01(\t*R\n\x05\x44Type\x12\x0b\n\x07\x46LOAT32\x10\x00\x12\x0b\n\x07\x46LOAT16\x10\x01\x12\x0c\n\x08\x42\x46LOAT16\x10\x02\x12\x0b\n\x07\x46LOAT64\x10\x03\x12\t\n\x05INT64\x10\x04\x12\t\n\x05INT32\x10\x05\x32\xed\x01\n\rWorkerService\x12J\n\x04init\x12\x1f.torchslicer.worker.SliceConfig\x1a!.torchslicer.worker.StatusMessage\x12\x46\n\x07\x66orward\x12\".torchslicer.worker.ForwardRequest\x1a\x17.torchslicer.worker.Ack\x12H\n\x08\x62\x61\x63kward\x12#.torchslicer.worker.BackwardRequest\x1a\x17.torchslicer.worker.Ackb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n6torchslicer/transport/grpc/worker/worker_service.proto\x12\x12torchslicer.worker\"O\n\x06Tensor\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\r\n\x05shape\x18\x02 \x03(\x03\x12(\n\x05\x64type\x18\x03 \x01(\x0e\x32\x19.torchslicer.worker.DType\"5\n\x0bLayerConfig\x12\x12\n\nlayer_type\x18\x01 \x01(\t\x12\x12\n\nserialized\x18\x02 \x01(\x0c\"A\n\x0fOptimizerConfig\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\n\n\x02lr\x18\x02 \x01(\x02\x12\x14\n\x0c\x65xtra_params\x18\x03 \x01(\x0c\"5\n\x0f\x43riterionConfig\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x14\n\x0c\x65xtra_params\x18\x02 \x01(\x0c\"\xa2\x02\n\x0bSliceConfig\x12/\n\x06layers\x18\x01 \x03(\x0b\x32\x1f.torchslicer.worker.LayerConfig\x12\x36\n\toptimizer\x18\x02 \x01(\x0b\x32#.torchslicer.worker.OptimizerConfig\x12;\n\tcriterion\x18\x03 \x01(\x0b\x32#.torchslicer.worker.CriterionConfigH\x00\x88\x01\x01\x12\x0f\n\x07is_last\x18\x04 \x01(\x08\x12\x13\n\x0bprev_worker\x18\x05 \x01(\t\x12\x13\n\x0bnext_worker\x18\x06 \x01(\t\x12\x13\n\x0b\x63oordinator\x18\x07 \x01(\t\x12\x0f\n\x07n_micro\x18\x08 \x01(\rB\x0c\n\n_criterion\"x\n\x0e\x46orwardRequest\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\x12)\n\x05input\x18\x02 \x01(\x0b\x32\x1a.torchslicer.worker.Tensor\x12)\n\x05label\x18\x03 \x01(\x0b\x32\x1a.torchslicer.worker.Tensor\"Q\n\x0f\x42\x61\x63kwardRequest\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\x12,\n\x08gradient\x18\x02 \x01(\x0b\x32\x1a.torchslicer.worker.Tensor\"\x17\n\x03\x41\x63k\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\">\n\rStatusMessage\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x10\n\x08hostname\x18\x03 \x01(\t*R\n\x05\x44Type\x12\x0b\n\x07\x46LOAT32\x10\x00\x12\x0b\n\x07\x46LOAT16\x10\x01\x12\x0c\n\x08\x42\x46LOAT16\x10\x02\x12\x0b\n\x07\x46LOAT64\x10\x03\x12\t\n\x05INT64\x10\x04\x12\t\n\x05INT32\x10\x05\x32\xed\x01\n\rWorkerService\x12J\n\x04init\x12\x1f.torchslicer.worker.SliceConfig\x1a!.torchslicer.worker.StatusMessage\x12\x46\n\x07\x66orward\x12\".torchslicer.worker.ForwardRequest\x1a\x17.torchslicer.worker.Ack\x12H\n\x08\x62\x61\x63kward\x12#.torchslicer.worker.BackwardRequest\x1a\x17.torchslicer.worker.Ackb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'torchslicer.transport.grpc.worker.worker_service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_DTYPE']._serialized_start=906
-  _globals['_DTYPE']._serialized_end=988
+  _globals['_DTYPE']._serialized_start=923
+  _globals['_DTYPE']._serialized_end=1005
   _globals['_TENSOR']._serialized_start=78
   _globals['_TENSOR']._serialized_end=157
   _globals['_LAYERCONFIG']._serialized_start=159
@@ -32,15 +32,15 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CRITERIONCONFIG']._serialized_start=281
   _globals['_CRITERIONCONFIG']._serialized_end=334
   _globals['_SLICECONFIG']._serialized_start=337
-  _globals['_SLICECONFIG']._serialized_end=610
-  _globals['_FORWARDREQUEST']._serialized_start=612
-  _globals['_FORWARDREQUEST']._serialized_end=732
-  _globals['_BACKWARDREQUEST']._serialized_start=734
-  _globals['_BACKWARDREQUEST']._serialized_end=815
-  _globals['_ACK']._serialized_start=817
-  _globals['_ACK']._serialized_end=840
-  _globals['_STATUSMESSAGE']._serialized_start=842
-  _globals['_STATUSMESSAGE']._serialized_end=904
-  _globals['_WORKERSERVICE']._serialized_start=991
-  _globals['_WORKERSERVICE']._serialized_end=1228
+  _globals['_SLICECONFIG']._serialized_end=627
+  _globals['_FORWARDREQUEST']._serialized_start=629
+  _globals['_FORWARDREQUEST']._serialized_end=749
+  _globals['_BACKWARDREQUEST']._serialized_start=751
+  _globals['_BACKWARDREQUEST']._serialized_end=832
+  _globals['_ACK']._serialized_start=834
+  _globals['_ACK']._serialized_end=857
+  _globals['_STATUSMESSAGE']._serialized_start=859
+  _globals['_STATUSMESSAGE']._serialized_end=921
+  _globals['_WORKERSERVICE']._serialized_start=1008
+  _globals['_WORKERSERVICE']._serialized_end=1245
 # @@protoc_insertion_point(module_scope)

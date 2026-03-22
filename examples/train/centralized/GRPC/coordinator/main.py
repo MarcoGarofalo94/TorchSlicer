@@ -1,3 +1,4 @@
+import os
 import sys
 import torch
 import torch.nn as nn
@@ -36,9 +37,10 @@ def serve():
     tracer.auto_configure_if_env()
     port = sys.argv[1] if len(sys.argv) > 1 else "50054"
 
+    n_workers = int(os.environ.get("N_WORKERS", 2))
     workers = [
-        {"name": "worker1", "address": "worker1", "port": "50051"},
-        {"name": "worker2", "address": "worker2", "port": "50051"},
+        {"name": f"worker{i}", "address": f"worker{i}", "port": "50051"}
+        for i in range(1, n_workers + 1)
     ]
     optimizer_cfg = {"name": "SGD",  "params": {"lr": 0.05, "momentum": 0.9, "weight_decay": 5e-4}}
     criterion_cfg = {"name": "CrossEntropyLoss", "params": {}}
@@ -48,7 +50,11 @@ def serve():
         coordinator_addr=f"coordinator:{port}",
     )
     sliced = ts.slice(build_model(), strategy="uniform", n=len(workers), executor=executor)
-    sliced.train(get_dataset(), optimizer_cfg, criterion_cfg, epochs=20, verbose=True)
+    epochs    = int(os.environ.get("EPOCHS", 20))
+    use_gpipe = os.environ.get("USE_GPIPE", "0").lower() in ("1", "true", "yes")
+    n_micro   = int(os.environ.get("N_MICRO", "4"))
+    sliced.train(get_dataset(), optimizer_cfg, criterion_cfg, epochs=epochs, verbose=True,
+                 use_gpipe=use_gpipe, n_micro_batches=n_micro)
 
 
 if __name__ == '__main__':
