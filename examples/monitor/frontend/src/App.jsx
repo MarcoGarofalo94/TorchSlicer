@@ -22,7 +22,7 @@ export default function App() {
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: C.bg, color: C.text }}>
       <Header connected={connected} lastUpdate={lastUpdate} epochs={data.epochs} batches={data.batches} />
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
-        <TopologyPanel topology={data.topology} />
+        <TopologyPanel topology={data.topology} batches={data.batches} />
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
           <TabBar active={tab} onChange={setTab} />
           {tab === 'Training' && <TrainingTab  epochs={data.epochs} batches={data.batches} topology={data.topology} />}
