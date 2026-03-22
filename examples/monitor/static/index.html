@@ -66,13 +66,16 @@
   }
 
   /* topology spans both top rows */
-  #topo-panel  { grid-column: 1; grid-row: 1 / 3; }
+  #topo-panel  { grid-column: 1; grid-row: 1 / 3; overflow-y: auto; overflow-x: hidden; }
   #swim-panel  { grid-column: 2; grid-row: 1; }
-  #hist-panel  { grid-column: 2; grid-row: 2; overflow-y: auto; }
+  #hist-panel  { grid-column: 2; grid-row: 2; overflow: hidden; }
   #loss-panel  { grid-column: 1 / 3; grid-row: 3; }
 
   /* ── topology SVG ──────────────────────────────────────────── */
-  #topo-svg { flex: 1; width: 100%; display: block; }
+  #topo-svg { width: 100%; display: block; overflow: visible; }
+
+  /* ── history scroll wrapper ────────────────────────────────── */
+  .hist-scroll { flex: 1; overflow-y: auto; min-height: 0; }
 
   /* ── swimlane ──────────────────────────────────────────────── */
   #swim-panel { padding-bottom: 8px; }
@@ -85,9 +88,10 @@
 
   /* ── history table ─────────────────────────────────────────── */
   table  { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
-  thead  { position: sticky; top: 0; z-index: 1; }
+  thead  { position: sticky; top: 0; z-index: 2; }
   th     { padding: 4px 10px; text-align: left; color: var(--muted); font-size: 10px;
-           font-weight: 500; background: var(--bg); border-bottom: 1px solid var(--border); }
+           font-weight: 500; background: var(--bg); border-bottom: 1px solid var(--border);
+           box-shadow: 0 1px 0 var(--border); }
   td     { padding: 3px 10px; border-bottom: 1px solid rgba(48,54,61,.35); }
   tr:hover td { background: rgba(88,166,255,.04); }
   tr:last-child td { border-bottom: none; }
@@ -105,7 +109,11 @@
 <body>
 
 <header>
-  <h1>Torch<em>Slicer</em> Monitor</h1>
+  <h1>
+    <img src="https://github.com/MarcoGarofalo94/TorchSlicer/assets/47697181/3b9d71dc-64f0-4adb-ab32-40576593f532"
+         width="22" height="22" style="vertical-align:middle;margin-right:8px;border-radius:4px"/>
+    Torch<em>Slicer</em> Monitor
+  </h1>
   <div class="hdr-right">
     <div id="stat-time"></div>
     <div style="display:flex;align-items:center;gap:6px">
@@ -153,7 +161,9 @@
   <!-- history -->
   <div class="panel" id="hist-panel">
     <div class="panel-title">Batch History</div>
-    <table><thead><tr id="t-head"></tr></thead><tbody id="t-body"></tbody></table>
+    <div class="hist-scroll">
+      <table><thead><tr id="t-head"></tr></thead><tbody id="t-body"></tbody></table>
+    </div>
   </div>
 
   <!-- loss -->
@@ -216,15 +226,15 @@ function renderTopology(topology) {
   const svg  = $('topo-svg');
   const rect = svg.getBoundingClientRect();
   const W    = rect.width  || 260;
-  const H    = rect.height || 400;
 
-  const BW     = Math.min(200, W - 60);  // box width
+  // Leave 44px on each side for arrow labels so "fwd"/"bwd" never clip
+  const BW     = Math.min(W - 88, 180);
   const BH_MIN = 72;
   const LH     = 14;    // per-layer line height
   const GAP    = 56;    // vertical gap between boxes
   const CX     = W / 2;
-  const ARROW_X_R = CX + BW / 2 + 18;   // right arrow X
-  const ARROW_X_L = CX - BW / 2 - 18;   // left arrow X
+  const ARROW_X_R = CX + BW / 2 + 14;   // right arrow X
+  const ARROW_X_L = CX - BW / 2 - 14;   // left arrow X
 
   // Compute heights
   const allNodes = [null, ...topology];  // null = coordinator slot
@@ -236,6 +246,10 @@ function renderTopology(topology) {
   const ys = [];
   let y = 20;
   heights.forEach(h => { ys.push(y); y += h + GAP; });
+
+  // Set SVG height so topo-panel can scroll when many workers
+  const totalH = y - GAP + 20;
+  svg.setAttribute('height', totalH);
 
   // ── draw coordinator ──────────────────────────────────────────
   drawBox(g, CX, ys[0], BW, heights[0], '#bc8cff', 'Coordinator', null, 'orchestrates training loop');
