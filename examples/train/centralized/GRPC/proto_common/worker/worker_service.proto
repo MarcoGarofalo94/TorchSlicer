@@ -1,64 +1,81 @@
 syntax = "proto3";
 
-package tensor;
-
-import "google/protobuf/struct.proto";
-
+package torchslicer.worker;
 
 service WorkerService {
-
-    rpc init (Config) returns (LogMessage);
-
-    rpc set_label(Tensor) returns (LogMessage);
-
-    rpc forward(ForwardMessage) returns (ForwardStatusMessage);
-
-    rpc backward(BackwardMessage) returns (BackwardStatusMessage);
+    rpc init     (SliceConfig)      returns (StatusMessage);
+    rpc forward  (ForwardRequest)   returns (Ack);
+    rpc backward (BackwardRequest)  returns (Ack);
 }
 
-message TensorMessage {
-    Tensor tensor = 1;
-}
+// ── tensor ────────────────────────────────────────────────────────────────────
 
-message Config {
-    repeated google.protobuf.Struct layers = 1;
-    optional google.protobuf.Struct criterion = 3;
-    google.protobuf.Struct optimizer = 4;
-    optional bool is_last = 5; 
-    optional string prev_layer = 6;
-    optional string next_layer = 7;
-    optional bool init_state_dict = 8;
+enum DType {
+    FLOAT32 = 0;
+    FLOAT16 = 1;
+    BFLOAT16 = 2;
+    FLOAT64 = 3;
+    INT64   = 4;
+    INT32   = 5;
 }
 
 message Tensor {
-    bytes data = 1;
+    bytes        data   = 1;  // torch.save() serialised bytes
+    repeated int64 shape = 2;  // original shape for validation
+    DType        dtype  = 3;
 }
 
-message ForwardMessage {
-    Tensor input = 1;
-    optional Tensor label = 2;
-    // optional string prev_layer = 3;
-    // optional string next_layer = 4;
+// ── layer description ─────────────────────────────────────────────────────────
+
+message LayerConfig {
+    string layer_type  = 1;  // class name for logging, e.g. "Linear", "Conv2d"
+    bytes  serialized  = 2;  // torch.save(layer) — architecture + weights bundled
 }
 
-message BackwardMessage {
-    Tensor gradient = 1;
-    // optional string prev_layer = 2;
-    // optional Tensor label = 2;
+// ── init ──────────────────────────────────────────────────────────────────────
+
+message OptimizerConfig {
+    string name = 1;
+    float  lr   = 2;
+    bytes  extra_params = 3;  // torch.save(dict) for momentum, weight_decay, etc.
 }
 
-message LogMessage {
-    string message = 1;
-    string hostname = 2;
-    string ip_addr = 3;
+message CriterionConfig {
+    string name         = 1;
+    bytes  extra_params = 2;  // torch.save(dict) for label_smoothing, etc.
 }
 
-message ForwardStatusMessage {
-    optional string status = 1;
-    optional string message = 2;
+message SliceConfig {
+    repeated LayerConfig layers    = 1;
+    OptimizerConfig      optimizer = 2;
+    optional CriterionConfig criterion = 3;  // only set on the last worker
+    bool    is_last                = 4;
+    string  prev_worker            = 5;  // host:port, empty if first
+    string  next_worker            = 6;  // host:port, empty if last
+    string  coordinator            = 7;  // host:port
 }
 
-message BackwardStatusMessage {
-    optional string status = 1;
-    optional string message = 2;
+// ── forward / backward ────────────────────────────────────────────────────────
+
+message ForwardRequest {
+    uint32 batch_id = 1;  // monotonic counter, used to match backward
+    Tensor input    = 2;
+    Tensor label    = 3;  // only sent to the last worker
+}
+
+message BackwardRequest {
+    uint32 batch_id  = 1;
+    Tensor gradient  = 2;
+}
+
+// ── responses ─────────────────────────────────────────────────────────────────
+
+message Ack {
+    uint32 batch_id = 1;
+}
+
+message StatusMessage {
+    bool   ok      = 1;
+    string message = 2;
+    string hostname = 3;
 }

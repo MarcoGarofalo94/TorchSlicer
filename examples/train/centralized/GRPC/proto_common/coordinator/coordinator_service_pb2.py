@@ -14,17 +14,19 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n2proto_common/coordinator/coordinator_service.proto\x12\x06tensor\"\x07\n\x05\x45mpty\"\r\n\x0bLossMessage2q\n\x12\x43oordinatorService\x12*\n\nbatch_done\x12\r.tensor.Empty\x1a\r.tensor.Empty\x12/\n\tshow_loss\x12\x13.tensor.LossMessage\x1a\r.tensor.Emptyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n2proto_common/coordinator/coordinator_service.proto\x12\x17torchslicer.coordinator\"\x07\n\x05\x45mpty\"$\n\x10\x42\x61tchDoneRequest\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\"@\n\x0eMetricsMessage\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\x12\x0c\n\x04loss\x18\x02 \x01(\x02\x12\x0e\n\x06worker\x18\x03 \x01(\t2\xc8\x01\n\x12\x43oordinatorService\x12W\n\nbatch_done\x12).torchslicer.coordinator.BatchDoneRequest\x1a\x1e.torchslicer.coordinator.Empty\x12Y\n\x0ereport_metrics\x12\'.torchslicer.coordinator.MetricsMessage\x1a\x1e.torchslicer.coordinator.Emptyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'proto_common.coordinator.coordinator_service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_EMPTY']._serialized_start=62
-  _globals['_EMPTY']._serialized_end=69
-  _globals['_LOSSMESSAGE']._serialized_start=71
-  _globals['_LOSSMESSAGE']._serialized_end=84
-  _globals['_COORDINATORSERVICE']._serialized_start=86
-  _globals['_COORDINATORSERVICE']._serialized_end=199
+  _globals['_EMPTY']._serialized_start=79
+  _globals['_EMPTY']._serialized_end=86
+  _globals['_BATCHDONEREQUEST']._serialized_start=88
+  _globals['_BATCHDONEREQUEST']._serialized_end=124
+  _globals['_METRICSMESSAGE']._serialized_start=126
+  _globals['_METRICSMESSAGE']._serialized_end=190
+  _globals['_COORDINATORSERVICE']._serialized_start=193
+  _globals['_COORDINATORSERVICE']._serialized_end=393
 # @@protoc_insertion_point(module_scope)

@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from worker import worker_service_pb2 as worker_dot_worker__service__pb2
+from proto_common.worker import worker_service_pb2 as proto__common_dot_worker_dot_worker__service__pb2
 
 GRPC_GENERATED_VERSION = '1.64.0'
 GRPC_VERSION = grpc.__version__
@@ -20,7 +20,7 @@ except ImportError:
 if _version_not_supported:
     warnings.warn(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in worker/worker_service_pb2_grpc.py depends on'
+        + f' but the generated code in proto_common/worker/worker_service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -40,24 +40,19 @@ class WorkerServiceStub(object):
             channel: A grpc.Channel.
         """
         self.init = channel.unary_unary(
-                '/tensor.WorkerService/init',
-                request_serializer=worker_dot_worker__service__pb2.Config.SerializeToString,
-                response_deserializer=worker_dot_worker__service__pb2.LogMessage.FromString,
-                _registered_method=True)
-        self.set_label = channel.unary_unary(
-                '/tensor.WorkerService/set_label',
-                request_serializer=worker_dot_worker__service__pb2.Tensor.SerializeToString,
-                response_deserializer=worker_dot_worker__service__pb2.LogMessage.FromString,
+                '/torchslicer.worker.WorkerService/init',
+                request_serializer=proto__common_dot_worker_dot_worker__service__pb2.SliceConfig.SerializeToString,
+                response_deserializer=proto__common_dot_worker_dot_worker__service__pb2.StatusMessage.FromString,
                 _registered_method=True)
         self.forward = channel.unary_unary(
-                '/tensor.WorkerService/forward',
-                request_serializer=worker_dot_worker__service__pb2.ForwardMessage.SerializeToString,
-                response_deserializer=worker_dot_worker__service__pb2.ForwardStatusMessage.FromString,
+                '/torchslicer.worker.WorkerService/forward',
+                request_serializer=proto__common_dot_worker_dot_worker__service__pb2.ForwardRequest.SerializeToString,
+                response_deserializer=proto__common_dot_worker_dot_worker__service__pb2.Ack.FromString,
                 _registered_method=True)
         self.backward = channel.unary_unary(
-                '/tensor.WorkerService/backward',
-                request_serializer=worker_dot_worker__service__pb2.BackwardMessage.SerializeToString,
-                response_deserializer=worker_dot_worker__service__pb2.BackwardStatusMessage.FromString,
+                '/torchslicer.worker.WorkerService/backward',
+                request_serializer=proto__common_dot_worker_dot_worker__service__pb2.BackwardRequest.SerializeToString,
+                response_deserializer=proto__common_dot_worker_dot_worker__service__pb2.Ack.FromString,
                 _registered_method=True)
 
 
@@ -65,12 +60,6 @@ class WorkerServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def init(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def set_label(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -93,29 +82,24 @@ def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'init': grpc.unary_unary_rpc_method_handler(
                     servicer.init,
-                    request_deserializer=worker_dot_worker__service__pb2.Config.FromString,
-                    response_serializer=worker_dot_worker__service__pb2.LogMessage.SerializeToString,
-            ),
-            'set_label': grpc.unary_unary_rpc_method_handler(
-                    servicer.set_label,
-                    request_deserializer=worker_dot_worker__service__pb2.Tensor.FromString,
-                    response_serializer=worker_dot_worker__service__pb2.LogMessage.SerializeToString,
+                    request_deserializer=proto__common_dot_worker_dot_worker__service__pb2.SliceConfig.FromString,
+                    response_serializer=proto__common_dot_worker_dot_worker__service__pb2.StatusMessage.SerializeToString,
             ),
             'forward': grpc.unary_unary_rpc_method_handler(
                     servicer.forward,
-                    request_deserializer=worker_dot_worker__service__pb2.ForwardMessage.FromString,
-                    response_serializer=worker_dot_worker__service__pb2.ForwardStatusMessage.SerializeToString,
+                    request_deserializer=proto__common_dot_worker_dot_worker__service__pb2.ForwardRequest.FromString,
+                    response_serializer=proto__common_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
             ),
             'backward': grpc.unary_unary_rpc_method_handler(
                     servicer.backward,
-                    request_deserializer=worker_dot_worker__service__pb2.BackwardMessage.FromString,
-                    response_serializer=worker_dot_worker__service__pb2.BackwardStatusMessage.SerializeToString,
+                    request_deserializer=proto__common_dot_worker_dot_worker__service__pb2.BackwardRequest.FromString,
+                    response_serializer=proto__common_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'tensor.WorkerService', rpc_method_handlers)
+            'torchslicer.worker.WorkerService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('tensor.WorkerService', rpc_method_handlers)
+    server.add_registered_method_handlers('torchslicer.worker.WorkerService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -136,36 +120,9 @@ class WorkerService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/tensor.WorkerService/init',
-            worker_dot_worker__service__pb2.Config.SerializeToString,
-            worker_dot_worker__service__pb2.LogMessage.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def set_label(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/tensor.WorkerService/set_label',
-            worker_dot_worker__service__pb2.Tensor.SerializeToString,
-            worker_dot_worker__service__pb2.LogMessage.FromString,
+            '/torchslicer.worker.WorkerService/init',
+            proto__common_dot_worker_dot_worker__service__pb2.SliceConfig.SerializeToString,
+            proto__common_dot_worker_dot_worker__service__pb2.StatusMessage.FromString,
             options,
             channel_credentials,
             insecure,
@@ -190,9 +147,9 @@ class WorkerService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/tensor.WorkerService/forward',
-            worker_dot_worker__service__pb2.ForwardMessage.SerializeToString,
-            worker_dot_worker__service__pb2.ForwardStatusMessage.FromString,
+            '/torchslicer.worker.WorkerService/forward',
+            proto__common_dot_worker_dot_worker__service__pb2.ForwardRequest.SerializeToString,
+            proto__common_dot_worker_dot_worker__service__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,
@@ -217,9 +174,9 @@ class WorkerService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/tensor.WorkerService/backward',
-            worker_dot_worker__service__pb2.BackwardMessage.SerializeToString,
-            worker_dot_worker__service__pb2.BackwardStatusMessage.FromString,
+            '/torchslicer.worker.WorkerService/backward',
+            proto__common_dot_worker_dot_worker__service__pb2.BackwardRequest.SerializeToString,
+            proto__common_dot_worker_dot_worker__service__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,

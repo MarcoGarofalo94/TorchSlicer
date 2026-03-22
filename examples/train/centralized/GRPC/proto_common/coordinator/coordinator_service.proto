@@ -1,18 +1,20 @@
 syntax = "proto3";
 
-package tensor;
+package torchslicer.coordinator;
 
 service CoordinatorService {
-
-    rpc batch_done(Empty) returns (Empty);
-
-    rpc show_loss(LossMessage) returns (Empty);
+    rpc batch_done (BatchDoneRequest) returns (Empty);
+    rpc report_metrics (MetricsMessage) returns (Empty);
 }
 
-message Empty {
+message Empty {}
 
+message BatchDoneRequest {
+    uint32 batch_id = 1;
 }
 
-message LossMessage {
-    
+message MetricsMessage {
+    uint32 batch_id = 1;
+    float  loss     = 2;
+    string worker   = 3;
 }

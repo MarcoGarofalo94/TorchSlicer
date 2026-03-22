@@ -40,13 +40,13 @@ class CoordinatorServiceStub(object):
             channel: A grpc.Channel.
         """
         self.batch_done = channel.unary_unary(
-                '/tensor.CoordinatorService/batch_done',
-                request_serializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.Empty.SerializeToString,
+                '/torchslicer.coordinator.CoordinatorService/batch_done',
+                request_serializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.BatchDoneRequest.SerializeToString,
                 response_deserializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.Empty.FromString,
                 _registered_method=True)
-        self.show_loss = channel.unary_unary(
-                '/tensor.CoordinatorService/show_loss',
-                request_serializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.LossMessage.SerializeToString,
+        self.report_metrics = channel.unary_unary(
+                '/torchslicer.coordinator.CoordinatorService/report_metrics',
+                request_serializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.MetricsMessage.SerializeToString,
                 response_deserializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.Empty.FromString,
                 _registered_method=True)
 
@@ -60,7 +60,7 @@ class CoordinatorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def show_loss(self, request, context):
+    def report_metrics(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -71,19 +71,19 @@ def add_CoordinatorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'batch_done': grpc.unary_unary_rpc_method_handler(
                     servicer.batch_done,
-                    request_deserializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.Empty.FromString,
+                    request_deserializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.BatchDoneRequest.FromString,
                     response_serializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.Empty.SerializeToString,
             ),
-            'show_loss': grpc.unary_unary_rpc_method_handler(
-                    servicer.show_loss,
-                    request_deserializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.LossMessage.FromString,
+            'report_metrics': grpc.unary_unary_rpc_method_handler(
+                    servicer.report_metrics,
+                    request_deserializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.MetricsMessage.FromString,
                     response_serializer=proto__common_dot_coordinator_dot_coordinator__service__pb2.Empty.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'tensor.CoordinatorService', rpc_method_handlers)
+            'torchslicer.coordinator.CoordinatorService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('tensor.CoordinatorService', rpc_method_handlers)
+    server.add_registered_method_handlers('torchslicer.coordinator.CoordinatorService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -104,8 +104,8 @@ class CoordinatorService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/tensor.CoordinatorService/batch_done',
-            proto__common_dot_coordinator_dot_coordinator__service__pb2.Empty.SerializeToString,
+            '/torchslicer.coordinator.CoordinatorService/batch_done',
+            proto__common_dot_coordinator_dot_coordinator__service__pb2.BatchDoneRequest.SerializeToString,
             proto__common_dot_coordinator_dot_coordinator__service__pb2.Empty.FromString,
             options,
             channel_credentials,
@@ -118,7 +118,7 @@ class CoordinatorService(object):
             _registered_method=True)
 
     @staticmethod
-    def show_loss(request,
+    def report_metrics(request,
             target,
             options=(),
             channel_credentials=None,
@@ -131,8 +131,8 @@ class CoordinatorService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/tensor.CoordinatorService/show_loss',
-            proto__common_dot_coordinator_dot_coordinator__service__pb2.LossMessage.SerializeToString,
+            '/torchslicer.coordinator.CoordinatorService/report_metrics',
+            proto__common_dot_coordinator_dot_coordinator__service__pb2.MetricsMessage.SerializeToString,
             proto__common_dot_coordinator_dot_coordinator__service__pb2.Empty.FromString,
             options,
             channel_credentials,
