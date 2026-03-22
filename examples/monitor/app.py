@@ -30,7 +30,6 @@ _here = os.path.dirname(os.path.abspath(__file__))
 _lock          = threading.Lock()
 _batches: dict[int, dict] = {}   # batch_id → batch dict (with workers merged in)
 _topology: list[dict]     = []
-_topology_ready           = False
 
 
 # ── Jaeger helpers ─────────────────────────────────────────────────────────────
@@ -55,47 +54,58 @@ def _ms(span: dict) -> float:
 def _fetch_topology() -> list[dict]:
     data = _get("/api/traces", service="torchslicer-worker",
                 operation="torchslicer.worker.init", limit=50)
-    workers: dict[str, dict] = {}
+    # host → (start_us, worker_dict) — keep most recent span per host
+    workers: dict[str, tuple] = {}
     for trace in data.get("data", []):
         for span in trace.get("spans", []):
             if span.get("operationName") != "torchslicer.worker.init":
                 continue
-            tags = _tags(span)
-            host = tags.get("worker", "unknown")
-            if host not in workers:
-                raw    = tags.get("layers", "")
-                layers = [l.strip().strip("'\"") for l in raw.split(",") if l.strip()]
-                workers[host] = {
-                    "hostname":     host,
-                    "layers":       layers,
-                    "n_layers":     int(tags.get("n_layers", len(layers))),
-                    "is_last":      tags.get("is_last") in (True, "True", "true"),
-                    "prev":         tags.get("prev_worker") or None,
-                    "next":         tags.get("next_worker") or None,
-                    "param_mb":     float(tags.get("param_mb", 0.0)),
-                    "cuda_alloc_mb": float(tags.get("cuda_alloc_mb", 0.0)),
-                }
+            tags     = _tags(span)
+            host     = tags.get("worker", "unknown")
+            start_us = span.get("startTime", 0)
+            if host in workers and workers[host][0] >= start_us:
+                continue  # already have a newer span for this host
+            raw    = tags.get("layers", "")
+            layers = [l.strip().strip("'\"") for l in raw.split(",") if l.strip()]
+            workers[host] = (start_us, {
+                "hostname":      host,
+                "layers":        layers,
+                "n_layers":      int(tags.get("n_layers", len(layers))),
+                "is_last":       tags.get("is_last") in (True, "True", "true"),
+                "prev":          tags.get("prev_worker") or None,
+                "next":          tags.get("next_worker") or None,
+                "param_mb":      float(tags.get("param_mb", 0.0)),
+                "cuda_alloc_mb": float(tags.get("cuda_alloc_mb", 0.0)),
+            })
 
-    # Order chain: start from worker with no prev
+    by_host = {h: v[1] for h, v in workers.items()}
+
+    # Pick the most recent first-worker (prev=None) to anchor the chain
+    starts_without_prev = [(workers[h][0], h) for h, w in by_host.items() if not w["prev"]]
+    if not starts_without_prev:
+        return []
+    _, anchor = max(starts_without_prev)
+
+    # Keep only workers whose start time is within 60s of the anchor
+    anchor_t = workers[anchor][0]
+    recent   = {h for h, (t, _) in workers.items() if abs(t - anchor_t) <= 60_000_000}
+    pool     = {h: w for h, w in by_host.items() if h in recent}
+
+    # Follow the chain from the anchor
     ordered, visited = [], set()
-    by_host = dict(workers)
-    cur = next((w for w in by_host.values() if not w["prev"]), None)
+    cur = pool[anchor]
     while cur and cur["hostname"] not in visited:
         ordered.append(cur)
         visited.add(cur["hostname"])
         if cur["is_last"]:
             break
-        # find next unvisited worker whose prev matches cur's next addr
         nxt_addr = cur.get("next") or ""
-        nxt = next((w for w in by_host.values()
+        nxt = next((w for w in pool.values()
                     if w["hostname"] not in visited
                     and w.get("prev") == nxt_addr), None)
-        if not nxt:  # fallback: any unvisited
-            nxt = next((w for w in by_host.values() if w["hostname"] not in visited), None)
+        if not nxt:  # fallback: any unvisited recent worker
+            nxt = next((w for w in pool.values() if w["hostname"] not in visited), None)
         cur = nxt
-    for w in by_host.values():
-        if w not in ordered:
-            ordered.append(w)
     return ordered
 
 
@@ -149,14 +159,12 @@ def _fetch_worker_spans() -> dict[int, dict]:
 # ── Merge into accumulator ─────────────────────────────────────────────────────
 
 def _poll_and_merge() -> None:
-    global _topology, _topology_ready
+    global _topology
 
-    if not _topology_ready:
-        topo = _fetch_topology()
-        if topo:
-            with _lock:
-                _topology = topo
-                _topology_ready = True
+    topo = _fetch_topology()
+    if topo:
+        with _lock:
+            _topology = topo
 
     coord_batches = _fetch_coordinator_batches()
     worker_spans  = _fetch_worker_spans()
