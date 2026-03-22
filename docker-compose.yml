@@ -1,4 +1,15 @@
 services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    container_name: jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # Jaeger UI  →  http://localhost:16686
+      - "4317:4317"     # OTLP gRPC  (services inside the network use jaeger:4317)
+    networks:
+      - torchslicer-net
+
   coordinator:
     build:
       context: .
@@ -6,6 +17,9 @@ services:
     container_name: coordinator
     environment:
       - PYTHONUNBUFFERED=1
+      # Remove or comment out the two OTEL_ lines to disable tracing entirely
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=torchslicer-coordinator
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
@@ -13,6 +27,7 @@ services:
     depends_on:
       - worker1
       - worker2
+      - jaeger
     networks:
       - torchslicer-net
 
@@ -23,6 +38,8 @@ services:
     container_name: worker1
     environment:
       - PYTHONUNBUFFERED=1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=torchslicer-worker
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
@@ -37,6 +54,8 @@ services:
     container_name: worker2
     environment:
       - PYTHONUNBUFFERED=1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=torchslicer-worker
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer

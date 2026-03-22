@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from .base import BaseExecutor
 from ..core.split_layer import SplitLayer
+from ..monitor import tracer
 
 
 class LocalExecutor(BaseExecutor):
@@ -28,26 +29,53 @@ class LocalExecutor(BaseExecutor):
         total_loss = 0.0
         n_batches = 0
         n_total = len(data_loader)
-        for inputs, labels in data_loader:
-            outputs = []
-            x = inputs
-            for sl in self.split_layers:
-                x = sl(x)
-                outputs.append(x)
 
-            loss = self.criterion(outputs[-1], labels)
-            total_loss += loss.item()
-            n_batches += 1
+        with tracer.span("torchslicer.epoch", epoch=epoch) as epoch_span:
+            for inputs, labels in data_loader:
+                batch_id = epoch * n_total + n_batches
 
-            grad = self.split_layers[-1].backward(loss=loss)
-            self.split_layers[-1].optimize()
+                with tracer.span(
+                    "torchslicer.batch",
+                    epoch=epoch,
+                    batch_id=batch_id,
+                    batch_index=n_batches,
+                    input_shape=str(tuple(inputs.shape)),
+                ) as batch_span:
 
-            for i in range(len(self.split_layers) - 2, -1, -1):
-                grad = self.split_layers[i].backward(prev_g=grad, out=outputs[i])
-                self.split_layers[i].optimize()
+                    # ── forward ──────────────────────────────────────────────
+                    outputs = []
+                    x = inputs
+                    for i, sl in enumerate(self.split_layers):
+                        with tracer.span(
+                            "torchslicer.partition.forward",
+                            partition=i,
+                            batch_id=batch_id,
+                            input_shape=str(tuple(x.shape)),
+                        ) as fwd_span:
+                            x = sl(x)
+                            if fwd_span:
+                                fwd_span.set_attribute("output_shape", str(tuple(x.shape)))
+                        outputs.append(x)
 
-            if verbose:
-                print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss.item():.4f}")
+                    loss = self.criterion(outputs[-1], labels)
+                    total_loss += loss.item()
+                    n_batches += 1
+                    if batch_span:
+                        batch_span.set_attribute("loss", loss.item())
+
+                    # ── backward ─────────────────────────────────────────────
+                    grad = None
+                    with tracer.span("torchslicer.partition.backward", partition=len(self.split_layers) - 1, batch_id=batch_id):
+                        grad = self.split_layers[-1].backward(loss=loss)
+                        self.split_layers[-1].optimize()
+
+                    for i in range(len(self.split_layers) - 2, -1, -1):
+                        with tracer.span("torchslicer.partition.backward", partition=i, batch_id=batch_id):
+                            grad = self.split_layers[i].backward(prev_g=grad, out=outputs[i])
+                            self.split_layers[i].optimize()
+
+                if verbose:
+                    print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss.item():.4f}")
 
         avg = total_loss / n_batches if n_batches > 0 else 0.0
         if verbose:

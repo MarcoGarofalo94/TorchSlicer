@@ -6,6 +6,13 @@ requirements = [
 
 extras = {
     'grpc': ['grpcio>=1.64.0', 'grpcio-tools>=1.64.0', 'protobuf'],
+    'monitor': [
+        'opentelemetry-api>=1.24.0',
+        'opentelemetry-sdk>=1.24.0',
+        'opentelemetry-exporter-otlp-proto-grpc>=1.24.0',
+        # optional — auto-propagates trace context across gRPC calls:
+        # 'opentelemetry-instrumentation-grpc>=0.45b0',
+    ],
 }
 
 setup(

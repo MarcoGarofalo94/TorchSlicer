@@ -13,6 +13,7 @@ from torchslicer.transport.grpc.coordinator import coordinator_service_pb2_grpc,
 from torchslicer.transport.grpc.worker import worker_service_pb2_grpc, worker_service_pb2
 
 from torchslicer.core.split_layer import SplitLayer
+from torchslicer.monitor import tracer as _tracer
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -115,7 +116,15 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
 
         # Non-last: run forward, send activation to next worker
         tensor = deserialize_tensor(request.input)
-        out = self.layer(tensor)
+        with _tracer.span(
+            "torchslicer.worker.forward",
+            batch_id=batch_id,
+            worker=socket.gethostname(),
+            input_shape=str(tuple(tensor.shape)),
+        ) as s:
+            out = self.layer(tensor)
+            if s:
+                s.set_attribute("output_shape", str(tuple(out.shape)))
         with self._lock:
             self._outputs[batch_id] = out
 
@@ -164,20 +173,40 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
             print(f"[backward] WARNING: no cached output for batch_id={batch_id}")
             return
 
-        grad = self.layer.backward(prev_g=grad_in, out=out)
-        self.layer.optimize()
+        with _tracer.span(
+            "torchslicer.worker.backward",
+            batch_id=batch_id,
+            worker=socket.gethostname(),
+            is_last=False,
+        ):
+            grad = self.layer.backward(prev_g=grad_in, out=out)
+            self.layer.optimize()
         self._send_backward(batch_id, grad)
 
     def _run_backward_last(self, batch_id: int, out: torch.Tensor, label: torch.Tensor):
-        loss = self.loss_fn(out, label)
+        with _tracer.span(
+            "torchslicer.worker.forward",
+            batch_id=batch_id,
+            worker=socket.gethostname(),
+            is_last=True,
+            input_shape=str(tuple(out.shape)),
+        ):
+            loss = self.loss_fn(out, label)
 
         coord = coordinator_service_pb2_grpc.CoordinatorServiceStub(
             grpc.insecure_channel(self.coordinator))
         coord.report_metrics(coordinator_service_pb2.MetricsMessage(
             batch_id=batch_id, loss=loss.item(), worker=socket.gethostname()))
 
-        grad = self.layer.backward(loss=loss)
-        self.layer.optimize()
+        with _tracer.span(
+            "torchslicer.worker.backward",
+            batch_id=batch_id,
+            worker=socket.gethostname(),
+            is_last=True,
+            loss=loss.item(),
+        ):
+            grad = self.layer.backward(loss=loss)
+            self.layer.optimize()
         self._send_backward(batch_id, grad)
 
     def _send_backward(self, batch_id: int, grad: torch.Tensor):
@@ -206,6 +235,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
 # ── entrypoint ─────────────────────────────────────────────────────────────────
 
 def serve():
+    _tracer.auto_configure_if_env()   # no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set
     port = sys.argv[1] if len(sys.argv) > 1 else "50051"
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(

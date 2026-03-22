@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from .base import BaseExecutor
+from ..monitor import tracer
 
 try:
     import grpc
@@ -222,23 +223,34 @@ class DistributedExecutor(BaseExecutor):
         n_batches = 0
         n_total = len(data_loader)
 
-        for inputs, labels in data_loader:
-            batch_id = epoch * n_total + n_batches
-            with self._lock:
-                self._batch_losses.clear()
-            self._batch_done.clear()
+        with tracer.span("torchslicer.epoch", epoch=epoch, n_workers=len(self._proxies)):
+            for inputs, labels in data_loader:
+                batch_id = epoch * n_total + n_batches
+                with self._lock:
+                    self._batch_losses.clear()
+                self._batch_done.clear()
 
-            self._send_batch(batch_id, inputs, labels)
-            self._batch_done.wait()
+                with tracer.span(
+                    "torchslicer.batch",
+                    epoch=epoch,
+                    batch_id=batch_id,
+                    batch_index=n_batches,
+                    input_shape=str(tuple(inputs.shape)),
+                ) as batch_span:
+                    self._send_batch(batch_id, inputs, labels)
+                    self._batch_done.wait()
 
-            with self._lock:
-                loss = sum(self._batch_losses) / len(self._batch_losses) \
-                    if self._batch_losses else 0.0
-            total_loss += loss
-            n_batches += 1
+                    with self._lock:
+                        loss = sum(self._batch_losses) / len(self._batch_losses) \
+                            if self._batch_losses else 0.0
+                    if batch_span:
+                        batch_span.set_attribute("loss", loss)
 
-            if verbose:
-                print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss:.4f}")
+                total_loss += loss
+                n_batches += 1
+
+                if verbose:
+                    print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss:.4f}")
 
         avg = total_loss / n_batches if n_batches > 0 else 0.0
         if verbose:

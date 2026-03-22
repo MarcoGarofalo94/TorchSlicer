@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import torchslicer as ts
 from torchslicer.executors.distributed import DistributedExecutor
+from torchslicer.monitor import tracer
 
 
 def get_dataset(batch_size=32):
@@ -15,6 +16,7 @@ def get_dataset(batch_size=32):
 
 
 def serve():
+    tracer.auto_configure_if_env()   # no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set
     port = sys.argv[1] if len(sys.argv) > 1 else "50054"
 
     model = nn.Sequential(
