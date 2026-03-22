@@ -1,63 +1,61 @@
 """
-TorchSlicer Monitor Dashboard
-------------------------------
-Reads traces from Jaeger's HTTP query API and serves a custom dashboard
-that visualises the training topology, per-batch swimlane, and loss history.
+TorchSlicer Monitor — server-side accumulator edition.
 
-Environment variables:
-  JAEGER_HTTP        Jaeger query base URL  (default: http://localhost:16686)
-  DASHBOARD_PORT     Port to listen on      (default: 8080)
-  POLL_INTERVAL      WebSocket push period  (default: 2.0 seconds)
+Jaeger data is merged into an in-memory store on every poll so no history is
+ever lost between requests. The WebSocket sends the full accumulated state.
+
+Env vars:
+  JAEGER_HTTP      Jaeger base URL     (default: http://localhost:16686)
+  DASHBOARD_PORT   Port to listen on   (default: 8080)
+  POLL_INTERVAL    WS push period (s)  (default: 2.0)
 """
 
 import asyncio
 import json
 import os
+import threading
 
 import requests as _requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-JAEGER = os.environ.get("JAEGER_HTTP", "http://localhost:16686")
+JAEGER        = os.environ.get("JAEGER_HTTP",    "http://localhost:16686")
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "2"))
 
-app = FastAPI(title="TorchSlicer Monitor")
-
+app   = FastAPI(title="TorchSlicer Monitor")
 _here = os.path.dirname(os.path.abspath(__file__))
 app.mount("/static", StaticFiles(directory=os.path.join(_here, "static")), name="static")
 
-
-@app.get("/")
-async def index():
-    with open(os.path.join(_here, "static", "index.html")) as f:
-        return HTMLResponse(f.read())
+# ── In-memory accumulator ──────────────────────────────────────────────────────
+_lock          = threading.Lock()
+_batches: dict[int, dict] = {}   # batch_id → batch dict (with workers merged in)
+_topology: list[dict]     = []
+_topology_ready           = False
 
 
 # ── Jaeger helpers ─────────────────────────────────────────────────────────────
 
 def _get(path: str, **params) -> dict:
     try:
-        r = _requests.get(f"{JAEGER}{path}", params=params, timeout=3)
+        r = _requests.get(f"{JAEGER}{path}", params=params, timeout=5)
         r.raise_for_status()
         return r.json()
     except Exception:
         return {}
 
-
 def _tags(span: dict) -> dict:
     return {t["key"]: t["value"] for t in span.get("tags", [])}
 
-
 def _ms(span: dict) -> float:
-    return round(span.get("duration", 0) / 1_000, 2)   # µs → ms
+    return round(span.get("duration", 0) / 1_000, 2)
 
 
-# ── topology ───────────────────────────────────────────────────────────────────
+# ── Fetchers ───────────────────────────────────────────────────────────────────
 
 def _fetch_topology() -> list[dict]:
     data = _get("/api/traces", service="torchslicer-worker",
-                operation="torchslicer.worker.init", limit=20)
+                operation="torchslicer.worker.init", limit=50)
     workers: dict[str, dict] = {}
     for trace in data.get("data", []):
         for span in trace.get("spans", []):
@@ -66,36 +64,44 @@ def _fetch_topology() -> list[dict]:
             tags = _tags(span)
             host = tags.get("worker", "unknown")
             if host not in workers:
-                raw = tags.get("layers", "")
+                raw    = tags.get("layers", "")
                 layers = [l.strip().strip("'\"") for l in raw.split(",") if l.strip()]
                 workers[host] = {
                     "hostname": host,
-                    "layers": layers,
+                    "layers":   layers,
                     "n_layers": int(tags.get("n_layers", len(layers))),
-                    "is_last": bool(tags.get("is_last", False)),
-                    "prev": tags.get("prev_worker") or None,
-                    "next": tags.get("next_worker") or None,
+                    "is_last":  tags.get("is_last") in (True, "True", "true"),
+                    "prev":     tags.get("prev_worker") or None,
+                    "next":     tags.get("next_worker") or None,
                 }
-    # Order by chain: find the first worker (no prev)
-    ordered = []
+
+    # Order chain: start from worker with no prev
+    ordered, visited = [], set()
     by_host = dict(workers)
     cur = next((w for w in by_host.values() if not w["prev"]), None)
-    while cur:
+    while cur and cur["hostname"] not in visited:
         ordered.append(cur)
-        nxt = cur.get("next")
-        cur = by_host.get(nxt) if nxt else None
-    # Append any disconnected workers not found in chain
+        visited.add(cur["hostname"])
+        if cur["is_last"]:
+            break
+        # find next unvisited worker whose prev matches cur's next addr
+        nxt_addr = cur.get("next") or ""
+        nxt = next((w for w in by_host.values()
+                    if w["hostname"] not in visited
+                    and w.get("prev") == nxt_addr), None)
+        if not nxt:  # fallback: any unvisited
+            nxt = next((w for w in by_host.values() if w["hostname"] not in visited), None)
+        cur = nxt
     for w in by_host.values():
         if w not in ordered:
             ordered.append(w)
     return ordered
 
 
-# ── coordinator batches ────────────────────────────────────────────────────────
-
-def _fetch_coordinator_batches(limit: int = 60) -> list[dict]:
+def _fetch_coordinator_batches() -> list[dict]:
+    # limit=200 epoch-level traces → each trace holds all batch child spans
     data = _get("/api/traces", service="torchslicer-coordinator",
-                operation="torchslicer.epoch", limit=10)
+                operation="torchslicer.epoch", limit=200)
     batches = []
     for trace in data.get("data", []):
         for span in trace.get("spans", []):
@@ -104,83 +110,101 @@ def _fetch_coordinator_batches(limit: int = 60) -> list[dict]:
             tags = _tags(span)
             batches.append({
                 "batch_id": int(tags.get("batch_id", -1)),
-                "epoch": int(tags.get("epoch", 0)),
-                "loss": float(tags.get("loss", 0.0)),
+                "epoch":    int(tags.get("epoch", 0)),
+                "loss":     float(tags.get("loss", 0.0)),
                 "total_ms": _ms(span),
                 "start_us": span.get("startTime", 0),
             })
-    batches.sort(key=lambda b: (b["epoch"], b["batch_id"]))
-    return batches[-limit:]
+    return batches
 
 
-# ── worker spans ───────────────────────────────────────────────────────────────
-
-def _fetch_worker_spans(limit: int = 300) -> dict[int, dict]:
-    """Returns {batch_id: {hostname: {fwd_ms, bwd_ms, output_shape}}}"""
+def _fetch_worker_spans() -> dict[int, dict]:
+    """Returns {batch_id: {hostname: {fwd_ms, bwd_ms, ...}}}"""
     result: dict[int, dict] = {}
     for op, key in [
         ("torchslicer.worker.forward",  "fwd_ms"),
         ("torchslicer.worker.backward", "bwd_ms"),
     ]:
         data = _get("/api/traces", service="torchslicer-worker",
-                    operation=op, limit=limit)
+                    operation=op, limit=2000)
         for trace in data.get("data", []):
             for span in trace.get("spans", []):
                 if span.get("operationName") != op:
                     continue
                 tags = _tags(span)
-                bid = int(tags.get("batch_id", -1))
+                bid  = int(tags.get("batch_id", -1))
                 host = tags.get("worker", "unknown")
                 if bid < 0:
                     continue
                 node = result.setdefault(bid, {}).setdefault(host, {})
                 node[key] = _ms(span)
                 if key == "fwd_ms":
-                    node["input_shape"] = tags.get("input_shape", "")
+                    node["input_shape"]  = tags.get("input_shape", "")
                     node["output_shape"] = tags.get("output_shape", "")
-                    node["is_last"] = bool(tags.get("is_last", False))
-                if key == "bwd_ms" and tags.get("loss"):
-                    node["loss"] = float(tags.get("loss", 0.0))
+                    node["is_last"]      = tags.get("is_last") in (True, "True", "true")
     return result
 
 
-# ── state assembly ─────────────────────────────────────────────────────────────
+# ── Merge into accumulator ─────────────────────────────────────────────────────
 
-def _build_state() -> dict:
-    topology = _fetch_topology()
+def _poll_and_merge() -> None:
+    global _topology, _topology_ready
+
+    if not _topology_ready:
+        topo = _fetch_topology()
+        if topo:
+            with _lock:
+                _topology = topo
+                _topology_ready = True
+
     coord_batches = _fetch_coordinator_batches()
-    worker_spans = _fetch_worker_spans()
+    worker_spans  = _fetch_worker_spans()
 
-    batches_out = []
-    for b in coord_batches:
-        bid = b["batch_id"]
-        b["workers"] = worker_spans.get(bid, {})
-        batches_out.append(b)
-
-    epoch_map: dict[int, list[float]] = {}
-    for b in batches_out:
-        if b["loss"] > 0:
-            epoch_map.setdefault(b["epoch"], []).append(b["loss"])
-    epochs_out = [
-        {"epoch": e, "avg_loss": round(sum(v) / len(v), 4)}
-        for e, v in sorted(epoch_map.items())
-    ]
-
-    return {
-        "topology": topology,
-        "batches": batches_out[-30:],
-        "epochs": epochs_out,
-    }
+    with _lock:
+        for b in coord_batches:
+            bid = b["batch_id"]
+            existing_workers = _batches.get(bid, {}).get("workers", {})
+            # Merge: new worker spans override old; keep keys missing from new fetch
+            merged_workers = {**existing_workers, **worker_spans.get(bid, {})}
+            b["workers"] = merged_workers
+            _batches[bid] = b
 
 
-# ── WebSocket ──────────────────────────────────────────────────────────────────
+def _get_full_state() -> dict:
+    _poll_and_merge()
+    with _lock:
+        batches = sorted(_batches.values(), key=lambda b: (b["epoch"], b["batch_id"]))
+        epoch_map: dict[int, list[float]] = {}
+        for b in batches:
+            if b.get("loss", 0) > 0:
+                epoch_map.setdefault(b["epoch"], []).append(b["loss"])
+        epochs = [
+            {"epoch": e, "avg_loss": round(sum(v) / len(v), 4), "n_batches": len(v)}
+            for e, v in sorted(epoch_map.items())
+        ]
+        return {"topology": _topology, "batches": batches, "epochs": epochs}
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def index():
+    with open(os.path.join(_here, "static", "index.html")) as f:
+        return HTMLResponse(f.read())
+
+
+@app.get("/api/state")
+async def api_state():
+    state = await asyncio.to_thread(_get_full_state)
+    return JSONResponse(state)
+
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     try:
         while True:
-            state = await asyncio.to_thread(_build_state)
+            state = await asyncio.to_thread(_get_full_state)
             await ws.send_text(json.dumps(state))
             await asyncio.sleep(POLL_INTERVAL)
     except (WebSocketDisconnect, Exception):
