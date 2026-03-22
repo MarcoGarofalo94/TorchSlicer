@@ -20,8 +20,8 @@ enum DType {
 }
 
 message Tensor {
-    bytes        data   = 1;  // torch.save() serialised bytes
-    repeated int64 shape = 2;  // original shape for validation
+    bytes        data   = 1;  // raw contiguous buffer (t.numpy().tobytes()); shape+dtype used for reconstruction
+    repeated int64 shape = 2;
     DType        dtype  = 3;
 }
 

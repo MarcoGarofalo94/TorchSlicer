@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 
 class BaseExecutor(ABC):
     @abstractmethod
-    def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict) -> None:
+    def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict, mixed_precision: bool = False) -> None:
         ...
 
     @abstractmethod

@@ -4,7 +4,6 @@
 
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
 from typing import Union
 
 
@@ -32,12 +31,17 @@ class SplitLayer(nn.Module):
         layers: list,
         is_last: bool = False,
         predecessors: list | None = None,
+        mixed_precision: bool = False,
     ):
         super().__init__()
         self.layers = nn.ModuleList(layers)
         self._is_last = is_last
         # Store predecessor info; None means sequential shortcut
         self._predecessors: list[list[int]] | None = predecessors
+        # When True, forward runs inside torch.autocast (bfloat16).
+        # bfloat16 does not require a GradScaler — recommended over float16.
+        self._mixed_precision = mixed_precision
+        self._amp_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.x = None
         self.optimizer = None
 
@@ -49,35 +53,41 @@ class SplitLayer(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Wrap external input so we can retrieve its gradient at the cut point
         if input.is_floating_point():
-            self.x = Variable(input.data, requires_grad=True)
+            self.x = input.detach().requires_grad_(True)
             x_in = self.x
         else:
             # Integer input (e.g. token ids) — grad hooks on input not needed
             self.x = None
             x_in = input
 
-        preds = self._predecessors
-        if preds is None or all(len(p) == 0 for p in preds):
-            # Fast path: purely sequential
-            current = x_in
-            for layer in self.layers:
-                current = layer(current)
-            return current
+        ctx = (
+            torch.autocast(device_type=self._amp_device, dtype=torch.bfloat16)
+            if self._mixed_precision
+            else torch.autocast(device_type=self._amp_device, enabled=False)
+        )
+        with ctx:
+            preds = self._predecessors
+            if preds is None or all(len(p) == 0 for p in preds):
+                # Fast path: purely sequential
+                current = x_in
+                for layer in self.layers:
+                    current = layer(current)
+                return current
 
-        # DAG execution: track each layer's output, route inputs accordingly
-        outputs: dict[int, torch.Tensor] = {}
-        for i, layer in enumerate(self.layers):
-            local_preds = preds[i]
-            if not local_preds:
-                inp = x_in
-            elif len(local_preds) == 1:
-                inp = outputs[local_preds[0]]
-            else:
-                # Multi-input layer (e.g. _AddWrapper for skip connections)
-                inputs = [outputs[p] for p in local_preds]
-                outputs[i] = layer(*inputs)
-                continue
-            outputs[i] = layer(inp)
+            # DAG execution: track each layer's output, route inputs accordingly
+            outputs: dict[int, torch.Tensor] = {}
+            for i, layer in enumerate(self.layers):
+                local_preds = preds[i]
+                if not local_preds:
+                    inp = x_in
+                elif len(local_preds) == 1:
+                    inp = outputs[local_preds[0]]
+                else:
+                    # Multi-input layer (e.g. _AddWrapper for skip connections)
+                    inputs = [outputs[p] for p in local_preds]
+                    outputs[i] = layer(*inputs)
+                    continue
+                outputs[i] = layer(inp)
 
         return outputs[len(self.layers) - 1]
 

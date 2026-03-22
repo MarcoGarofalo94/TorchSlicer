@@ -11,6 +11,7 @@
 - [x] Docker images consolidated: 11 Dockerfiles → `Dockerfile.cpu` + `Dockerfile.gpu` + `entrypoint.sh`
 - [x] `entrypoint.sh` auto-recompiles `.proto` files at container startup (eliminates gencode/runtime version mismatch)
 - [x] `docker-compose.gpu.yml` override — workers get NVIDIA device reservations; tested on RTX 3060
+- [x] `docker-compose.monitor.yml` overlay — Jaeger + dashboard service; compose with base or GPU stack
 - [x] Makefile simplified to `build-cpu`, `build-gpu`, `push`, `clean`
 - [x] gRPC proto redesigned: typed messages (`SliceConfig`, `LayerConfig`, `ForwardRequest`, `BackwardRequest`), `batch_id` on every message, label travels in `ForwardRequest` (eliminates `set_label` race)
 - [x] Coordinator and worker rewritten to match new proto and Slicer API; `batch_id`-keyed label/output dicts with proper locking
@@ -19,6 +20,7 @@
 - [x] `LocalExecutor` — single-device sequential training, no networking
 - [x] `verbose=True` flag on `train_epoch` / `SlicedModel.train()` for per-batch loss logging
 - [x] Smoke test: `examples/test_local_dnn.py` (synthetic data, 4 partitions, 5 epochs)
+- [x] Fine-tune example: `examples/finetune/bert_sst2.py` (BERT SST-2)
 
 ## Distributed executor ✅
 - [x] `DistributedExecutor` — centralized topology; this process acts as coordinator
@@ -55,15 +57,29 @@
 ## REST transport
 - [ ] Implement `RESTTransport` matching `GRPCTransport` interface (Dockerfiles already ready)
 
-## Monitoring & benchmarking
-- [ ] Experiment logging (loss, timing, gradient norms per slice)
+## Monitoring & benchmarking ✅ (partial)
+- [x] OpenTelemetry tracer (`monitor/tracer.py`) — `configure()`, `span()` context manager, auto-configures from env, safe no-op if OTEL unavailable
+- [x] `LocalExecutor` and `DistributedExecutor` emit OTel spans (batch, forward, backward) with batch_id, layer names, timing, memory usage
+- [x] `docker-compose.monitor.yml` overlay — adds Jaeger (port 16686) + dashboard service (port 8080), sets OTEL env vars
+- [x] Dashboard backend (`examples/monitor/app.py`) — FastAPI + WebSocket; polls Jaeger, accumulates batch/topology state server-side
+- [x] Dashboard frontend (`examples/monitor/frontend/`) — React 18 + Recharts + Vite; topology panel, training loss chart, timeline swimlane, batches table
+- [x] Topology visualization — per-worker card with layer names, parameter count, GPU memory bars
+- [x] Timeline tab — swimlane chart with per-worker forward/backward timing per batch
 - [ ] Device profiling (energy, latency)
+- [ ] Gradient norm logging per slice
 - [ ] Comparison harness: strategies × transports × topologies
 
-## Optimization
-- [ ] Mixed-precision support
-- [ ] Async pipelining between slices
+## Optimization ✅ (partial)
+- [x] Replace deprecated `Variable` with `detach().requires_grad_(True)` in `SplitLayer`
+- [x] Raw-bytes tensor serialization — activation/gradient tensors now sent as contiguous buffer; `torch.frombuffer` on receive; `torch.save` kept only for layer/optimizer config (one-time startup)
+- [x] Persistent gRPC stubs — `_next_stub`, `_prev_stub`, `_coord_stub` created at `init()`, reused across all batches
+- [x] ThreadPoolExecutor at worker — pre-warmed pool (4 workers) replaces per-RPC thread spawn
+- [x] Mixed-precision opt-in — `mixed_precision=True` on `SlicedModel.train()` / `executor.setup()`; wraps partition forward in `torch.autocast(bfloat16)`; no GradScaler needed (bfloat16 stable range)
+- [ ] Micro-batch pipeline parallelism (GPipe-style) — overlap next batch's forward with current batch's backward; `batch_id` keying already supports it
 - [ ] More efficient gradient propagation beyond basic autograd
+
+## Platform support
+- [ ] ARM64 (aarch64) support — Dockerfiles use x86-only PyTorch wheel URLs; need ARM64-compatible base image and wheel source
 
 ## External comparisons
 - [ ] Compare against AIRllm

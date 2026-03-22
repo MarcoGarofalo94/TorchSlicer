@@ -11,7 +11,7 @@ class LocalExecutor(BaseExecutor):
         self.split_layers: list[SplitLayer] = []
         self.criterion = None
 
-    def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict) -> None:
+    def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict, mixed_precision: bool = False) -> None:
         layers = model_graph.get_layers()
         n = len(partitions)
         self.split_layers = []
@@ -19,7 +19,7 @@ class LocalExecutor(BaseExecutor):
             is_last = (i == n - 1)
             partition_layers = [layers[j] for j in partition.layer_indices]
             preds = partition.predecessors if partition.predecessors else None
-            sl = SplitLayer(partition_layers, is_last=is_last, predecessors=preds)
+            sl = SplitLayer(partition_layers, is_last=is_last, predecessors=preds, mixed_precision=mixed_precision)
             opt = getattr(optim, optimizer_cfg["name"])(sl.parameters(), **optimizer_cfg["params"])
             sl.set_optimizer(opt)
             self.split_layers.append(sl)

@@ -4,6 +4,7 @@ import threading
 import socket
 
 import grpc
+import numpy as np
 import torch
 from torch import nn
 from torch import optim
@@ -37,15 +38,21 @@ _DTYPE_MAP = {
 _TORCH_TO_DTYPE = {v: k for k, v in _DTYPE_MAP.items()}
 
 
+def _tensor_to_bytes(t: torch.Tensor) -> bytes:
+    arr = t.detach().cpu().contiguous()
+    if arr.dtype == torch.bfloat16:
+        return arr.view(torch.uint8).numpy().tobytes()
+    return arr.numpy().tobytes()
+
+
 def deserialize_tensor(msg: worker_service_pb2.Tensor) -> torch.Tensor:
-    return torch.load(io.BytesIO(msg.data), weights_only=False)
+    dtype = _DTYPE_MAP.get(msg.dtype, torch.float32)
+    return torch.frombuffer(bytearray(msg.data), dtype=dtype).reshape(list(msg.shape)).clone()
 
 
 def serialize_tensor(t: torch.Tensor) -> worker_service_pb2.Tensor:
-    buf = io.BytesIO()
-    torch.save(t, buf)
     return worker_service_pb2.Tensor(
-        data=buf.getvalue(),
+        data=_tensor_to_bytes(t),
         shape=list(t.shape),
         dtype=_TORCH_TO_DTYPE.get(t.dtype, worker_service_pb2.FLOAT32),
     )
@@ -64,6 +71,14 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         self.prev_worker: str = None
         self.next_worker: str = None
         self.coordinator: str = None
+
+        # Persistent stubs — created once in init(), reused across all batches
+        self._next_stub = None
+        self._prev_stub = None
+        self._coord_stub = None
+
+        # Pre-warmed thread pool for forward/backward dispatch
+        self._pool = futures.ThreadPoolExecutor(max_workers=4)
 
         # Per-batch state, keyed by batch_id.
         # Both dicts are always accessed under self._lock.
@@ -93,6 +108,13 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
             self.prev_worker = request.prev_worker or None
             self.next_worker = request.next_worker or None
             self.coordinator = request.coordinator
+
+            # Build persistent stubs now so forward/backward never open a channel
+            if self.next_worker:
+                self._next_stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.next_worker))
+            if self.prev_worker:
+                self._prev_stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.prev_worker))
+            self._coord_stub = coordinator_service_pb2_grpc.CoordinatorServiceStub(_channel(self.coordinator))
 
             self.layer = self.layer.to(self.device)
             if self.loss_fn:
@@ -132,11 +154,11 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
     # ── forward / backward RPCs (fire-and-forget) ──────────────────────────────
 
     def forward(self, request, context):
-        threading.Thread(target=self._forward, args=(request,), daemon=True).start()
+        self._pool.submit(self._forward, request)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
 
     def backward(self, request, context):
-        threading.Thread(target=self._backward, args=(request,), daemon=True).start()
+        self._pool.submit(self._backward, request)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
 
     # ── internal forward ───────────────────────────────────────────────────────
@@ -162,8 +184,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         with self._lock:
             self._outputs[batch_id] = out
 
-        stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.next_worker))
-        stub.forward(worker_service_pb2.ForwardRequest(
+        self._next_stub.forward(worker_service_pb2.ForwardRequest(
             batch_id=batch_id,
             input=serialize_tensor(out),
         ))
@@ -226,8 +247,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         ):
             loss = self.loss_fn(out, label)
 
-        coord = coordinator_service_pb2_grpc.CoordinatorServiceStub(_channel(self.coordinator))
-        coord.report_metrics(coordinator_service_pb2.MetricsMessage(
+        self._coord_stub.report_metrics(coordinator_service_pb2.MetricsMessage(
             batch_id=batch_id, loss=loss.item(), worker=socket.gethostname()))
 
         with _tracer.span(
@@ -242,16 +262,13 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         self._send_backward(batch_id, grad)
 
     def _send_backward(self, batch_id: int, grad: torch.Tensor):
-        if self.prev_worker:
-            stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.prev_worker))
-            stub.backward(worker_service_pb2.BackwardRequest(
+        if self._prev_stub:
+            self._prev_stub.backward(worker_service_pb2.BackwardRequest(
                 batch_id=batch_id,
                 gradient=serialize_tensor(grad),
             ))
         else:
-            coord = coordinator_service_pb2_grpc.CoordinatorServiceStub(
-                _channel(self.coordinator))
-            coord.batch_done(coordinator_service_pb2.BatchDoneRequest(
+            self._coord_stub.batch_done(coordinator_service_pb2.BatchDoneRequest(
                 batch_id=batch_id))
 
     # ── helpers ────────────────────────────────────────────────────────────────

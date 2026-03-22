@@ -4,6 +4,7 @@ import time
 from concurrent import futures
 from dataclasses import dataclass, field
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -53,11 +54,16 @@ def _init_dtype_maps():
 _init_dtype_maps()
 
 
+def _tensor_to_bytes(t: torch.Tensor) -> bytes:
+    arr = t.detach().cpu().contiguous()
+    if arr.dtype == torch.bfloat16:
+        return arr.view(torch.uint8).numpy().tobytes()
+    return arr.numpy().tobytes()
+
+
 def _serialize_tensor(t: torch.Tensor):
-    buf = io.BytesIO()
-    torch.save(t, buf)
     return worker_service_pb2.Tensor(
-        data=buf.getvalue(),
+        data=_tensor_to_bytes(t),
         shape=list(t.shape),
         dtype=_TORCH_TO_DTYPE.get(t.dtype, worker_service_pb2.FLOAT32),
     )
@@ -180,7 +186,7 @@ class DistributedExecutor(BaseExecutor):
 
     # ── BaseExecutor interface ─────────────────────────────────────────────────
 
-    def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict) -> None:
+    def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict, mixed_precision: bool = False) -> None:
         layers = model_graph.get_layers()
         n = len(partitions)
 
