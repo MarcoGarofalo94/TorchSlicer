@@ -20,17 +20,13 @@ services:
 
   dashboard:
     build:
-      context: .
-      dockerfile: docker-images/Dockerfile.cpu
+      context: examples/monitor
+      dockerfile: Dockerfile
     container_name: dashboard
     environment:
       - PYTHONUNBUFFERED=1
       - JAEGER_HTTP=http://jaeger:16686
       - DASHBOARD_PORT=8080
-    volumes:
-      - .:/workspace
-      - ./lib/torchslicer:/usr/local/lib/torchslicer
-    command: python3 examples/monitor/app.py
     ports:
       - "8080:8080"
     depends_on:

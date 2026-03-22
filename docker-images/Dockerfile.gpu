@@ -3,7 +3,7 @@
 FROM python:3.12-slim
 
 # ── Layer 1: PyTorch (heavy — cached as long as this line doesn't change) ──────
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # ── Layer 2: runtime deps (invalidated independently of torch) ─────────────────
 RUN pip install --no-cache-dir \

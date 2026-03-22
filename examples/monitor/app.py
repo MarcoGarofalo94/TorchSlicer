@@ -17,7 +17,7 @@ import threading
 
 import requests as _requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 JAEGER        = os.environ.get("JAEGER_HTTP",    "http://localhost:16686")
@@ -25,7 +25,6 @@ POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "2"))
 
 app   = FastAPI(title="TorchSlicer Monitor")
 _here = os.path.dirname(os.path.abspath(__file__))
-app.mount("/static", StaticFiles(directory=os.path.join(_here, "static")), name="static")
 
 # ── In-memory accumulator ──────────────────────────────────────────────────────
 _lock          = threading.Lock()
@@ -187,12 +186,6 @@ def _get_full_state() -> dict:
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
-@app.get("/")
-async def index():
-    with open(os.path.join(_here, "static", "index.html")) as f:
-        return HTMLResponse(f.read())
-
-
 @app.get("/api/state")
 async def api_state():
     state = await asyncio.to_thread(_get_full_state)
@@ -209,6 +202,10 @@ async def ws_endpoint(ws: WebSocket):
             await asyncio.sleep(POLL_INTERVAL)
     except (WebSocketDisconnect, Exception):
         pass
+
+
+# Serve the Vite build — must be LAST so API/WS routes take priority
+app.mount("/", StaticFiles(directory=os.path.join(_here, "static"), html=True), name="spa")
 
 
 if __name__ == "__main__":

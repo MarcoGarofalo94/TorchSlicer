@@ -9,6 +9,14 @@ from torch import nn
 from torch import optim
 from concurrent import futures
 
+_MAX_MSG = 256 * 1024 * 1024  # 256 MB
+_GRPC_OPTS = [
+    ('grpc.max_send_message_length',    _MAX_MSG),
+    ('grpc.max_receive_message_length', _MAX_MSG),
+]
+
+def _channel(addr): return grpc.insecure_channel(addr, options=_GRPC_OPTS)
+
 from torchslicer.transport.grpc.coordinator import coordinator_service_pb2_grpc, coordinator_service_pb2
 from torchslicer.transport.grpc.worker import worker_service_pb2_grpc, worker_service_pb2
 
@@ -49,6 +57,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
 
     def __init__(self):
         super().__init__()
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.layer: SplitLayer = None
         self.loss_fn = None
         self.is_last = False
@@ -85,8 +94,11 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
             self.next_worker = request.next_worker or None
             self.coordinator = request.coordinator
 
+            self.layer = self.layer.to(self.device)
+            if self.loss_fn:
+                self.loss_fn = self.loss_fn.to(self.device)
             layer_names = [type(l).__name__ for l in self.layer.layers]
-            print(f"[init] layers={layer_names}  is_last={self.is_last}")
+            print(f"[init] layers={layer_names}  is_last={self.is_last}  device={self.device}")
             print(f"       prev={self.prev_worker}  next={self.next_worker}")
 
             with _tracer.span(
@@ -127,7 +139,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
             return
 
         # Non-last: run forward, send activation to next worker
-        tensor = deserialize_tensor(request.input)
+        tensor = deserialize_tensor(request.input).to(self.device)
         with _tracer.span(
             "torchslicer.worker.forward",
             batch_id=batch_id,
@@ -140,8 +152,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         with self._lock:
             self._outputs[batch_id] = out
 
-        stub = worker_service_pb2_grpc.WorkerServiceStub(
-            grpc.insecure_channel(self.next_worker))
+        stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.next_worker))
         stub.forward(worker_service_pb2.ForwardRequest(
             batch_id=batch_id,
             input=serialize_tensor(out),
@@ -157,12 +168,12 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         is_label_msg = bool(request.label.data)
 
         if is_label_msg:
-            label = deserialize_tensor(request.label)
+            label = deserialize_tensor(request.label).to(self.device)
             with self._lock:
                 self._labels[batch_id] = label
                 out = self._outputs.pop(batch_id, None)
         else:
-            tensor = deserialize_tensor(request.input)
+            tensor = deserialize_tensor(request.input).to(self.device)
             out = self.layer(tensor)
             with self._lock:
                 label = self._labels.pop(batch_id, None)
@@ -176,7 +187,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
 
     def _backward(self, request: worker_service_pb2.BackwardRequest):
         batch_id = request.batch_id
-        grad_in = deserialize_tensor(request.gradient)
+        grad_in = deserialize_tensor(request.gradient).to(self.device)
 
         with self._lock:
             out = self._outputs.pop(batch_id, None)
@@ -205,8 +216,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         ):
             loss = self.loss_fn(out, label)
 
-        coord = coordinator_service_pb2_grpc.CoordinatorServiceStub(
-            grpc.insecure_channel(self.coordinator))
+        coord = coordinator_service_pb2_grpc.CoordinatorServiceStub(_channel(self.coordinator))
         coord.report_metrics(coordinator_service_pb2.MetricsMessage(
             batch_id=batch_id, loss=loss.item(), worker=socket.gethostname()))
 
@@ -223,15 +233,14 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
 
     def _send_backward(self, batch_id: int, grad: torch.Tensor):
         if self.prev_worker:
-            stub = worker_service_pb2_grpc.WorkerServiceStub(
-                grpc.insecure_channel(self.prev_worker))
+            stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.prev_worker))
             stub.backward(worker_service_pb2.BackwardRequest(
                 batch_id=batch_id,
                 gradient=serialize_tensor(grad),
             ))
         else:
             coord = coordinator_service_pb2_grpc.CoordinatorServiceStub(
-                grpc.insecure_channel(self.coordinator))
+                _channel(self.coordinator))
             coord.batch_done(coordinator_service_pb2.BatchDoneRequest(
                 batch_id=batch_id))
 
@@ -249,7 +258,7 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
 def serve():
     _tracer.auto_configure_if_env()   # no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set
     port = sys.argv[1] if len(sys.argv) > 1 else "50051"
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10), options=_GRPC_OPTS)
     worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(
         WorkerServicer(), server)
     server.add_insecure_port('[::]:' + port)

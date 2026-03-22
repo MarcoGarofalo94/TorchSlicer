@@ -21,6 +21,14 @@ try:
 except ImportError:
     _GRPC_AVAILABLE = False
 
+_MAX_MSG = 256 * 1024 * 1024
+_GRPC_OPTS = [
+    ('grpc.max_send_message_length',    _MAX_MSG),
+    ('grpc.max_receive_message_length', _MAX_MSG),
+]
+
+def _channel(addr): return grpc.insecure_channel(addr, options=_GRPC_OPTS)
+
 
 # ── tensor helpers ─────────────────────────────────────────────────────────────
 
@@ -121,8 +129,7 @@ class _WorkerProxy:
         return f"{self.address}:{self.port}"
 
     def connect(self):
-        self._stub = worker_service_pb2_grpc.WorkerServiceStub(
-            grpc.insecure_channel(self.url()))
+        self._stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.url()))
 
     def stub(self):
         return self._stub
@@ -178,7 +185,7 @@ class DistributedExecutor(BaseExecutor):
         n = len(partitions)
 
         # Start embedded coordinator gRPC server
-        self._grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        self._grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=4), options=_GRPC_OPTS)
         coordinator_service_pb2_grpc.add_CoordinatorServiceServicer_to_server(
             _CoordinatorServicer(self), self._grpc_server)
         port = self.coordinator_addr.split(":")[-1]

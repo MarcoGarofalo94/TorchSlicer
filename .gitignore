@@ -3,3 +3,8 @@ torchslicer/torchslicer/__pycache__
 torchslicer/torchslicer.egg-info
 examples/train/server_.py
 configCLAUDE.md
+data/
+
+examples/monitor/frontend/node_modules
+examples/monitor/frontend/dist
+examples/monitor/static/*.js
