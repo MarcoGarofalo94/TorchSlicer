@@ -9,6 +9,7 @@ from .strategies.uniform import UniformSplitter
 from .strategies.registry import register as register_strategy, get as _get_strategy
 from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
+from .executors.distributed import DistributedExecutor
 from .transport.base import BaseTransport
 from .topology.base import BaseTopology
 

@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package torchslicer.worker;
+
+service WorkerService {
+    rpc init     (SliceConfig)      returns (StatusMessage);
+    rpc forward  (ForwardRequest)   returns (Ack);
+    rpc backward (BackwardRequest)  returns (Ack);
+}
+
+// ── tensor ────────────────────────────────────────────────────────────────────
+
+enum DType {
+    FLOAT32 = 0;
+    FLOAT16 = 1;
+    BFLOAT16 = 2;
+    FLOAT64 = 3;
+    INT64   = 4;
+    INT32   = 5;
+}
+
+message Tensor {
+    bytes        data   = 1;  // torch.save() serialised bytes
+    repeated int64 shape = 2;  // original shape for validation
+    DType        dtype  = 3;
+}
+
+// ── layer description ─────────────────────────────────────────────────────────
+
+message LayerConfig {
+    string layer_type  = 1;  // class name for logging, e.g. "Linear", "Conv2d"
+    bytes  serialized  = 2;  // torch.save(layer) — architecture + weights bundled
+}
+
+// ── init ──────────────────────────────────────────────────────────────────────
+
+message OptimizerConfig {
+    string name = 1;
+    float  lr   = 2;
+    bytes  extra_params = 3;  // torch.save(dict) for momentum, weight_decay, etc.
+}
+
+message CriterionConfig {
+    string name         = 1;
+    bytes  extra_params = 2;  // torch.save(dict) for label_smoothing, etc.
+}
+
+message SliceConfig {
+    repeated LayerConfig layers    = 1;
+    OptimizerConfig      optimizer = 2;
+    optional CriterionConfig criterion = 3;  // only set on the last worker
+    bool    is_last                = 4;
+    string  prev_worker            = 5;  // host:port, empty if first
+    string  next_worker            = 6;  // host:port, empty if last
+    string  coordinator            = 7;  // host:port
+}
+
+// ── forward / backward ────────────────────────────────────────────────────────
+
+message ForwardRequest {
+    uint32 batch_id = 1;  // monotonic counter, used to match backward
+    Tensor input    = 2;
+    Tensor label    = 3;  // only sent to the last worker
+}
+
+message BackwardRequest {
+    uint32 batch_id  = 1;
+    Tensor gradient  = 2;
+}
+
+// ── responses ─────────────────────────────────────────────────────────────────
+
+message Ack {
+    uint32 batch_id = 1;
+}
+
+message StatusMessage {
+    bool   ok      = 1;
+    string message = 2;
+    string hostname = 3;
+}
