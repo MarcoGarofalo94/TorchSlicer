@@ -23,6 +23,7 @@ services:
       context: examples/monitor
       dockerfile: Dockerfile
     container_name: dashboard
+    restart: on-failure
     environment:
       - PYTHONUNBUFFERED=1
       - JAEGER_HTTP=http://jaeger:16686

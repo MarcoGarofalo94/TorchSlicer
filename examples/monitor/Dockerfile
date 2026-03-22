@@ -7,7 +7,7 @@ COPY frontend/package.json ./
 RUN npm install
 
 COPY frontend/ ./
-RUN npm run build
+RUN NODE_OPTIONS=--max-old-space-size=512 npm run build
 
 # ── Stage 2: FastAPI backend ───────────────────────────────────────────────────
 FROM python:3.12-slim
