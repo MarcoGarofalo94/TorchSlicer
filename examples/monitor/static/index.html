@@ -367,8 +367,30 @@ function renderSwimlane(batches, topology) {
     { key: 'coordinator', label: 'Coordinator' },
     ...hosts.map(h => ({ key: h, label: h.length > 14 ? h.slice(0,12)+'…' : h }))
   ];
-  const ROW_H   = Math.max(28, Math.floor((H - 24) / rows.length));
+  const ROW_H   = Math.max(40, Math.floor((H - 24) / rows.length));
   const TOP     = 18;
+
+  // Helper: draw 1 or 2 lines of text centred in a bar
+  function barText(bx, by, bw, bh, lines, color) {
+    if (lines.length === 1) {
+      g.appendChild(svgEl('text', {
+        x: bx + bw/2, y: by + bh/2 + 4,
+        'text-anchor':'middle', fill: color, 'font-size':9, 'font-weight':600,
+        'font-family':"'SF Mono', monospace"
+      }, lines[0]));
+    } else {
+      const mid = by + bh/2;
+      lines.forEach((line, i) => {
+        g.appendChild(svgEl('text', {
+          x: bx + bw/2, y: mid + (i === 0 ? -3 : 10),
+          'text-anchor':'middle', fill: color,
+          'font-size': i === 0 ? 9 : 8,
+          'font-weight': i === 0 ? 700 : 400,
+          'font-family':"'SF Mono', monospace"
+        }, line));
+      });
+    }
+  }
 
   // Axis ticks
   const TICKS = 5;
@@ -394,24 +416,35 @@ function renderSwimlane(batches, topology) {
 
     if (row.key === 'coordinator') {
       const bw = Math.max((batch.total_ms||0) * scale, 4);
-      g.appendChild(svgEl('rect', {
-        x: LABEL_W, y: ry + 4, width: bw, height: ROW_H - 8,
-        fill: '#bc8cff', opacity: .3, rx:3, ry:3
-      }));
-      if (bw > 60) g.appendChild(svgEl('text', {
-        x: LABEL_W + bw/2, y: ry + ROW_H/2 + 4,
-        'text-anchor':'middle', fill:'#bc8cff', 'font-size':9
-      }, `${batch.total_ms}ms  loss ${batch.loss.toFixed(4)}`));
+      const bx = LABEL_W, by = ry + 4, bh = ROW_H - 8;
+      g.appendChild(svgEl('rect', { x:bx, y:by, width:bw, height:bh, fill:'#bc8cff', opacity:.25, rx:3, ry:3 }));
+      if (bw > 90) {
+        barText(bx, by, bw, bh, [
+          `E${batch.epoch}  B${batch.batch_id}  ${batch.total_ms}ms`,
+          `loss ${batch.loss.toFixed(4)}`
+        ], '#bc8cff');
+      } else if (bw > 40) {
+        barText(bx, by, bw, bh, [`${batch.total_ms}ms`], '#bc8cff');
+      }
     } else {
       (timeline[row.key]||[]).forEach(seg => {
         const x  = LABEL_W + seg.s * scale;
         const bw = Math.max(seg.d * scale, 2);
-        const fill = seg.type === 'fwd' ? '#58a6ff' : '#f0883e';
-        g.appendChild(svgEl('rect', { x, y: ry+4, width:bw, height: ROW_H-8, fill, opacity:.88, rx:3, ry:3 }));
-        if (bw > 24) g.appendChild(svgEl('text', {
-          x: x + bw/2, y: ry + ROW_H/2 + 4,
-          'text-anchor':'middle', fill:'#0d1117', 'font-size':9, 'font-weight':600
-        }, `${seg.d}ms`));
+        const bx = x, by = ry + 4, bh = ROW_H - 8;
+        const isFwd = seg.type === 'fwd';
+        const fill  = isFwd ? '#58a6ff' : '#f0883e';
+        g.appendChild(svgEl('rect', { x:bx, y:by, width:bw, height:bh, fill, opacity:.88, rx:3, ry:3 }));
+
+        if (bw > 120) {
+          barText(bx, by, bw, bh, [
+            `${isFwd ? 'Forward' : 'Backward'}  ${seg.d}ms`,
+            `E${batch.epoch}  B${batch.batch_id}`
+          ], '#0d1117');
+        } else if (bw > 50) {
+          barText(bx, by, bw, bh, [`${isFwd ? 'fwd' : 'bwd'}  ${seg.d}ms`], '#0d1117');
+        } else if (bw > 22) {
+          barText(bx, by, bw, bh, [`${seg.d}ms`], '#0d1117');
+        }
       });
     }
   });
