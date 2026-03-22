@@ -3,7 +3,7 @@ __author__ = 'Marco Garofalo'
 
 from .core.slicer import Slicer
 from .core.split_layer import SplitLayer
-from .core.model_graph import ModelGraph, LayerNode
+from .core.model_graph import ModelGraph, LayerNode, _FlattenWrapper, _AddWrapper
 from .strategies.base import BaseSplitter, Partition
 from .strategies.uniform import UniformSplitter
 from .strategies.registry import register as register_strategy, get as _get_strategy
@@ -30,7 +30,7 @@ class SlicedModel:
 
 
 def slice(model, strategy="uniform", n=2, executor=None) -> SlicedModel:
-    graph = ModelGraph.from_sequential(model)
+    graph = ModelGraph.from_module(model)
     splitter = _get_strategy(strategy)
     partitions = splitter.split(graph, n)
     splitter.validate(graph, partitions)

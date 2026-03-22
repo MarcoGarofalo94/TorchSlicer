@@ -17,7 +17,8 @@ class LocalExecutor(BaseExecutor):
         for i, partition in enumerate(partitions):
             is_last = (i == n - 1)
             partition_layers = [layers[j] for j in partition.layer_indices]
-            sl = SplitLayer(partition_layers, is_last=is_last)
+            preds = partition.predecessors if partition.predecessors else None
+            sl = SplitLayer(partition_layers, is_last=is_last, predecessors=preds)
             opt = getattr(optim, optimizer_cfg["name"])(sl.parameters(), **optimizer_cfg["params"])
             sl.set_optimizer(opt)
             self.split_layers.append(sl)

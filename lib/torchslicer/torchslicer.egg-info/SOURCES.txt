@@ -14,6 +14,7 @@ torchslicer/core/slicer.py
 torchslicer/core/split_layer.py
 torchslicer/executors/__init__.py
 torchslicer/executors/base.py
+torchslicer/executors/distributed.py
 torchslicer/executors/local.py
 torchslicer/monitor/__init__.py
 torchslicer/monitor/base.py
@@ -25,3 +26,12 @@ torchslicer/topology/__init__.py
 torchslicer/topology/base.py
 torchslicer/transport/__init__.py
 torchslicer/transport/base.py
+torchslicer/transport/grpc/__init__.py
+torchslicer/transport/grpc/coordinator/__init__.py
+torchslicer/transport/grpc/coordinator/coordinator_service.proto
+torchslicer/transport/grpc/coordinator/coordinator_service_pb2.py
+torchslicer/transport/grpc/coordinator/coordinator_service_pb2_grpc.py
+torchslicer/transport/grpc/worker/__init__.py
+torchslicer/transport/grpc/worker/worker_service.proto
+torchslicer/transport/grpc/worker/worker_service_pb2.py
+torchslicer/transport/grpc/worker/worker_service_pb2_grpc.py
