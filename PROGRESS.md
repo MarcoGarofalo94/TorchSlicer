@@ -27,7 +27,7 @@
 - [x] Embedded gRPC coordinator server (`_CoordinatorServicer`) with `threading.Event` synchronisation
 - [x] Sends `SliceConfig` to each worker at setup (layers serialized via `torch.save`, optimizer, criterion)
 - [x] Synchronous training loop: sends batch → waits for `batch_done` callback → accumulates loss
-- [x] Full Docker stack verified: `docker compose up` runs coordinator + 2 workers, loss decreasing over 3 epochs
+- [x] Full Docker stack verified: GPU stack runs coordinator + 2 workers (`device=cuda`), all 20 epochs complete cleanly (loss 2.16 → 0.56 on ResNet18/CIFAR-10)
 - [x] Proto files live in `lib/torchslicer/torchslicer/transport/grpc/` (not in examples); auto-compiled at container startup
 
 ## Splitting strategies (partial) ✅
@@ -65,6 +65,8 @@
 - [x] Dashboard frontend (`examples/monitor/frontend/`) — React 18 + Recharts + Vite; topology panel, training loss chart, timeline swimlane, batches table
 - [x] Topology visualization — per-worker card with layer names, parameter count, GPU memory bars
 - [x] Timeline tab — swimlane chart with per-worker forward/backward timing per batch
+- [x] Dashboard auto-resets on new run — detects new `worker.init` span timestamps, clears stale batch data so frontend never shows data from a previous run
+- [x] Dashboard Node build OOM fix — `NODE_OPTIONS=--max-old-space-size=512` caps V8 heap during Vite build; `restart: on-failure` in compose overlay
 - [ ] Device profiling (energy, latency)
 - [ ] Gradient norm logging per slice
 - [ ] Comparison harness: strategies × transports × topologies
@@ -75,6 +77,7 @@
 - [x] Persistent gRPC stubs — `_next_stub`, `_prev_stub`, `_coord_stub` created at `init()`, reused across all batches
 - [x] ThreadPoolExecutor at worker — pre-warmed pool (4 workers) replaces per-RPC thread spawn
 - [x] Mixed-precision opt-in — `mixed_precision=True` on `SlicedModel.train()` / `executor.setup()`; wraps partition forward in `torch.autocast(bfloat16)`; no GradScaler needed (bfloat16 stable range)
+- [x] GPU OOM fix for long runs — `SplitLayer.optimize()` nulls `self.x` after each batch; worker calls `torch.cuda.empty_cache()` after every backward; validated over 20 epochs without OOM
 - [ ] Micro-batch pipeline parallelism (GPipe-style) — overlap next batch's forward with current batch's backward; `batch_id` keying already supports it
 - [ ] More efficient gradient propagation beyond basic autograd
 
