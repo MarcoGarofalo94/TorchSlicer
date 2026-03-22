@@ -1,1 +1,0 @@
-We can find images able to access cuda or not.

@@ -1,0 +1,22 @@
+# Requires NVIDIA Container Toolkit on the host.
+# CUDA 12.1 wheels; change cu121 to match your driver if needed.
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121 \
+    && pip install --no-cache-dir \
+        grpcio==1.64.0 \
+        grpcio-tools==1.64.0 \
+        protobuf \
+        fastapi==0.104.1 \
+        uvicorn==0.24.0 \
+        requests==2.31.0 \
+        pydantic==2.5.0
+
+COPY lib/torchslicer /usr/local/lib/torchslicer
+RUN pip install --no-cache-dir -e /usr/local/lib/torchslicer
+
+COPY docker-images/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /workspace
+ENTRYPOINT ["/entrypoint.sh"]

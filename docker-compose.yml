@@ -1,29 +1,49 @@
-version: "3.7"
 services:
   coordinator:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
     container_name: coordinator
-    image: marcog94/torchslicer:coordinator-grpc-cpu
-    ports:
-      - "50051:50051"
+    environment:
+      - PYTHONUNBUFFERED=1
     volumes:
-      - ./examples/train/centralized/GRPC/coordinator:/train/centralized/GRPC/coordinator
-      - ./examples/train/centralized/GRPC/proto_common/:/train/centralized/GRPC/proto_common
+      - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/centralized/GRPC/coordinator/main.py
+    depends_on:
+      - worker1
+      - worker2
+    networks:
+      - torchslicer-net
+
   worker1:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
     container_name: worker1
-    image: marcog94/torchslicer:worker-grpc-cpu
-    ports:
-      - "50052:50051"
+    environment:
+      - PYTHONUNBUFFERED=1
     volumes:
-      - ./examples/train/centralized/GRPC/worker:/train/centralized/GRPC/worker
-      - ./examples/train/centralized/GRPC/proto_common/:/train/centralized/GRPC/proto_common
+      - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/centralized/GRPC/worker/main.py
+    networks:
+      - torchslicer-net
+
   worker2:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
     container_name: worker2
-    image: marcog94/torchslicer:worker-grpc-cpu
-    ports:
-      - "50053:50051"
+    environment:
+      - PYTHONUNBUFFERED=1
     volumes:
-      - ./examples/train/centralized/GRPC/worker:/train/centralized/GRPC/worker
-      - ./examples/train/centralized/GRPC/proto_common/:/train/centralized/GRPC/proto_common
+      - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/centralized/GRPC/worker/main.py
+    networks:
+      - torchslicer-net
+
+networks:
+  torchslicer-net:
+    driver: bridge

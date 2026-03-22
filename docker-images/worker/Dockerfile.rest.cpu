@@ -1,1 +1,0 @@
-FROM marcog94/torchslicer:base-grpc-cpu
