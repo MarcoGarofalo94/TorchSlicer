@@ -235,6 +235,9 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         ):
             grad = self.layer.backward(prev_g=grad_in, out=out)
             self.layer.optimize()
+        del out
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
         self._send_backward(batch_id, grad)
 
     def _run_backward_last(self, batch_id: int, out: torch.Tensor, label: torch.Tensor):
@@ -259,6 +262,9 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
         ):
             grad = self.layer.backward(loss=loss)
             self.layer.optimize()
+        del out, label, loss
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
         self._send_backward(batch_id, grad)
 
     def _send_backward(self, batch_id: int, grad: torch.Tensor):

@@ -112,3 +112,4 @@ class SplitLayer(nn.Module):
         if not dry_run:
             self.optimizer.step()
         self.optimizer.zero_grad()
+        self.x = None  # release cut-point tensor; prevents CUDA allocator growth

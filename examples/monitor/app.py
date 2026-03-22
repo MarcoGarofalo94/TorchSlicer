@@ -30,6 +30,7 @@ _here = os.path.dirname(os.path.abspath(__file__))
 _lock          = threading.Lock()
 _batches: dict[int, dict] = {}   # batch_id → batch dict (with workers merged in)
 _topology: list[dict]     = []
+_run_start_us: int        = 0    # startTime (µs) of the most recent worker.init span
 
 
 # ── Jaeger helpers ─────────────────────────────────────────────────────────────
@@ -51,7 +52,9 @@ def _ms(span: dict) -> float:
 
 # ── Fetchers ───────────────────────────────────────────────────────────────────
 
-def _fetch_topology() -> list[dict]:
+def _fetch_topology() -> tuple[list[dict], int]:
+    """Returns (ordered_workers, run_start_us) where run_start_us is the
+    startTime of the most recent worker.init span in the current run."""
     data = _get("/api/traces", service="torchslicer-worker",
                 operation="torchslicer.worker.init", limit=50)
     # host → (start_us, worker_dict) — keep most recent span per host
@@ -83,13 +86,16 @@ def _fetch_topology() -> list[dict]:
     # Pick the most recent first-worker (prev=None) to anchor the chain
     starts_without_prev = [(workers[h][0], h) for h, w in by_host.items() if not w["prev"]]
     if not starts_without_prev:
-        return []
+        return [], 0
     _, anchor = max(starts_without_prev)
 
     # Keep only workers whose start time is within 60s of the anchor
     anchor_t = workers[anchor][0]
     recent   = {h for h, (t, _) in workers.items() if abs(t - anchor_t) <= 60_000_000}
     pool     = {h: w for h, w in by_host.items() if h in recent}
+
+    # run_start_us = earliest init span among workers in this run
+    run_start_us = min(workers[h][0] for h in recent)
 
     # Follow the chain from the anchor
     ordered, visited = [], set()
@@ -106,7 +112,7 @@ def _fetch_topology() -> list[dict]:
         if not nxt:  # fallback: any unvisited recent worker
             nxt = next((w for w in pool.values() if w["hostname"] not in visited), None)
         cur = nxt
-    return ordered
+    return ordered, run_start_us
 
 
 def _fetch_coordinator_batches() -> list[dict]:
@@ -159,18 +165,28 @@ def _fetch_worker_spans() -> dict[int, dict]:
 # ── Merge into accumulator ─────────────────────────────────────────────────────
 
 def _poll_and_merge() -> None:
-    global _topology
+    global _topology, _run_start_us
 
-    topo = _fetch_topology()
+    topo, new_run_start = _fetch_topology()
     if topo:
         with _lock:
             _topology = topo
+            if new_run_start > _run_start_us:
+                # New training run detected — discard data from previous runs
+                _batches.clear()
+                _run_start_us = new_run_start
+
+    with _lock:
+        current_run_start = _run_start_us
 
     coord_batches = _fetch_coordinator_batches()
     worker_spans  = _fetch_worker_spans()
 
     with _lock:
         for b in coord_batches:
+            # Ignore batches that started before the current run
+            if current_run_start and b.get("start_us", 0) < current_run_start:
+                continue
             bid = b["batch_id"]
             existing_workers = _batches.get(bid, {}).get("workers", {})
             # Merge: new worker spans override old; keep keys missing from new fetch
