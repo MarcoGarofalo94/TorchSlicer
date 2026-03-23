@@ -81,9 +81,21 @@
 - [x] ResNet18/50 work natively — `torch.flatten` captured automatically, no wrapper needed
 - [ ] Cross-partition skip connections (requires executor protocol changes)
 
-## P2P topology
-- [ ] Design P2P coordination protocol — `StaticDiscovery` is the first building block; `MDNSDiscovery` for zero-config local network
-- [ ] Implement `P2PTopology`
+## P2P topology ✅
+- [x] `WorkerServicer` moved to library (`executors/worker.py`) — shared by centralized and P2P; centralized worker now imports from it
+- [x] `P2PDriverServicer` — extends `WorkerServicer`; overrides `_send_backward` to signal batch completion directly (no loopback RPC); adds `run_own_forward()` for DataLoader-driven forward pass
+- [x] `_P2PCoordinatorServicer` — lightweight embedded coordinator on driver; handles `report_metrics` from last worker and `signal_batch_done()` directly (no gRPC overhead on hot path)
+- [x] Driver (worker 0) builds full model, runs splitter, sends `SliceConfig` to followers via `init()` RPC with retry; configures own partition locally (memory-efficient: each node holds only its slice)
+- [x] Labels sent directly from driver to last worker — intermediate workers never see labels (split-learning privacy guarantee)
+- [x] `IS_DRIVER` env var selects role; all workers run same script (`examples/train/p2p/worker/main.py`)
+- [x] `WORKER_PEERS` env var (or `discovery.peers` in YAML) defines peer list; driver retries `init()` for 60s to handle startup race
+- [x] Graceful shutdown: driver sends `Shutdown` RPC to all followers after training; followers exit cleanly (code 0)
+- [x] `docker-compose.p2p.yml` + `docker-compose.p2p.gpu.yml`; `experiments/resnet18_2gpu_p2p.yaml`
+- [x] Makefile `run-p2p-gpu` / `run-p2p-cpu` targets
+- [x] Smoke-tested: 20 epochs ResNet18/CIFAR-10, 2 GPU workers, both exit 0 (loss 2.4 → 0.52)
+- [ ] GPipe in P2P (driver fans out micro-batches; structure ready, needs epoch-boundary sync)
+- [ ] `MDNSDiscovery` for zero-config local network (future)
+- [ ] Logging / profiling integration in P2P (RunLogger, WorkerProfiler, get_stats pull)
 
 ## REST transport
 - [ ] Implement `RESTTransport` matching `GRPCTransport` interface (Dockerfiles already ready)

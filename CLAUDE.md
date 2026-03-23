@@ -53,6 +53,7 @@ sliced.train(train_loader, devices=[...])
 ### Layer 3 — Execution (`torchslicer/executors/`)
 - **`LocalExecutor`**: Single device, sequential execution. Supports `verbose=True` and GPipe micro-batching.
 - **`DistributedExecutor`**: Centralized topology. Embeds a gRPC server, uses a `BaseDiscovery` instance to find workers, sends `SliceConfig`, drives the training loop, and signals clean shutdown via `Shutdown` RPC on teardown.
+- **`WorkerServicer`**: gRPC `WorkerService` implementation shared by centralized and P2P workers. Handles `init`, `forward`, `backward`, `shutdown`, `get_stats` RPCs. Lives in `executors/worker.py`; both topology examples import from here.
 
 ### Layer 4 — Discovery (`torchslicer/discovery/`)
 New layer. Abstracts cluster membership for both centralized and P2P topologies.
@@ -75,7 +76,7 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 
 ### Layer 7 — Topology (`torchslicer/topology/`)
 - **`CentralizedTopology`**: Coordinator orchestrates training loop, workers execute slices.
-- **`P2PTopology`**: Not yet implemented. `StaticDiscovery` is the first building block.
+- **`P2PTopology`**: Implemented. No coordinator process. Driver node (worker 0) owns the DataLoader, builds the full model, slices it, and sends partitions to followers via `init()` RPC. Embeds `_P2PCoordinatorServicer` to handle `batch_done` + `report_metrics` from followers. Labels sent directly from driver to last worker — intermediate workers never see labels (privacy-preserving). Uses `StaticDiscovery` (peers from config). Entry point: `examples/train/p2p/worker/main.py`; all workers run the same script, role determined by `IS_DRIVER` env var.
 
 ### Layer 8 — Monitoring (`torchslicer/monitor/`)
 - OpenTelemetry tracer with `configure()`, `span()` context manager.
@@ -107,6 +108,8 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 - Intra-partition DAG wired over gRPC: `SliceConfig` carries `PredecessorList` per layer; workers reconstruct and pass to `SplitLayer` — multi-input (skip connection) layers execute correctly in distributed mode
 - GPipe micro-batch pipeline parallelism — 1.9× speedup with 4 workers (ResNet18/CIFAR-10 GPU)
 - Clean lifecycle: coordinator sends `Shutdown` RPC to all workers on teardown; workers exit cleanly (code 0); coordinator then blocks on `signal.pause()` — only exits on `SIGTERM` (`docker compose down`); idle workers (registered but not selected) also receive `Shutdown` at teardown via `CoordinatorDiscovery.idle_nodes()`
+- **P2P topology**: no coordinator process; driver (worker 0) builds model, sends `SliceConfig` to followers, embeds lightweight coordinator service, drives training loop; labels routed directly to last worker (split-learning privacy); followers reuse `WorkerServicer` unchanged; verified: 20 epochs ResNet18/CIFAR-10, 2 GPU workers, both exit 0 (loss 2.4 → 0.52)
+- `WorkerServicer` in library (`executors/worker.py`) — shared by centralized and P2P; centralized worker `main.py` now imports from library
 - Worker state reset on `init()` — workers reusable across runs without container restart
 - Optional checkpoint: each worker saves `{run_dir}/worker_{i}_epoch_{n}.pt`; coordinator saves `run_state.json`; resume via `checkpoint_path` in `SliceConfig`; disabled by default
 - `run_id` on all proto messages — forward-compat hook for coordinator restart detection
@@ -116,10 +119,10 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 - **Callback system**: `SlicedModel.train(callbacks=[...])` accepts `TrainingCallback` subclasses; `on_epoch_end` can inject custom metrics (accuracy, lr, etc.) into `metrics.jsonl`
 - `COORDINATOR_ADDRESS` env var on workers; `WORKER_ADDRESS` for custom address advertisement
 - `make run-cpu/run-gpu CONFIG=experiments/resnet18_4gpu.yaml` — one-command experiment launch
-- Docker stack verified: CPU (2–4 workers) and GPU (RTX 3060, WSL2 + NVIDIA Container Toolkit)
+- `make run-p2p-gpu/run-p2p-cpu CONFIG=experiments/resnet18_2gpu_p2p.yaml` — P2P stack (no coordinator)
+- Docker stack verified: CPU (2–4 workers) and GPU (RTX 3060, WSL2 + NVIDIA Container Toolkit); P2P verified same
 
 ### What is incomplete
-- No P2P topology implementation (`StaticDiscovery` ready, topology logic missing)
 - No REST transport logic (Dockerfiles ready)
 - No fault tolerance: crash aborts the run; `BaseDiscovery.watch()` hook is in place for future heartbeat-based detection; `discover()` raises `TimeoutError` on timeout (intentional, deferred to fault tolerance work)
 - No `EnergySplitter` / `DeadlineSplitter`
@@ -135,7 +138,18 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 conda run -n torchslicer python3 examples/test_local_dnn.py
 ```
 
-### Run the full gRPC stack
+### Run the P2P stack (no coordinator)
+```bash
+# GPU, 2 workers
+make run-p2p-gpu CONFIG=experiments/resnet18_2gpu_p2p.yaml
+
+# CPU, 2 workers
+make run-p2p-cpu CONFIG=experiments/resnet18_2gpu_p2p.yaml
+```
+
+All workers run the same script. `IS_DRIVER=true` on worker0, `IS_DRIVER=false` on all others. `WORKER_PEERS` is a comma-separated peer list in slice-assignment order. Driver retries `init()` until followers are ready (60s timeout).
+
+### Run the full gRPC stack (centralized)
 ```bash
 # CPU, using env vars
 N_WORKERS=2 EPOCHS=10 make run-cpu
