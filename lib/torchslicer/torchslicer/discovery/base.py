@@ -52,3 +52,10 @@ class BaseDiscovery(ABC):
     ) -> None:
         """Register callbacks for membership changes (fault-tolerance hook, stub for now)."""
         ...
+
+    def idle_nodes(self) -> List[NodeInfo]:
+        """
+        Return nodes that registered but were not selected by discover().
+        Default is empty — only CoordinatorDiscovery can have idle nodes.
+        """
+        return []

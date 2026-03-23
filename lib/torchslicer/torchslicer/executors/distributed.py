@@ -472,6 +472,9 @@ class DistributedExecutor(BaseExecutor):
             except Exception as e:
                 print(f"[teardown] {proxy.name}: shutdown failed — {e}")
 
+        # Gracefully shut down workers that registered but weren't selected
+        self._shutdown_idle_workers()
+
         if self._grpc_server:
             self._grpc_server.stop(grace=2)
             self._grpc_server = None
@@ -504,6 +507,27 @@ class DistributedExecutor(BaseExecutor):
         if hasattr(self._discovery, "run_id"):
             return self._discovery.run_id
         return self._run_config.run_id
+
+    def _shutdown_idle_workers(self) -> None:
+        """Send Shutdown RPC to workers that registered but weren't selected."""
+        idle = self._discovery.idle_nodes()
+        if not idle:
+            return
+        print(f"[coordinator] shutting down {len(idle)} idle worker(s): "
+              f"{[nd.address for nd in idle]}")
+        for nd in idle:
+            try:
+                stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(nd.address))
+                stub.shutdown(worker_service_pb2.ShutdownRequest(
+                    save_checkpoint=False,
+                    checkpoint_dir="",
+                    run_id=self._run_id,
+                    epoch=0,
+                    worker_index=0,
+                ), timeout=5.0)
+                print(f"[coordinator] idle worker {nd.node_id} ({nd.address}) shut down")
+            except Exception as e:
+                print(f"[coordinator] idle worker {nd.address}: shutdown failed — {e}")
 
     def _collect_worker_stats(self, epoch: int) -> list:
         """Pull profiling stats from all workers after an epoch."""

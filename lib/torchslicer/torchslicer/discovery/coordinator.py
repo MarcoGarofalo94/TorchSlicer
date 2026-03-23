@@ -87,6 +87,11 @@ class CoordinatorDiscovery(BaseDiscovery):
         with self._lock:
             return list(self._nodes[:expected])
 
+    def idle_nodes(self) -> list:
+        """Return nodes that registered but were not selected (index >= expected)."""
+        with self._lock:
+            return list(self._nodes[self._expected:])
+
     def watch(
         self,
         on_join:  Callable[[NodeInfo], None],
