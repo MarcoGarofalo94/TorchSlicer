@@ -1,0 +1,27 @@
+# GPU override for TinyGPT + LoRA experiment.
+# Usage: make run-lora-gpu CONFIG=experiments/lora_tinygpt_2gpu_p2p.yaml
+
+services:
+  lora-worker0:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  lora-worker1:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

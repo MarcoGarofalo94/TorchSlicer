@@ -47,7 +47,9 @@ class LocalExecutor(BaseExecutor):
             preds = partition.predecessors if partition.predecessors else None
             sl = SplitLayer(partition_layers, is_last=is_last, predecessors=preds,
                             mixed_precision=mixed_precision)
-            opt = getattr(optim, optimizer_cfg["name"])(sl.parameters(), **optimizer_cfg["params"])
+            trainable = [p for p in sl.parameters() if p.requires_grad]
+            params = trainable if trainable else list(sl.parameters())
+            opt = getattr(optim, optimizer_cfg["name"])(params, **optimizer_cfg["params"])
             sl.set_optimizer(opt)
             self.split_layers.append(sl)
 
@@ -127,6 +129,12 @@ class LocalExecutor(BaseExecutor):
                     n_batches  += 1
                     if batch_span:
                         batch_span.set_attribute("loss", loss_val)
+
+                if self._run_logger:
+                    self._run_logger.log(
+                        step=batch_id, epoch=epoch, batch=n_batches,
+                        loss=round(loss_val, 6), phase="batch",
+                    )
 
                 if verbose:
                     print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss_val:.4f}")

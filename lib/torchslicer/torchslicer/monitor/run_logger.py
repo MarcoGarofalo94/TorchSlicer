@@ -45,12 +45,13 @@ from typing import Dict, List, Optional
 
 # Maps phase name → jsonl filename (relative to run_dir)
 _PHASE_FILES: Dict[str, str] = {
-    "epoch":           "metrics.jsonl",
+    "epoch":             "metrics.jsonl",
+    "batch":             "metrics.jsonl",
     "coordinator_epoch": "coordinator.jsonl",
-    "worker_epoch":    "worker_epoch.jsonl",
-    "worker_batch":    "worker_batch.jsonl",
-    "partition_epoch": "partition_epoch.jsonl",
-    "partition_batch": "partition_batch.jsonl",
+    "worker_epoch":      "worker_epoch.jsonl",
+    "worker_batch":      "worker_batch.jsonl",
+    "partition_epoch":   "partition_epoch.jsonl",
+    "partition_batch":   "partition_batch.jsonl",
 }
 _FALLBACK_FILE = "metrics.jsonl"
 

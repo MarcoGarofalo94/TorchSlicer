@@ -10,5 +10,8 @@ authors = [{name = "Marco Garofalo", email = "garofalomarco58@gmail.com"}]
 requires-python = ">=3.10"
 dependencies = ["numpy"]
 
+[project.optional-dependencies]
+peft = ["peft>=0.10"]
+
 [tool.setuptools.packages.find]
 where = ["."]

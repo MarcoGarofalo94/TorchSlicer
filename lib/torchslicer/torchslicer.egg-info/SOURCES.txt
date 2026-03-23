@@ -21,6 +21,7 @@ torchslicer/executors/__init__.py
 torchslicer/executors/base.py
 torchslicer/executors/distributed.py
 torchslicer/executors/local.py
+torchslicer/executors/worker.py
 torchslicer/monitor/__init__.py
 torchslicer/monitor/base.py
 torchslicer/monitor/callback.py

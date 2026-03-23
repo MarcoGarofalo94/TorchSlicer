@@ -1,0 +1,42 @@
+# TinyGPT / byte-level LM — 2-worker P2P GPU run
+# Usage:
+#   make run-lm-gpu CONFIG=experiments/tinygpt_2gpu_p2p.yaml
+
+run_id: tinygpt_2gpu_p2p
+
+training:
+  epochs: 10
+  optimizer:
+    name: AdamW
+    params:
+      lr: 0.0003
+      weight_decay: 0.01
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: false
+  n_micro: 4
+
+discovery:
+  backend: static
+  n_workers: 2
+  peers:
+    - lm-worker0:50051
+    - lm-worker1:50051
+
+logging:
+  enabled: true
+  dir: /workspace/runs
+
+profile:
+  verbosity: 1
+  memory: false
+
+checkpoint:
+  enabled: false
+  dir: ./checkpoints
+  save_every: epoch
+  resume: null

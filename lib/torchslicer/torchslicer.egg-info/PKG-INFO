@@ -7,5 +7,7 @@ Author: Marco Garofalo
 Author-email: Marco Garofalo <garofalomarco58@gmail.com>
 Requires-Python: >=3.10
 Requires-Dist: numpy
+Provides-Extra: peft
+Requires-Dist: peft>=0.10; extra == "peft"
 Dynamic: author
 Dynamic: home-page

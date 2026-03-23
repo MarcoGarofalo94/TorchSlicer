@@ -1,0 +1,27 @@
+# GPU override for TinyGPT LM experiment.
+# Usage: make run-lm-gpu CONFIG=experiments/tinygpt_2gpu_p2p.yaml
+
+services:
+  lm-worker0:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  lm-worker1:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

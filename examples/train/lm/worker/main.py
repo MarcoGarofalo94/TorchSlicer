@@ -1,30 +1,20 @@
 """
-P2P worker entry point — all workers run this script.
+TinyGPT P2P worker — character-level language model via split learning.
 
-Role is determined by the IS_DRIVER environment variable:
+Same P2P driver/follower topology as the ResNet18 example, with a small
+causal transformer instead.  The driver owns the corpus and DataLoader;
+the model is sliced into N partitions and distributed across workers.
 
-  IS_DRIVER=true   → worker 0 (driver): owns the DataLoader, builds the model,
-                     slices and distributes partitions, drives the training loop.
-                     Also embeds a lightweight coordinator service so followers
-                     can report metrics and signal batch completion.
-
-  IS_DRIVER=false  → follower (workers 1..N-1): start a gRPC server, wait for
-                     init() from the driver, then serve forward/backward RPCs.
-                     Identical to centralized workers, except no registration step.
-
-Key P2P properties:
-  - No coordinator process: driver (worker 0) plays both worker-0 and coordinator roles.
-  - Labels travel directly from driver to last worker — intermediate workers never
-    see labels, preserving the split-learning privacy guarantee.
-  - Memory-efficient: each worker holds only its own partition slice.
-  - GPipe micro-batching supported: driver fans out M micro-batches then waits.
+Model  : TinyGPT — 4 transformer blocks, d_model=128, 4 heads  (~830K params)
+Data   : byte-level LM on all .md files under /workspace (corpus mounted at runtime)
+Task   : predict next byte from a 64-byte context window
+Input  : int64 token IDs  (SplitLayer already handles non-float inputs correctly)
 
 Environment variables:
   IS_DRIVER          true/false (default false)
-  WORKER_INDEX       0-based index (default 0 for driver, set per container)
+  WORKER_INDEX       0-based index
   WORKER_PEERS       comma-separated "host:port" list in slice-assignment order
-                     (overrides discovery.peers from YAML)
-  WORKER_ADDRESS     address advertised to peers (default hostname:port)
+  WORKER_ADDRESS     address advertised to peers
   EXPERIMENT_CONFIG  path to YAML experiment config
 """
 
@@ -38,11 +28,10 @@ from concurrent import futures
 
 import grpc
 import torch
-import torchvision
-import torchvision.transforms as T
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, TensorDataset
 
 import torchslicer as ts
 from torchslicer.executors.worker import (
@@ -65,43 +54,159 @@ from torchslicer.discovery.base import NodeInfo
 from torchslicer.config import RunConfig
 
 
-# ── dataset / model (customize per experiment) ─────────────────────────────────
+# ── model ─────────────────────────────────────────────────────────────────────
 
-def get_dataset(data_dir: str = '/workspace/data', batch_size: int = 64,
-                n_train: int = 10000):
-    transform = T.Compose([
-        T.RandomHorizontalFlip(),
-        T.RandomCrop(32, padding=4),
-        T.ToTensor(),
-        T.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
-    ds = torchvision.datasets.CIFAR10(
-        root=data_dir, train=True, download=True, transform=transform)
-    indices = torch.randperm(len(ds))[:n_train].tolist()
-    return DataLoader(Subset(ds, indices), batch_size=batch_size,
-                      shuffle=True, num_workers=0)
+VOCAB_SIZE = 256    # byte-level
+D_MODEL    = 128
+N_HEADS    = 4
+N_LAYERS   = 4
+MAX_SEQ    = 64
 
 
-def build_model():
-    model         = torchvision.models.resnet18()
-    model.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-    model.maxpool = nn.Identity()
-    model.fc      = nn.Linear(512, 10)
-    return model
+class CausalSelfAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.n_heads = N_HEADS
+        self.d_head  = D_MODEL // N_HEADS
+        self.qkv     = nn.Linear(D_MODEL, 3 * D_MODEL, bias=False)
+        self.proj    = nn.Linear(D_MODEL, D_MODEL, bias=False)
+        self.register_buffer(
+            "mask",
+            torch.tril(torch.ones(MAX_SEQ, MAX_SEQ)).view(1, 1, MAX_SEQ, MAX_SEQ),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).split(C, dim=2)
+        q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        att = (q @ k.transpose(-2, -1)) * (self.d_head ** -0.5)
+        att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float("-inf"))
+        att = F.softmax(att, dim=-1)
+        out = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        return self.proj(out)
 
 
-# ── embedded coordinator for the driver ────────────────────────────────────────
+class FeedForward(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(D_MODEL, 4 * D_MODEL, bias=False),
+            nn.GELU(),
+            nn.Linear(4 * D_MODEL, D_MODEL, bias=False),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ln1  = nn.LayerNorm(D_MODEL)
+        self.attn = CausalSelfAttention()
+        self.ln2  = nn.LayerNorm(D_MODEL)
+        self.ff   = FeedForward()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ff(self.ln2(x))
+        return x
+
+
+class TokenEmbedding(nn.Module):
+    """Token + positional embedding. Accepts int64 byte IDs."""
+
+    def __init__(self):
+        super().__init__()
+        self.tok = nn.Embedding(VOCAB_SIZE, D_MODEL)
+        self.pos = nn.Embedding(MAX_SEQ, D_MODEL)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        T = x.size(1)
+        return self.tok(x) + self.pos(torch.arange(T, device=x.device))
+
+
+class LMHead(nn.Module):
+    """LayerNorm + linear projection. Returns logits for the last position only."""
+
+    def __init__(self):
+        super().__init__()
+        self.ln   = nn.LayerNorm(D_MODEL)
+        self.proj = nn.Linear(D_MODEL, VOCAB_SIZE, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.ln(x[:, -1, :]))   # [B, VOCAB_SIZE]
+
+
+class TinyGPT(nn.Module):
+    """
+    Flat sequential model: each direct child is an opaque leaf for TorchSlicer's
+    shallow tracer.  Input: int64 byte IDs [B, MAX_SEQ].  Output: [B, VOCAB_SIZE].
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.embed   = TokenEmbedding()
+        self.block_0 = TransformerBlock()
+        self.block_1 = TransformerBlock()
+        self.block_2 = TransformerBlock()
+        self.block_3 = TransformerBlock()
+        self.head    = LMHead()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.embed(x)
+        x = self.block_0(x)
+        x = self.block_1(x)
+        x = self.block_2(x)
+        x = self.block_3(x)
+        return self.head(x)
+
+
+def build_model() -> nn.Module:
+    return TinyGPT()
+
+
+# ── dataset ───────────────────────────────────────────────────────────────────
+
+def get_dataset(data_dir: str = "/workspace", batch_size: int = 64,
+                n_train: int = 50_000):
+    """Byte-level LM on .md files under data_dir. Samples up to n_train examples."""
+    corpus = bytearray()
+    for fname in sorted(os.listdir(data_dir)):
+        if fname.endswith(".md"):
+            path = os.path.join(data_dir, fname)
+            try:
+                corpus += open(path, "rb").read()
+            except OSError:
+                pass
+
+    if len(corpus) < MAX_SEQ + 2:
+        raise RuntimeError(
+            f"corpus too short ({len(corpus)} bytes); need at least {MAX_SEQ + 2}")
+
+    ids = torch.frombuffer(bytes(corpus), dtype=torch.uint8).long()
+    n   = min(len(ids) - MAX_SEQ, n_train)
+
+    # random subsample for reproducibility
+    torch.manual_seed(42)
+    indices = torch.randperm(len(ids) - MAX_SEQ)[:n]
+    inputs  = torch.stack([ids[i : i + MAX_SEQ] for i in indices])
+    targets = ids[indices + MAX_SEQ]
+
+    print(f"[dataset] corpus={len(corpus):,} bytes  samples={n:,}  "
+          f"vocab={VOCAB_SIZE}  seq_len={MAX_SEQ}")
+    return DataLoader(TensorDataset(inputs, targets),
+                      batch_size=batch_size, shuffle=True, drop_last=True)
+
+
+# ── everything below is identical in structure to examples/train/p2p/worker/main.py ──
+# ── (P2P driver/follower infrastructure) ─────────────────────────────────────
 
 class _P2PCoordinatorServicer(
     coordinator_service_pb2_grpc.CoordinatorServiceServicer
 ):
-    """Minimal coordinator embedded in the driver.
-
-    The last worker sends report_metrics here instead of a separate coordinator
-    process. batch_done is called directly (not via RPC) by the driver's own
-    _send_backward override to avoid a loopback gRPC call.
-    """
-
     def __init__(self):
         self._batch_done   = threading.Event()
         self._batch_losses: list[float] = []
@@ -123,11 +228,9 @@ class _P2PCoordinatorServicer(
         )
 
     def signal_batch_done(self):
-        """Called directly by the driver (no RPC overhead)."""
         self._batch_done.set()
 
     def wait_batch(self) -> float:
-        """Block until the full forward→backward chain completes; return avg loss."""
         self._batch_done.wait()
         self._batch_done.clear()
         with self._lock:
@@ -137,18 +240,7 @@ class _P2PCoordinatorServicer(
         return loss
 
 
-# ── driver servicer ────────────────────────────────────────────────────────────
-
 class P2PDriverServicer(WorkerServicer):
-    """WorkerServicer for the driver node (worker 0).
-
-    Extends base WorkerServicer with:
-      - _coordinator_svc: reference to the embedded coordinator (no loopback RPC)
-      - _last_stub: gRPC stub to the last worker for sending labels directly
-      - run_own_forward(): driver's own partition forward (called from training loop)
-      - _send_backward() override: signals batch completion via coordinator directly
-    """
-
     def __init__(self, coordinator_svc: _P2PCoordinatorServicer):
         super().__init__()
         self._coordinator_svc = coordinator_svc
@@ -158,45 +250,34 @@ class P2PDriverServicer(WorkerServicer):
         self._last_stub = stub
 
     def run_own_forward(self, batch_id: int, inputs: torch.Tensor):
-        """Run driver's own partition forward and send activation to next worker."""
         try:
             self._profiler.begin_batch(batch_id)
             self._profiler.mark_idle_end("fwd")
-
             tensor = inputs.to(self.device)
             with self._profiler.phase("forward"):
                 out   = self.layer(tensor)
                 x_ref = self.layer.x
-
             with self._lock:
                 self._outputs[batch_id] = (out, x_ref)
-
             with self._profiler.phase("send_fwd"):
                 self._next_stub.forward(worker_service_pb2.ForwardRequest(
                     batch_id=batch_id,
                     input=serialize_tensor(out),
                 ))
-
             self._profiler.mark_idle_start("bwd")
         except Exception as e:
             print(f"[p2p-driver forward] ERROR batch_id={batch_id}: {e}")
             import traceback; traceback.print_exc()
 
     def _send_backward(self, batch_id: int, grad: torch.Tensor, is_last_micro: bool = True):
-        """Override: driver has no prev_worker — signal batch done directly."""
         if self._prev_stub:
-            # Should not happen for driver (worker 0 has no predecessor), but
-            # kept for safety if topology changes.
             super()._send_backward(batch_id, grad, is_last_micro)
         else:
-            # Driver is the first worker — no upstream gradient to send.
             if is_last_micro:
                 self._coordinator_svc.signal_batch_done()
             self._profiler.mark_idle_start("fwd")
             self._profiler.end_batch()
 
-
-# ── SliceConfig helpers ────────────────────────────────────────────────────────
 
 def _build_layer_configs(layers: list) -> list:
     configs = []
@@ -230,10 +311,7 @@ def _build_criterion_config(cfg: dict):
     )
 
 
-# ── stats helpers ─────────────────────────────────────────────────────────────
-
 def _follower_stats_to_dict(resp, epoch: int) -> dict:
-    """Convert WorkerStatsResponse proto → flat dict for worker_epoch.jsonl."""
     def _ps(ps, name: str) -> dict:
         if ps.count == 0:
             return {}
@@ -250,12 +328,9 @@ def _follower_stats_to_dict(resp, epoch: int) -> dict:
         "n_batches": resp.n_batches,
     }
     for name, proto_field in [
-        ("forward",   resp.forward),
-        ("backward",  resp.backward),
-        ("optimizer", resp.optimizer),
-        ("send_fwd",  resp.send_fwd),
-        ("send_bwd",  resp.send_bwd),
-        ("idle_fwd",  resp.idle_fwd),
+        ("forward",   resp.forward),   ("backward",  resp.backward),
+        ("optimizer", resp.optimizer), ("send_fwd",  resp.send_fwd),
+        ("send_bwd",  resp.send_bwd),  ("idle_fwd",  resp.idle_fwd),
         ("idle_bwd",  resp.idle_bwd),
     ]:
         entry.update(_ps(proto_field, name))
@@ -266,39 +341,24 @@ def _follower_stats_to_dict(resp, epoch: int) -> dict:
     return entry
 
 
-# ── driver: configure own slice ────────────────────────────────────────────────
-
-def _configure_driver_slice(
-    driver: P2PDriverServicer,
-    partition,
-    all_layers: list,
-    peers: list,
-    opt_cfg: dict,
-    run_id: str,
-    cfg: RunConfig,
-):
-    """Configure driver's own partition directly (no init() RPC self-call)."""
+def _configure_driver_slice(driver, partition, all_layers, peers, opt_cfg, run_id, cfg):
     driver._reset_state()
-
     own_layers   = [all_layers[j] for j in partition.layer_indices]
     predecessors = (
         [list(p) for p in partition.predecessors]
         if partition.predecessors else None
     )
-
-    driver.layer           = SplitLayer(own_layers, is_last=False, predecessors=predecessors)
-    driver.is_last         = False
-    driver._run_id         = run_id
-    driver._worker_index   = 0
-    driver.prev_worker     = None
-    driver.next_worker     = peers[1] if len(peers) > 1 else None
-    driver._n_micro        = cfg.pipeline.n_micro if cfg.pipeline.use_gpipe else 1
+    driver.layer         = SplitLayer(own_layers, is_last=False, predecessors=predecessors)
+    driver.is_last       = False
+    driver._run_id       = run_id
+    driver._worker_index = 0
+    driver.prev_worker   = None
+    driver.next_worker   = peers[1] if len(peers) > 1 else None
+    driver._n_micro      = cfg.pipeline.n_micro if cfg.pipeline.use_gpipe else 1
 
     if driver.next_worker:
         driver._next_stub = worker_service_pb2_grpc.WorkerServiceStub(
             _channel(driver.next_worker))
-
-    # No coordinator stub needed: _send_backward is overridden to signal directly.
 
     extra     = {k: v for k, v in opt_cfg.get("params", {}).items() if k != "lr"}
     trainable = [p for p in driver.layer.parameters() if p.requires_grad]
@@ -310,96 +370,65 @@ def _configure_driver_slice(
     )
     driver.layer.set_optimizer(opt)
     driver.layer = driver.layer.to(driver.device)
-
     driver._profiler = WorkerProfiler(
-        verbosity = cfg.profile.verbosity,
-        memory    = cfg.profile.memory,
-        device    = driver.device,
+        verbosity=cfg.profile.verbosity,
+        memory=cfg.profile.memory,
+        device=driver.device,
     )
-
     layer_names = [type(l).__name__ for l in driver.layer.layers]
     print(f"[p2p-driver] own slice configured: layers={layer_names}  "
           f"next={driver.next_worker}  device={driver.device}")
 
 
-# ── training loop (driver only) ────────────────────────────────────────────────
-
-def run_training(
-    driver: P2PDriverServicer,
-    coordinator_svc: _P2PCoordinatorServicer,
-    last_stub,           # gRPC stub to last worker (for label delivery)
-    data_loader,
-    cfg: RunConfig,
-    follower_stubs: list = None,   # [(peer_addr, stub), ...]
-    run_logger: RunLogger = None,
-    callbacks: list = None,
-    verbose: bool = True,
-):
+def run_training(driver, coordinator_svc, last_stub, data_loader, cfg,
+                 follower_stubs=None, run_logger=None, callbacks=None, verbose=True):
     n_micro        = cfg.pipeline.n_micro if cfg.pipeline.use_gpipe else 1
     n_total        = len(data_loader)
     callbacks      = callbacks or []
     follower_stubs = follower_stubs or []
 
     for cb in callbacks:
-        try:
-            cb.on_train_begin(run_id=cfg.run_id, config={})
-        except Exception as e:
-            print(f"[callback] on_train_begin error: {e}")
+        try: cb.on_train_begin(run_id=cfg.run_id, config={})
+        except Exception as e: print(f"[callback] on_train_begin error: {e}")
 
     for epoch in range(cfg.training.epochs):
-        total_loss         = 0.0
-        n_batches          = 0
-        data_load_total_ms = 0.0
-        send_total_ms      = 0.0
-        wait_total_ms      = 0.0
-        epoch_t0           = time.perf_counter()
+        total_loss = data_load_ms = send_ms = wait_ms = 0.0
+        n_batches  = 0
+        epoch_t0   = time.perf_counter()
 
         for cb in callbacks:
-            try:
-                cb.on_epoch_begin(epoch)
-            except Exception as e:
-                print(f"[callback] on_epoch_begin error: {e}")
+            try: cb.on_epoch_begin(epoch)
+            except Exception as e: print(f"[callback] on_epoch_begin error: {e}")
 
         iter_t0 = time.perf_counter()
         for inputs, labels in data_loader:
-            data_load_total_ms += (time.perf_counter() - iter_t0) * 1000.0
+            data_load_ms += (time.perf_counter() - iter_t0) * 1000.0
             batch_id = epoch * n_total + n_batches
 
             send_t0 = time.perf_counter()
             if n_micro > 1:
-                micro_inputs = inputs.chunk(n_micro)
-                micro_labels = labels.chunk(n_micro)
+                mi, ml = inputs.chunk(n_micro), labels.chunk(n_micro)
                 for m in range(n_micro):
                     mbid = batch_id * n_micro + m
-                    # Send label directly to last worker (privacy: bypasses intermediates)
                     last_stub.forward(worker_service_pb2.ForwardRequest(
-                        batch_id=mbid,
-                        label=serialize_tensor(micro_labels[m]),
-                    ))
-                    # Run driver's own forward in serialised compute pool
-                    driver._pool.submit(driver.run_own_forward, mbid, micro_inputs[m])
+                        batch_id=mbid, label=serialize_tensor(ml[m])))
+                    driver._pool.submit(driver.run_own_forward, mbid, mi[m])
             else:
-                # Send label directly to last worker
                 last_stub.forward(worker_service_pb2.ForwardRequest(
-                    batch_id=batch_id,
-                    label=serialize_tensor(labels),
-                ))
+                    batch_id=batch_id, label=serialize_tensor(labels)))
                 driver._pool.submit(driver.run_own_forward, batch_id, inputs)
-            send_total_ms += (time.perf_counter() - send_t0) * 1000.0
+            send_ms += (time.perf_counter() - send_t0) * 1000.0
 
             wait_t0 = time.perf_counter()
             loss = coordinator_svc.wait_batch()
-            wait_total_ms += (time.perf_counter() - wait_t0) * 1000.0
+            wait_ms += (time.perf_counter() - wait_t0) * 1000.0
 
             total_loss += loss
             n_batches  += 1
 
             if run_logger:
-                run_logger.log(
-                    step=batch_id, epoch=epoch, batch=n_batches,
-                    loss=round(loss, 6), phase="batch",
-                )
-
+                run_logger.log(step=batch_id, epoch=epoch, batch=n_batches,
+                               loss=round(loss, 6), phase="batch")
             if verbose:
                 print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss:.4f}")
 
@@ -409,87 +438,50 @@ def run_training(
         duration = time.perf_counter() - epoch_t0
         print(f"[epoch {epoch}] avg_loss={avg:.4f}  duration={duration:.1f}s")
 
-        epoch_metrics = {
-            "step":       epoch,
-            "epoch":      epoch,
-            "loss":       round(avg, 6),
-            "duration_s": round(duration, 3),
-            "phase":      "epoch",
-        }
+        epoch_metrics = {"step": epoch, "epoch": epoch, "loss": round(avg, 6),
+                         "duration_s": round(duration, 3), "phase": "epoch"}
         for cb in callbacks:
             try:
                 result = cb.on_epoch_end(epoch, epoch_metrics)
-                if isinstance(result, dict):
-                    epoch_metrics = result
-            except Exception as e:
-                print(f"[callback] on_epoch_end error: {e}")
+                if isinstance(result, dict): epoch_metrics = result
+            except Exception as e: print(f"[callback] on_epoch_end error: {e}")
 
         if run_logger:
             run_logger.log(**epoch_metrics)
-
             if cfg.profile.verbosity >= 1:
-                run_logger.log(
-                    step=epoch, epoch=epoch,
-                    data_load_total_ms=round(data_load_total_ms, 3),
-                    send_total_ms=round(send_total_ms, 3),
-                    wait_total_ms=round(wait_total_ms, 3),
-                    n_batches=n_batches,
-                    phase="coordinator_epoch",
-                )
-
-                # Driver's own stats (no RPC — direct profiler access)
+                run_logger.log(step=epoch, epoch=epoch,
+                               data_load_total_ms=round(data_load_ms, 3),
+                               send_total_ms=round(send_ms, 3),
+                               wait_total_ms=round(wait_ms, 3),
+                               n_batches=n_batches, phase="coordinator_epoch")
                 driver_summary = driver._profiler.epoch_summary(epoch)
                 driver._profiler.reset_epoch()
-                driver_entry = {
-                    "step": epoch, "epoch": epoch,
-                    "worker": 0, "phase": "worker_epoch",
-                    "n_batches": driver_summary.get("n_batches", 0),
-                }
+                driver_entry = {"step": epoch, "epoch": epoch, "worker": 0,
+                                "phase": "worker_epoch",
+                                "n_batches": driver_summary.get("n_batches", 0)}
                 for phase_name in ("forward", "backward", "optimizer",
                                    "send_fwd", "send_bwd", "idle_fwd", "idle_bwd"):
                     for stat in ("avg_ms", "min_ms", "max_ms", "p95_ms", "total_ms"):
                         k = f"{phase_name}_{stat}"
                         if k in driver_summary:
                             driver_entry[k] = driver_summary[k]
-                if driver_summary.get("forward_peak_mem_mb"):
-                    driver_entry["peak_mem_mb"] = driver_summary["forward_peak_mem_mb"]
                 run_logger.log(**driver_entry)
-
-                # Followers' stats via get_stats RPC
                 for fi, (peer_addr, stub) in enumerate(follower_stubs):
                     try:
                         resp = stub.get_stats(worker_service_pb2.GetStatsRequest(
-                            run_id    = cfg.run_id,
-                            epoch     = epoch,
-                            verbosity = cfg.profile.verbosity,
-                        ))
+                            run_id=cfg.run_id, epoch=epoch,
+                            verbosity=cfg.profile.verbosity))
                         run_logger.log(**_follower_stats_to_dict(resp, epoch))
-                        if cfg.profile.verbosity >= 3:
-                            for b in resp.batches:
-                                run_logger.log(
-                                    step=epoch, epoch=epoch,
-                                    worker=resp.worker_index, batch_id=b.batch_id,
-                                    forward_ms=b.forward_ms, backward_ms=b.backward_ms,
-                                    optimizer_ms=b.optimizer_ms, send_fwd_ms=b.send_fwd_ms,
-                                    send_bwd_ms=b.send_bwd_ms, idle_fwd_ms=b.idle_fwd_ms,
-                                    idle_bwd_ms=b.idle_bwd_ms, peak_mem_mb=b.peak_mem_mb,
-                                    phase="worker_batch",
-                                )
                     except Exception as e:
-                        print(f"[get_stats] follower {fi + 1} ({peer_addr}): {e}")
+                        print(f"[get_stats] follower {fi+1} ({peer_addr}): {e}")
 
     log_history = run_logger.log_history if run_logger else []
     for cb in callbacks:
-        try:
-            cb.on_train_end(log_history)
-        except Exception as e:
-            print(f"[callback] on_train_end error: {e}")
+        try: cb.on_train_end(log_history)
+        except Exception as e: print(f"[callback] on_train_end error: {e}")
 
-
-# ── helpers ────────────────────────────────────────────────────────────────────
 
 def _init_with_retry(stub, slice_cfg, peer_addr: str, timeout: float = 60.0):
-    """Send init() to a follower, retrying until it accepts or timeout elapses."""
     deadline = time.monotonic() + timeout
     attempt  = 0
     while time.monotonic() < deadline:
@@ -499,16 +491,13 @@ def _init_with_retry(stub, slice_cfg, peer_addr: str, timeout: float = 60.0):
             if e.code() == grpc.StatusCode.UNAVAILABLE:
                 if attempt == 0:
                     print(f"[p2p-driver] waiting for follower {peer_addr} ...")
-                time.sleep(1.0)
-                attempt += 1
+                time.sleep(1.0); attempt += 1
             else:
-                print(f"[p2p-driver] init → {peer_addr}: FAILED — {e}")
-                return None
-    print(f"[p2p-driver] init → {peer_addr}: timeout after {timeout:.0f}s")
-    return None
+                print(f"[p2p-driver] init → {peer_addr}: FAILED — {e}"); return None
+    print(f"[p2p-driver] init → {peer_addr}: timeout after {timeout:.0f}s"); return None
 
 
-# ── entry point ────────────────────────────────────────────────────────────────
+# ── entry point ───────────────────────────────────────────────────────────────
 
 def serve():
     tracer.auto_configure_if_env()
@@ -526,7 +515,7 @@ def serve():
         if peers_env else cfg.discovery.peers
     )
 
-    # ── Follower (workers 1..N-1) ───────────────────────────────────────────────
+    # ── Follower ───────────────────────────────────────────────────────────────
     if not is_driver:
         servicer = WorkerServicer()
         server   = grpc.server(futures.ThreadPoolExecutor(max_workers=10),
@@ -540,13 +529,11 @@ def serve():
         print(f"[p2p-follower] {hostname} terminated cleanly")
         return
 
-    # ── Driver (worker 0) ───────────────────────────────────────────────────────
+    # ── Driver ─────────────────────────────────────────────────────────────────
     if not peers:
-        print("[p2p-driver] ERROR: WORKER_PEERS env var or discovery.peers in config must be set")
+        print("[p2p-driver] ERROR: WORKER_PEERS env var or discovery.peers must be set")
         sys.exit(1)
-
     n = len(peers)
-
     if n < 2:
         print("[p2p-driver] ERROR: P2P topology requires at least 2 workers")
         sys.exit(1)
@@ -563,22 +550,23 @@ def serve():
     driver_svc.set_server(server)
     print(f"[p2p-driver] started on {node_address}  (n_workers={n})")
 
-    # Build model graph + partitions
-    model        = build_model()
-    sliced       = ts.slice(model, strategy="uniform", n=n)
-    all_layers   = sliced.graph.get_layers()
-    partitions   = sliced.partitions
-    opt_cfg      = cfg.training.optimizer
-    crit_cfg     = cfg.training.criterion
-    run_id       = cfg.run_id
+    model      = build_model()
+    n_params   = sum(p.numel() for p in model.parameters())
+    sliced     = ts.slice(model, strategy="uniform", n=n)
+    all_layers = sliced.graph.get_layers()
+    partitions = sliced.partitions
+    opt_cfg    = cfg.training.optimizer
+    crit_cfg   = cfg.training.criterion
+    run_id     = cfg.run_id
+    print(f"[p2p-driver] TinyGPT  params={n_params:,}  vocab={VOCAB_SIZE}  "
+          f"d_model={D_MODEL}  blocks={N_LAYERS}  layers={len(all_layers)}")
 
-    # Connect to follower peers
+    # Connect to follower peers and send SliceConfig
     follower_stubs: list[tuple[str, object]] = []
     for peer_addr in peers[1:]:
         stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(peer_addr))
         follower_stubs.append((peer_addr, stub))
 
-    # Send SliceConfig to each follower
     print(f"[p2p-driver] distributing slices to {len(follower_stubs)} follower(s) ...")
     for fi, (peer_addr, stub) in enumerate(follower_stubs):
         wi      = fi + 1
@@ -595,7 +583,7 @@ def serve():
             is_last           = is_last,
             prev_worker       = peers[wi - 1],
             next_worker       = peers[wi + 1] if wi < n - 1 else "",
-            coordinator       = node_address,   # driver acts as coordinator
+            coordinator       = node_address,
             n_micro           = cfg.pipeline.n_micro if cfg.pipeline.use_gpipe else 1,
             run_id            = run_id,
             checkpoint_path   = "",
@@ -609,15 +597,12 @@ def serve():
             sys.exit(1)
         print(f"[p2p-driver] init → {peer_addr}  ok={res.ok}  {res.message}")
 
-    # Configure driver's own slice (partition 0)
     _configure_driver_slice(driver_svc, partitions[0], all_layers,
                             peers, opt_cfg, run_id, cfg)
 
-    # Stubs used during training
-    last_stub = follower_stubs[-1][1]   # last worker receives labels
+    last_stub = follower_stubs[-1][1]
     driver_svc.set_last_stub(last_stub)
 
-    # Initialise RunLogger
     run_logger = None
     if cfg.logging.enabled:
         run_dir    = os.path.join(cfg.logging.dir, run_id)
@@ -625,37 +610,34 @@ def serve():
         layer_names = [type(l).__name__ for l in all_layers]
         run_logger.record_executor("p2p")
         run_logger.record_config(cfg)
-        run_logger.record_model(build_model().__class__.__name__, layer_names)
+        run_logger.record_model("TinyGPT", layer_names)
         run_logger.record_split(partitions, layer_names, "uniform")
-        nodes = [
+        run_logger.record_workers([
             NodeInfo(node_id=f"worker{i}", address=peers[i],
-                     device="unknown", memory_mb=0)
+                     device="cuda" if torch.cuda.is_available() else "cpu",
+                     memory_mb=get_available_memory_mb(
+                         "cuda" if torch.cuda.is_available() else "cpu"))
             for i in range(n)
-        ]
-        run_logger.record_workers(nodes)
+        ])
 
-    # Run training
-    data_loader = get_dataset()
+    data_loader = get_dataset(batch_size=cfg.training.optimizer.get(
+        "batch_size", 64) if isinstance(cfg.training.optimizer, dict) else 64)
     print(f"[p2p-driver] training start  run_id={run_id}  epochs={cfg.training.epochs}  "
           f"gpipe={cfg.pipeline.use_gpipe}  n_micro={cfg.pipeline.n_micro}")
-    run_training(
-        driver_svc, coordinator_svc, last_stub, data_loader, cfg,
-        follower_stubs = follower_stubs,
-        run_logger     = run_logger,
-        callbacks      = [],
-        verbose        = True,
-    )
 
-    # Graceful shutdown of all followers
+    run_training(driver_svc, coordinator_svc, last_stub, data_loader, cfg,
+                 follower_stubs=follower_stubs, run_logger=run_logger,
+                 callbacks=[], verbose=True)
+
     run_dir = os.path.join(cfg.logging.dir, run_id) if cfg.logging.enabled else ""
     for fi, (peer_addr, stub) in enumerate(follower_stubs):
         try:
             stub.shutdown(worker_service_pb2.ShutdownRequest(
-                save_checkpoint = cfg.checkpoint.enabled,
-                checkpoint_dir  = run_dir,
-                run_id          = run_id,
-                epoch           = cfg.training.epochs - 1,
-                worker_index    = fi + 1,
+                save_checkpoint=cfg.checkpoint.enabled,
+                checkpoint_dir=run_dir,
+                run_id=run_id,
+                epoch=cfg.training.epochs - 1,
+                worker_index=fi + 1,
             ))
             print(f"[p2p-driver] shutdown → {peer_addr}")
         except Exception as e:
@@ -667,12 +649,11 @@ def serve():
         for i in range(n):
             run_logger.record_artifact(
                 "checkpoint", f"worker_{i}_epoch_{cfg.training.epochs - 1}.pt")
-
     if run_logger:
         run_logger.flush()
 
     print(f"[p2p-driver] done  run_id={run_id}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     serve()

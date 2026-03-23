@@ -70,6 +70,40 @@ run-p2p-cpu: _env ## Run P2P CPU stack (2 workers, no coordinator). CONFIG=path/
 		-f docker-compose.p2p.yml \
 		up --abort-on-container-exit
 
+.PHONY: run-lm-gpu
+run-lm-gpu: _env ## Run TinyGPT LM experiment (GPU, P2P). CONFIG=path/to/experiment.yaml
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.lm.yml \
+		-f docker-compose.lm.gpu.yml \
+		up --abort-on-container-exit
+
+.PHONY: run-lm-cpu
+run-lm-cpu: _env ## Run TinyGPT LM experiment (CPU, P2P). CONFIG=path/to/experiment.yaml
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.lm.yml \
+		up --abort-on-container-exit
+
+.PHONY: run-lora-gpu
+run-lora-gpu: _env ## Run TinyGPT+LoRA experiment (GPU, P2P). CONFIG=path/to/experiment.yaml
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.lora.yml \
+		-f docker-compose.lora.gpu.yml \
+		up --abort-on-container-exit
+
+.PHONY: run-lora-cpu
+run-lora-cpu: _env ## Run TinyGPT+LoRA experiment (CPU, P2P). CONFIG=path/to/experiment.yaml
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.lora.yml \
+		up --abort-on-container-exit
+
+.PHONY: down-lora
+down-lora: _env ## Stop and remove TinyGPT+LoRA stack containers
+	docker compose -f docker-compose.lora.yml down
+
+.PHONY: down-lm
+down-lm: _env ## Stop and remove TinyGPT LM stack containers
+	docker compose -f docker-compose.lm.yml down
+
 .PHONY: down
 down: _env ## Stop and remove centralized stack containers
 	docker compose down

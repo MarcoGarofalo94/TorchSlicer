@@ -396,6 +396,12 @@ class DistributedExecutor(BaseExecutor):
                 total_loss += loss
                 n_batches  += 1
 
+                if self._run_logger:
+                    self._run_logger.log(
+                        step=batch_id, epoch=epoch, batch=n_batches,
+                        loss=round(loss, 6), phase="batch",
+                    )
+
                 if verbose:
                     print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss:.4f}")
 

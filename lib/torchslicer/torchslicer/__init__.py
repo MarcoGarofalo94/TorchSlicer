@@ -21,6 +21,46 @@ from .config import (
 from .monitor import TrainingCallback, RunLogger
 
 
+def peft_unwrap(model) -> "nn.Module":
+    """
+    Unwrap a HuggingFace PEFT model so that ts.slice() can see its
+    internal structure.
+
+    After get_peft_model(), the top-level object is a PeftModel whose only
+    direct child is 'base_model' — ts.slice() would treat the whole thing as
+    one unsplittable leaf.  peft_unwrap() returns model.base_model.model:
+    the original model with LoRA adapters injected in-place, so from_module()
+    sees the familiar children (embedding, transformer blocks, head, etc.).
+
+    Workers must have peft installed to deserialise LoRA-modified layers
+    (included in the Docker images; install manually with: pip install peft).
+
+    Idempotent on non-PEFT models — safe to call unconditionally.
+
+    Example::
+
+        from peft import LoraConfig, get_peft_model
+        import torchslicer as ts
+
+        model    = MyTransformer()
+        lora_cfg = LoraConfig(r=8, target_modules=["qkv"])
+        model    = get_peft_model(model, lora_cfg)
+
+        sliced = ts.slice(ts.peft_unwrap(model), strategy="uniform", n=2)
+        sliced.train(loader, optimizer_cfg, criterion_cfg, epochs=5)
+    """
+    try:
+        from peft import PeftModel
+    except ImportError:
+        raise ImportError(
+            "peft is required for peft_unwrap(). "
+            "Install it with: pip install peft"
+        )
+    if isinstance(model, PeftModel):
+        return model.base_model.model
+    return model
+
+
 class SlicedModel:
     def __init__(self, graph, partitions, executor,
                  model_name: str = "unknown", strategy_name: str = "unknown"):

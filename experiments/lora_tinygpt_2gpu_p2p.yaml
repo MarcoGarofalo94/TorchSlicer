@@ -1,0 +1,30 @@
+run_id: lora_tinygpt_2gpu_p2p
+
+# Fine-tuning epochs (distributed P2P, LoRA params only)
+# Pre-training epochs controlled by PRETRAIN_EPOCHS env var (default 5)
+training:
+  epochs: 5
+  optimizer:
+    name: AdamW
+    params:
+      lr: 1.0e-4        # lower LR for fine-tuning
+      weight_decay: 0.01
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+
+pipeline:
+  use_gpipe: false
+  n_micro: 1
+
+discovery:
+  backend: static
+  peers:
+    - lora-worker0:50051
+    - lora-worker1:50051
+
+logging:
+  enabled: true
+
+profile:
+  verbosity: 1

@@ -93,9 +93,20 @@
 - [x] `docker-compose.p2p.yml` + `docker-compose.p2p.gpu.yml`; `experiments/resnet18_2gpu_p2p.yaml`
 - [x] Makefile `run-p2p-gpu` / `run-p2p-cpu` targets
 - [x] Smoke-tested: 20 epochs ResNet18/CIFAR-10, 2 GPU workers, both exit 0 (loss 2.4 → 0.52)
-- [ ] GPipe in P2P (driver fans out micro-batches; structure ready, needs epoch-boundary sync)
+- [x] **GPipe in P2P** — epoch-boundary sync verified; `is_last_micro` gates `signal_batch_done()` correctly; `examples/test_p2p_gpipe.py` integration test passes (2 workers, n_micro=2, 2 epochs, in-process gRPC servers)
+- [x] **Logging / profiling in P2P** — `RunLogger`, `WorkerProfiler`, and `get_stats` pull integrated into `examples/train/p2p/worker/main.py`; per-batch + per-epoch metrics, coordinator overhead, driver/follower profiler stats; `run_manifest.json` written at teardown; same pattern as `DistributedExecutor`
+- [x] **int64 gradient fix** — `WorkerServicer._backward()` guards `x_ref.grad if x_ref is not None else None`; unblocks transformer/LLM experiments where first partition input is token IDs (non-float → `SplitLayer` already sets `self.x = None`)
+- [x] **TinyGPT LM experiment** — `examples/train/lm/worker/main.py`; byte-level character LM (vocab=256, d_model=128, n_heads=4, 4 transformer blocks, ~830K params); corpus from `/workspace/*.md`; 2-GPU P2P Docker stack (`docker-compose.lm.yml` + `docker-compose.lm.gpu.yml`); `experiments/tinygpt_2gpu_p2p.yaml`; Makefile targets `run-lm-gpu`, `run-lm-cpu`, `down-lm`
 - [ ] `MDNSDiscovery` for zero-config local network (future)
-- [ ] Logging / profiling integration in P2P (RunLogger, WorkerProfiler, get_stats pull)
+
+## LoRA / PEFT support ✅
+- [x] **`ts.peft_unwrap(model)`** — unwraps `PeftModel` (from `get_peft_model()`) to expose its inner model for `ts.slice()`; returns `model.base_model.model` with LoRA adapters injected in-place; idempotent on non-PEFT models; raises helpful `ImportError` if `peft` not installed
+- [x] **Trainable-params filter** — `LocalExecutor`, `WorkerServicer.init()`, and both P2P driver `_configure_driver_slice()` functions now build the optimizer over `[p for p in params if p.requires_grad]`; frozen base weights (LoRA pattern) are excluded automatically, avoiding wasted optimizer state; falls back to all params if none are trainable
+- [x] **`peft` in Dockerfiles** — added to `Dockerfile.cpu` and `Dockerfile.gpu` Layer 2; workers can `torch.load()` LoRA-modified layers without extra setup
+- [x] **`peft>=0.10` optional dep** in `pyproject.toml` (`pip install torchslicer[peft]`); not required for non-PEFT usage
+- [x] **TinyGPT + LoRA example** (`examples/train/lm/lora_worker/main.py`) — same P2P topology as LM example; applies `LoraConfig(r=8, target_modules=["qkv"])` before slicing; logs trainable vs total param count; `LORA_R` / `LORA_ALPHA` env vars for override
+- [x] `experiments/lora_tinygpt_2gpu_p2p.yaml` — AdamW lr=3e-4, 10 epochs, 2-worker P2P
+- [x] `docker-compose.lora.yml` + `docker-compose.lora.gpu.yml`; Makefile targets `run-lora-gpu`, `run-lora-cpu`, `down-lora`
 
 ## REST transport
 - [ ] Implement `RESTTransport` matching `GRPCTransport` interface (Dockerfiles already ready)
@@ -111,7 +122,8 @@
 - [x] Dashboard auto-resets on new run — detects new `worker.init` span timestamps, clears stale batch data so frontend never shows data from a previous run
 - [x] Dashboard Node build OOM fix — `NODE_OPTIONS=--max-old-space-size=512` caps V8 heap during Vite build; `restart: on-failure` in compose overlay
 - [x] **`RunLogger`** (`monitor/run_logger.py`) — per-run artifact writer/reader; writes `run_manifest.json` + per-phase JSONL files to `{logging.dir}/{run_id}/`; each file is schema-homogeneous (`pd.read_json(path, lines=True)` just works); `load(run_dir)` + `to_dataframe(phase)` for plotting; checkpoints co-located when enabled
-- [x] **Per-phase log files**: `metrics.jsonl` (epoch loss/duration), `coordinator.jsonl` (overhead), `worker_epoch.jsonl` (per-worker aggregates with avg/min/max/p95 + GPU memory), `worker_batch.jsonl` (verbosity=3, per-batch detail), `partition_epoch/batch.jsonl` (local executor)
+- [x] **Per-batch logging** — `phase="batch"` maps to `metrics.jsonl` in `RunLogger`; all executors (`LocalExecutor`, `DistributedExecutor`, P2P driver) call `run_logger.log()` inside the batch loop; file updates are immediate (unbuffered), enabling `tail -f runs/{run_id}/metrics.jsonl` as a live training monitor
+- [x] **Per-phase log files**: `metrics.jsonl` (epoch + per-batch loss/duration), `coordinator.jsonl` (overhead), `worker_epoch.jsonl` (per-worker aggregates with avg/min/max/p95 + GPU memory), `worker_batch.jsonl` (verbosity=3, per-batch detail), `partition_epoch/batch.jsonl` (local executor)
 - [x] **`TrainingCallback`** (`monitor/callback.py`) — base class for training hooks; `on_epoch_end(epoch, metrics) -> dict` lets users inject custom metrics (accuracy, lr, etc.) into `metrics.jsonl`; passed via `SlicedModel.train(callbacks=[...])`
 - [x] **`WorkerProfiler`** (`monitor/profiler.py`) — worker-side per-phase timer (forward, backward, optimizer, send_fwd, send_bwd, idle_fwd, idle_bwd); verbosity=0 is zero-overhead; optional GPU memory snapshots; coordinator pulls via `get_stats` RPC after each epoch
 - [x] **`get_stats` RPC** on `worker_service.proto` — `GetStatsRequest` / `WorkerStatsResponse` with `PhaseStats` (avg/min/max/p95/total) per phase; `BatchStats` list at verbosity=3; resets worker profiler after each pull

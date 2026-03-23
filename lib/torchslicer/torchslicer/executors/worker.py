@@ -173,8 +173,10 @@ class WorkerServicer(
                 torch.load(io.BytesIO(request.optimizer.extra_params), weights_only=False)
                 if request.optimizer.extra_params else {}
             )
+            trainable = [p for p in self.layer.parameters() if p.requires_grad]
+            params = trainable if trainable else list(self.layer.parameters())
             opt = getattr(optim, request.optimizer.name)(
-                self.layer.parameters(), lr=request.optimizer.lr, **opt_extra)
+                params, lr=request.optimizer.lr, **opt_extra)
             self.layer.set_optimizer(opt)
 
             self.prev_worker = request.prev_worker or None
@@ -429,7 +431,7 @@ class WorkerServicer(
             ):
                 with self._profiler.phase("backward"):
                     out.backward(grad_in)
-                    grad = x_ref.grad
+                    grad = x_ref.grad if x_ref is not None else None
                 if is_last_micro:
                     with self._profiler.phase("optimizer"):
                         self.layer.optimize()

@@ -1,1 +1,4 @@
 numpy
+
+[peft]
+peft>=0.10
