@@ -4,6 +4,12 @@ PROJECT_NAME    = torchslicer
 CPU_TAG = $(DOCKER_REGISTRY)/$(PROJECT_NAME):cpu
 GPU_TAG = $(DOCKER_REGISTRY)/$(PROJECT_NAME):gpu
 
+# Write UID/GID into .env so docker compose picks them up for `user:` fields.
+# This ensures run artifacts in ./runs/ are owned by the host user, not root.
+.PHONY: _env
+_env:
+	@printf 'UID=%s\nGID=%s\n' "$$(id -u)" "$$(id -g)" > .env
+
 .PHONY: help
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -26,25 +32,25 @@ build: build-cpu build-gpu ## Build all images
 # Pass CONFIG= to use a YAML experiment config file:
 #   make run-cpu CONFIG=experiments/resnet18_4gpu.yaml
 .PHONY: run-cpu
-run-cpu: ## Run full stack (CPU). CONFIG=path/to/experiment.yaml optional
+run-cpu: _env ## Run full stack (CPU). CONFIG=path/to/experiment.yaml optional
 	EXPERIMENT_CONFIG=$(CONFIG) docker compose up
 
 .PHONY: run-gpu
-run-gpu: ## Run full stack (GPU). CONFIG=path/to/experiment.yaml optional
+run-gpu: _env ## Run full stack (GPU). CONFIG=path/to/experiment.yaml optional
 	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
 		-f docker-compose.yml \
 		-f docker-compose.gpu.yml \
 		up
 
 .PHONY: run-monitor
-run-monitor: ## Run CPU stack + Jaeger + dashboard. CONFIG= optional
+run-monitor: _env ## Run CPU stack + Jaeger + dashboard. CONFIG= optional
 	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
 		-f docker-compose.yml \
 		-f docker-compose.monitor.yml \
 		up
 
 .PHONY: run-gpu-monitor
-run-gpu-monitor: ## Run GPU stack + Jaeger + dashboard. CONFIG= optional
+run-gpu-monitor: _env ## Run GPU stack + Jaeger + dashboard. CONFIG= optional
 	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
 		-f docker-compose.yml \
 		-f docker-compose.gpu.yml \
@@ -52,7 +58,7 @@ run-gpu-monitor: ## Run GPU stack + Jaeger + dashboard. CONFIG= optional
 		up
 
 .PHONY: down
-down: ## Stop and remove all containers for this stack
+down: _env ## Stop and remove all containers for this stack
 	docker compose down
 
 # ── push ───────────────────────────────────────────────────────────────────────

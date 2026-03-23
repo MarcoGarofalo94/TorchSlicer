@@ -5,6 +5,7 @@ examples/train/server_.py
 configCLAUDE.md
 data/
 runs/
+.env
 
 examples/monitor/frontend/node_modules
 examples/monitor/frontend/dist

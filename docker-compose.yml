@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: docker-images/Dockerfile.cpu
     container_name: coordinator
+    user: "${UID}:${GID}"
     environment:
       - PYTHONUNBUFFERED=1
       # ── experiment config ──────────────────────────────────────────────────
@@ -44,6 +45,7 @@ services:
       context: .
       dockerfile: docker-images/Dockerfile.cpu
     container_name: worker1
+    user: "${UID}:${GID}"
     environment:
       - PYTHONUNBUFFERED=1
       - COORDINATOR_ADDRESS=coordinator:50054
@@ -59,6 +61,7 @@ services:
       context: .
       dockerfile: docker-images/Dockerfile.cpu
     container_name: worker2
+    user: "${UID}:${GID}"
     environment:
       - PYTHONUNBUFFERED=1
       - COORDINATOR_ADDRESS=coordinator:50054
@@ -74,6 +77,7 @@ services:
       context: .
       dockerfile: docker-images/Dockerfile.cpu
     container_name: worker3
+    user: "${UID}:${GID}"
     environment:
       - PYTHONUNBUFFERED=1
       - COORDINATOR_ADDRESS=coordinator:50054
@@ -89,6 +93,7 @@ services:
       context: .
       dockerfile: docker-images/Dockerfile.cpu
     container_name: worker4
+    user: "${UID}:${GID}"
     environment:
       - PYTHONUNBUFFERED=1
       - COORDINATOR_ADDRESS=coordinator:50054
