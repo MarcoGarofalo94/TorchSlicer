@@ -32,6 +32,34 @@
 - [x] `EPOCHS`, `USE_GPIPE`, `N_MICRO`, `N_WORKERS` all forwarded into coordinator container via `environment:` in compose
 - [x] Proto files live in `lib/torchslicer/torchslicer/transport/grpc/` (not in examples); auto-compiled at container startup
 
+## Discovery & lifecycle ✅
+- [x] `BaseDiscovery` abstraction — `announce()`, `discover()`, `watch()` (fault-tolerance hook) in `torchslicer/discovery/base.py`
+- [x] `CoordinatorDiscovery` — workers push `Register` RPC to coordinator at startup; coordinator waits for `N_WORKERS` registrations before dispatching `SliceConfig`; hardcoded `worker{i}` hostname generation eliminated
+- [x] `StaticDiscovery` — peer list from config; no central point; P2P path for Docker and fixed-address clusters
+- [x] `announce_to_coordinator()` — client-side helper used by workers at startup; retries until coordinator is reachable
+- [x] `NodeInfo` proto message — node_id, address, device, memory_mb; carried in `RegisterRequest` / `RegisterResponse`; `run_id` assigned by coordinator, echoed in `batch_done` / `report_metrics` / `SliceConfig`
+- [x] `Shutdown` RPC on `WorkerService` — graceful stop; `save_checkpoint` flag triggers slice save before `server.stop()`; runs in background thread so RPC returns `Ack` before shutdown
+- [x] `DistributedExecutor.teardown()` — calls `Shutdown` on all workers before stopping own gRPC server; all containers exit cleanly
+- [x] Worker state reset on `init()` — `_reset_state()` clears all per-batch dicts/stubs; workers reusable across runs without container restart
+- [x] `--abort-on-container-exit` in Makefile `run-*` targets — compose tears down all workers when coordinator exits
+- [x] Optional checkpoint — each worker saves `{checkpoint_dir}/{run_id}/worker_{index}_epoch_{n}.pt` with layer + optimizer state; coordinator saves `run_state.json`; resume via `checkpoint_path` field in `SliceConfig`; disabled by default (`CHECKPOINT_ENABLED=0`)
+- [x] `run_id` on all proto messages — forward-compat hook for fault tolerance (coordinator restart detection, worker re-registration)
+- [x] `COORDINATOR_ADDRESS` env var on workers — no more hardcoded coordinator hostname; defaults to `coordinator:50054`
+- [x] `WORKER_ADDRESS` env var — lets workers advertise a custom address to the coordinator (useful behind NAT or custom Docker networks)
+
+## Configuration system ✅
+- [x] `RunConfig` dataclass with `TrainingConfig`, `PipelineConfig`, `DiscoveryConfig`, `CheckpointConfig`, `LoggingConfig`, `ProfileConfig` sub-dataclasses
+- [x] `RunConfig.from_yaml(path)` — load from YAML experiment config file (requires PyYAML)
+- [x] `RunConfig.from_env()` — load from environment variables
+- [x] `RunConfig.load(path)` — merged load: YAML base + env var overrides; path defaults to `EXPERIMENT_CONFIG` env var
+- [x] `--config` CLI flag on `coordinator/main.py` — pass YAML path at runtime
+- [x] `.env.example` — documents all env vars with defaults; Docker Compose auto-reads `.env`
+- [x] `EXPERIMENT_CONFIG` env var — path to YAML; when set, YAML values used as base with env var overrides on top
+- [x] `experiments/resnet18_4gpu.yaml` + `experiments/resnet18_2cpu.yaml` — ready-to-use experiment configs
+- [x] Makefile `CONFIG=` parameter — `make run-gpu CONFIG=experiments/resnet18_4gpu.yaml`
+- [x] `LoggingConfig(enabled, dir)` — controls run artifact output; env vars `LOG_ENABLED`, `LOG_DIR`
+- [x] `ProfileConfig(verbosity, memory)` — controls worker profiling granularity; env vars `PROFILE_VERBOSITY`, `PROFILE_MEMORY`
+
 ## Splitting strategies (partial) ✅
 - [x] `BaseSplitter` abstract class (public API for user-defined strategies)
 - [x] `UniformSplitter` — `math.ceil(n_layers / n_partitions)` per partition
@@ -53,7 +81,7 @@
 - [ ] Cross-partition skip connections (requires executor protocol changes)
 
 ## P2P topology
-- [ ] Design P2P coordination protocol
+- [ ] Design P2P coordination protocol — `StaticDiscovery` is the first building block; `MDNSDiscovery` for zero-config local network
 - [ ] Implement `P2PTopology`
 
 ## REST transport
@@ -69,6 +97,12 @@
 - [x] Timeline tab — swimlane chart with per-worker forward/backward timing per batch
 - [x] Dashboard auto-resets on new run — detects new `worker.init` span timestamps, clears stale batch data so frontend never shows data from a previous run
 - [x] Dashboard Node build OOM fix — `NODE_OPTIONS=--max-old-space-size=512` caps V8 heap during Vite build; `restart: on-failure` in compose overlay
+- [x] **`RunLogger`** (`monitor/run_logger.py`) — per-run artifact writer/reader; writes `{logging.dir}/{run_id}/run_manifest.json` + `metrics.jsonl`; `load(run_dir)` + `to_dataframe()` for pandas-based plotting; checkpoints co-located when enabled
+- [x] **`TrainingCallback`** (`monitor/callback.py`) — base class for training hooks; `on_epoch_end(epoch, metrics) -> dict` lets users inject custom metrics (accuracy, lr, etc.) into `metrics.jsonl`; passed via `SlicedModel.train(callbacks=[...])`
+- [x] **`WorkerProfiler`** (`monitor/profiler.py`) — worker-side per-phase timer (forward, backward, optimizer, send_fwd, send_bwd, idle_fwd, idle_bwd); verbosity=0 is zero-overhead; optional GPU memory snapshots; coordinator pulls via `get_stats` RPC after each epoch
+- [x] **`get_stats` RPC** on `worker_service.proto` — `GetStatsRequest` / `WorkerStatsResponse` with `PhaseStats` (avg/min/max/p95/total) per phase; `BatchStats` list at verbosity=3; resets worker profiler after each pull
+- [x] **Coordinator-side overhead logging** — `data_load_total_ms`, `send_total_ms`, `wait_total_ms` per epoch logged as `"coordinator_epoch"` phase in `metrics.jsonl`
+- [x] **Unified run directory** — logs + checkpoints in same `{logging.dir}/{run_id}/`; `shutdown` sends the unified path so worker `.pt` files land alongside `run_manifest.json`
 - [ ] Device profiling (energy, latency)
 - [ ] Gradient norm logging per slice
 - [ ] Comparison harness: strategies × transports × topologies
@@ -95,6 +129,7 @@
 
 ## Known limitations
 - Cross-partition skip connections not supported — if a multi-input node's predecessors span partition boundaries, `validate()` raises `ValueError`. Workaround: choose `n` so skip connections stay within one partition, or wrap the block in a single `nn.Module`.
-- Hostnames `worker1`, `worker2`, `coordinator` are hardcoded in the gRPC example
+- Worker hostnames no longer hardcoded — `CoordinatorDiscovery` replaces the `worker{i}` loop; workers advertise their own address at registration time
 - `DistributedExecutor` workers receive layers as a flat sequential list; intra-partition DAG info is not sent over the wire (proto would need to carry predecessor indices). For standard models (ResNet etc.) the partitions are sequential anyway.
 - `Transport`, `Topology`, `Monitor` in `lib/` are interfaces only; implementations live in `examples/`
+- No fault tolerance — coordinator or worker crash aborts the run; checkpoint support mitigates data loss; heartbeat-based failure detection is a future addition via `BaseDiscovery.watch()` (hook already in place)

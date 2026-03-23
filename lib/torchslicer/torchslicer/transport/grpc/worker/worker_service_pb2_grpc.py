@@ -5,10 +5,8 @@ import warnings
 
 from torchslicer.transport.grpc.worker import worker_service_pb2 as torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2
 
-GRPC_GENERATED_VERSION = '1.64.0'
+GRPC_GENERATED_VERSION = '1.78.0'
 GRPC_VERSION = grpc.__version__
-EXPECTED_ERROR_RELEASE = '1.65.0'
-SCHEDULED_RELEASE_DATE = 'June 25, 2024'
 _version_not_supported = False
 
 try:
@@ -18,15 +16,12 @@ except ImportError:
     _version_not_supported = True
 
 if _version_not_supported:
-    warnings.warn(
+    raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in torchslicer/transport/grpc/worker/worker_service_pb2_grpc.py depends on'
+        + ' but the generated code in torchslicer/transport/grpc/worker/worker_service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
-        + f' This warning will become an error in {EXPECTED_ERROR_RELEASE},'
-        + f' scheduled for release on {SCHEDULED_RELEASE_DATE}.',
-        RuntimeWarning
     )
 
 
@@ -54,6 +49,16 @@ class WorkerServiceStub(object):
                 request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.BackwardRequest.SerializeToString,
                 response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
                 _registered_method=True)
+        self.shutdown = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/shutdown',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+                _registered_method=True)
+        self.get_stats = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/get_stats',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.GetStatsRequest.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.WorkerStatsResponse.FromString,
+                _registered_method=True)
 
 
 class WorkerServiceServicer(object):
@@ -77,6 +82,18 @@ class WorkerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def shutdown(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def get_stats(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -94,6 +111,16 @@ def add_WorkerServiceServicer_to_server(servicer, server):
                     servicer.backward,
                     request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.BackwardRequest.FromString,
                     response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
+            ),
+            'shutdown': grpc.unary_unary_rpc_method_handler(
+                    servicer.shutdown,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
+            ),
+            'get_stats': grpc.unary_unary_rpc_method_handler(
+                    servicer.get_stats,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.GetStatsRequest.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.WorkerStatsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -177,6 +204,60 @@ class WorkerService(object):
             '/torchslicer.worker.WorkerService/backward',
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.BackwardRequest.SerializeToString,
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def shutdown(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/shutdown',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def get_stats(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/get_stats',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.GetStatsRequest.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.WorkerStatsResponse.FromString,
             options,
             channel_credentials,
             insecure,

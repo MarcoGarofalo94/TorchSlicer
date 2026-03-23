@@ -3,9 +3,11 @@ syntax = "proto3";
 package torchslicer.worker;
 
 service WorkerService {
-    rpc init     (SliceConfig)      returns (StatusMessage);
-    rpc forward  (ForwardRequest)   returns (Ack);
-    rpc backward (BackwardRequest)  returns (Ack);
+    rpc init      (SliceConfig)      returns (StatusMessage);
+    rpc forward   (ForwardRequest)   returns (Ack);
+    rpc backward  (BackwardRequest)  returns (Ack);
+    rpc shutdown  (ShutdownRequest)  returns (Ack);
+    rpc get_stats (GetStatsRequest)  returns (WorkerStatsResponse);
 }
 
 // ── tensor ────────────────────────────────────────────────────────────────────
@@ -54,6 +56,11 @@ message SliceConfig {
     string  next_worker            = 6;  // host:port, empty if last
     string  coordinator            = 7;  // host:port
     uint32  n_micro                = 8;  // GPipe micro-batch count; 0/1 = disabled
+    string  run_id                 = 9;  // coordinator-assigned run ID; echoed on all batch messages
+    string  checkpoint_path        = 10; // non-empty if resuming from checkpoint
+    uint32  worker_index           = 11; // 0-based index; used for checkpoint naming
+    uint32  profile_verbosity      = 12; // 0=off 1=epoch totals 2=phase breakdown 3=per-batch
+    bool    profile_memory         = 13; // capture GPU memory snapshots per phase
 }
 
 // ── forward / backward ────────────────────────────────────────────────────────
@@ -67,6 +74,68 @@ message ForwardRequest {
 message BackwardRequest {
     uint32 batch_id  = 1;
     Tensor gradient  = 2;
+}
+
+// ── shutdown ──────────────────────────────────────────────────────────────────
+
+message ShutdownRequest {
+    bool   save_checkpoint = 1;  // if true, worker saves slice state before exiting
+    string checkpoint_dir  = 2;  // mount path visible to the worker container
+    string run_id          = 3;
+    uint32 epoch           = 4;  // last completed epoch, for checkpoint naming
+    uint32 worker_index    = 5;
+}
+
+// ── profiling ─────────────────────────────────────────────────────────────────
+
+message GetStatsRequest {
+    string run_id    = 1;
+    int32  epoch     = 2;
+    int32  verbosity = 3;  // if 0, use the verbosity set at init time
+}
+
+// Aggregated statistics for one phase over all batches in an epoch.
+message PhaseStats {
+    float avg_ms   = 1;
+    float min_ms   = 2;
+    float max_ms   = 3;
+    float p95_ms   = 4;
+    float total_ms = 5;
+    int32 count    = 6;
+    float peak_mem_mb = 7;  // populated only when profile_memory=true
+}
+
+// Raw per-batch timing (returned only at verbosity=3).
+message BatchStats {
+    int32 batch_id    = 1;
+    float forward_ms  = 2;
+    float backward_ms = 3;
+    float optimizer_ms = 4;
+    float send_fwd_ms = 5;
+    float send_bwd_ms = 6;
+    float idle_fwd_ms = 7;
+    float idle_bwd_ms = 8;
+    float peak_mem_mb = 9;
+}
+
+message WorkerStatsResponse {
+    int32  worker_index = 1;
+    string run_id       = 2;
+    int32  epoch        = 3;
+    // per-phase aggregates
+    PhaseStats forward   = 4;
+    PhaseStats backward  = 5;
+    PhaseStats optimizer = 6;
+    PhaseStats send_fwd  = 7;
+    PhaseStats send_bwd  = 8;
+    PhaseStats idle_fwd  = 9;
+    PhaseStats idle_bwd  = 10;
+    // memory summary
+    float peak_mem_mb  = 11;
+    float end_mem_mb   = 12;
+    int32 n_batches    = 13;
+    // raw per-batch records (verbosity=3 only)
+    repeated BatchStats batches = 14;
 }
 
 // ── responses ─────────────────────────────────────────────────────────────────

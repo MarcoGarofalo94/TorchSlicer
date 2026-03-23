@@ -21,8 +21,10 @@ TorchSlicer is a research framework implementing **split learning** in PyTorch. 
 
 **Primary motivations:**
 - Train large models on constrained devices (even a single device, sequentially)
-- Distributed training across heterogeneous (CPU/GPU) nodes
+- Distributed training across heterogeneous (CPU/GPU) nodes in a real network
 - Research platform for comparing split strategies, topologies, and transports
+
+**Design intent**: devices join the cluster by running the worker process (container or host), registering with the coordinator. The coordinator discovers them dynamically — no hardcoded hostnames, no manual address configuration.
 
 **Target usage** (add-on over existing models):
 ```python
@@ -34,7 +36,7 @@ sliced.train(train_loader, devices=[...])
 
 ---
 
-## Architecture (Target)
+## Architecture
 
 ### Layer 1 — Core (`torchslicer/core/`)
 - **`Slicer`**: Inspects a `nn.Module`, extracts child layers, serialises each via `torch.save()` for transport. Works for any `nn.Module` — no metadata mining.
@@ -42,54 +44,83 @@ sliced.train(train_loader, devices=[...])
 - **`ModelGraph`**: DAG representation of a model. `from_module()` uses `torch.fx` shallow trace to capture functional ops (`torch.flatten`, `operator.add`) as thin `nn.Module` wrappers.
 
 ### Layer 2 — Splitting Strategies (`torchslicer/strategies/`)
-- **`BaseSplitter`**: Public abstract base class users subclass to implement custom strategies. Must expose a clean, minimal interface (e.g. `split(model_graph, devices) -> List[Partition]`).
+- **`BaseSplitter`**: Public abstract base class users subclass to implement custom strategies.
 - **`UniformSplitter`**: Equal number of layers per partition (baseline). Populates intra-partition DAG predecessor info.
 - **`EnergySplitter`**: Minimize energy consumption given device profiles (not implemented)
 - **`DeadlineSplitter`**: Meet latency/deadline constraints (not implemented)
-- Strategies must be registerable so users can pass them by name or instance to the top-level API: `ts.slice(model, strategy=MyCustomSplitter())`
+- Strategies are registerable: `ts.slice(model, strategy="uniform")` or by instance/class.
 
 ### Layer 3 — Execution (`torchslicer/executors/`)
-- **`LocalExecutor`**: Single device, sequential execution (fits large model in constrained memory). Supports `verbose=True` for per-batch loss logging.
-- **`DistributedExecutor`**: Centralized topology — this process acts as coordinator. Starts an embedded gRPC server, sends `SliceConfig` to remote workers, drives the training loop synchronously via `threading.Event`.
+- **`LocalExecutor`**: Single device, sequential execution. Supports `verbose=True` and GPipe micro-batching.
+- **`DistributedExecutor`**: Centralized topology. Embeds a gRPC server, uses a `BaseDiscovery` instance to find workers, sends `SliceConfig`, drives the training loop, and signals clean shutdown via `Shutdown` RPC on teardown.
 
-### Layer 4 — Transport (`torchslicer/transport/`)
-- **`GRPCTransport`**: Current implementation (gRPC + protobuf). Proto files live in `lib/torchslicer/torchslicer/transport/grpc/`; auto-compiled at container startup by `entrypoint.sh`.
-- **`RESTTransport`**: HTTP/REST alternative (not yet implemented)
-- **`InProcessTransport`**: For single-machine simulation (not yet implemented)
+### Layer 4 — Discovery (`torchslicer/discovery/`)
+New layer. Abstracts cluster membership for both centralized and P2P topologies.
+- **`BaseDiscovery`**: Abstract interface — `announce()`, `discover()`, `watch()`. `watch()` is a forward-compat hook for fault tolerance (heartbeat callbacks).
+- **`CoordinatorDiscovery`**: Workers push a `Register` RPC to the coordinator at startup. Coordinator blocks in `discover()` until N workers have registered. Used for centralized topology.
+- **`StaticDiscovery`**: Peer list from config (`peers: [host:port, ...]`). No registration needed. Used for P2P with fixed addresses or testing.
+- **`announce_to_coordinator(coordinator_addr, node_info)`**: Client-side helper used by workers; retries until coordinator is reachable.
 
-### Layer 5 — Topology (`torchslicer/topology/`)
-- **`CentralizedTopology`**: Coordinator orchestrates training loop, workers execute slices
-- **`P2PTopology`**: Workers self-coordinate (not yet implemented)
+### Layer 5 — Configuration (`torchslicer/config.py`)
+- **`RunConfig`**: Single source of truth. Sub-configs: `TrainingConfig`, `PipelineConfig`, `DiscoveryConfig`, `CheckpointConfig`, `LoggingConfig`, `ProfileConfig`.
+- Load priority: Python API kwargs > YAML file > env vars > defaults.
+- `RunConfig.load(path)`: merged load — YAML base + env var overrides on top.
+- `EXPERIMENT_CONFIG` env var: path to YAML; Docker Compose passes it through automatically.
+- **`LoggingConfig`**: `enabled` (default `True`), `dir` (default `./runs`). Env vars: `LOG_ENABLED`, `LOG_DIR`.
+- **`ProfileConfig`**: `verbosity` (0–3, default 0), `memory` (bool, default False). Env vars: `PROFILE_VERBOSITY`, `PROFILE_MEMORY`.
 
-### Layer 6 — Monitoring (`torchslicer/monitor/`)
-- Experiment logging (loss, gradients, timing per slice)
-- Device profiling (energy, latency)
-- Comparison harness for benchmarking strategies/transports/topologies
+### Layer 6 — Transport (`torchslicer/transport/`)
+- **`GRPCTransport`**: Current implementation. Proto files in `lib/torchslicer/torchslicer/transport/grpc/`; auto-compiled at container startup by `entrypoint.sh`.
+- **`RESTTransport`**: Not yet implemented (Dockerfiles ready).
+
+### Layer 7 — Topology (`torchslicer/topology/`)
+- **`CentralizedTopology`**: Coordinator orchestrates training loop, workers execute slices.
+- **`P2PTopology`**: Not yet implemented. `StaticDiscovery` is the first building block.
+
+### Layer 8 — Monitoring (`torchslicer/monitor/`)
+- OpenTelemetry tracer with `configure()`, `span()` context manager.
+- `LocalExecutor` and `DistributedExecutor` emit spans for batch/forward/backward with timing and memory attributes.
+- Dashboard: FastAPI backend + React/Recharts frontend. Jaeger for trace storage.
+- **`RunLogger`**: Per-run artifact writer and reader. Writes `run_manifest.json` (static metadata: config, model, split layout, workers, training summary) and `metrics.jsonl` (append-only time-series, one JSON dict per line) to `{logging.dir}/{run_id}/`. All checkpoints also land in this directory when enabled. `RunLogger.load(run_dir)` + `to_dataframe()` for pandas-based plotting.
+- **`TrainingCallback`**: Base class with no-op defaults (`on_train_begin`, `on_epoch_begin`, `on_epoch_end`, `on_batch_end`, `on_train_end`). `on_epoch_end` receives and returns the metrics dict — custom keys injected here are written to `metrics.jsonl`.
+- **`WorkerProfiler`**: Worker-side per-phase timer. Phases: `forward`, `backward`, `optimizer`, `send_fwd`, `send_bwd`, `idle_fwd`, `idle_bwd`. Verbosity 0 = zero overhead. Memory snapshots optional (`profile_memory=True`). Coordinator pulls stats via `get_stats` RPC after each epoch.
+- **`metrics.jsonl` phases** (filter with `df[df.phase == "..."]`): `"epoch"`, `"coordinator_epoch"`, `"worker_epoch"`, `"worker_batch"` (verbosity=3), `"partition_epoch"` (local), `"partition_batch"` (local, verbosity=3).
 
 ---
 
 ## Current State
 
 ### What works
-- `Slicer` (torch.save-based, any nn.Module) + `SplitLayer` (DAG-aware) + `ModelGraph` (torch.fx shallow trace)
-- `LocalExecutor`: single-device training with optional verbose logging, intra-partition DAG support
-- `DistributedExecutor`: centralized gRPC coordinator embedded in the executor; full Docker stack verified
+- `Slicer` + `SplitLayer` (DAG-aware) + `ModelGraph` (torch.fx shallow trace)
+- `LocalExecutor`: single-device training, verbose logging, GPipe micro-batching
+- `DistributedExecutor`: centralized gRPC topology, embedded coordinator server, dynamic worker discovery
+- `CoordinatorDiscovery`: workers self-register at startup; coordinator waits for N registrations; no hardcoded hostnames; any device can join by running the worker process
+- `StaticDiscovery`: peer list from config, no registration
 - `UniformSplitter` + strategy registry
 - Top-level `ts.slice()` + `SlicedModel.train()` API
-- ResNet18/50 work natively via `from_module()` — `torch.flatten` auto-wrapped, no manual wrapper needed
-- gRPC centralized example: coordinator + 2–4 workers, automatic partitioning via `UniformSplitter`
-- GPipe micro-batch pipeline parallelism — opt-in via `use_gpipe=True, n_micro_batches=4`; benchmarked 1.9× speedup with 4 workers (ResNet18/CIFAR-10 GPU)
-- `N_WORKERS`, `EPOCHS`, `USE_GPIPE`, `N_MICRO` env vars — configure stack from outside without rebuilding
-- Docker stack: `docker compose up` (CPU) or `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up` (GPU)
-- Tested on: RTX 3060 (WSL2 + NVIDIA Container Toolkit)
+- ResNet18/50 work natively via `from_module()`
+- GPipe micro-batch pipeline parallelism — 1.9× speedup with 4 workers (ResNet18/CIFAR-10 GPU)
+- Clean lifecycle: coordinator sends `Shutdown` RPC to all workers on teardown; workers exit cleanly (code 0); `--abort-on-container-exit` propagates coordinator exit to all containers
+- Worker state reset on `init()` — workers reusable across runs without container restart
+- Optional checkpoint: each worker saves `{run_dir}/worker_{i}_epoch_{n}.pt`; coordinator saves `run_state.json`; resume via `checkpoint_path` in `SliceConfig`; disabled by default
+- `run_id` on all proto messages — forward-compat hook for coordinator restart detection
+- `RunConfig` with YAML + env var loading; `.env.example`; `experiments/` directory with ready-to-use configs
+- **Run logging system**: always-on by default (`logging.enabled=True`); every run writes `runs/{run_id}/run_manifest.json` + `metrics.jsonl`; checkpoints co-located in the same directory when enabled
+- **Per-phase profiling**: `profile.verbosity` controls granularity (0=off, 1=epoch totals, 2=phase breakdown, 3=per-batch); workers instrument forward/backward/optimizer/send/idle phases; coordinator pulls via new `get_stats` RPC after each epoch
+- **Callback system**: `SlicedModel.train(callbacks=[...])` accepts `TrainingCallback` subclasses; `on_epoch_end` can inject custom metrics (accuracy, lr, etc.) into `metrics.jsonl`
+- `COORDINATOR_ADDRESS` env var on workers; `WORKER_ADDRESS` for custom address advertisement
+- `make run-cpu/run-gpu CONFIG=experiments/resnet18_4gpu.yaml` — one-command experiment launch
+- Docker stack verified: CPU (2–4 workers) and GPU (RTX 3060, WSL2 + NVIDIA Container Toolkit)
 
 ### What is incomplete
-- No P2P topology
-- No REST transport logic (Dockerfiles ready, logic absent)
-- No monitoring or experiment logging
+- No P2P topology implementation (`StaticDiscovery` ready, topology logic missing)
+- No REST transport logic (Dockerfiles ready)
+- No fault tolerance: crash aborts the run; `BaseDiscovery.watch()` hook is in place for future heartbeat-based detection
 - No `EnergySplitter` / `DeadlineSplitter`
 - Cross-partition skip connections not supported (intra-partition DAG works; cross-partition requires protocol changes)
-- `DistributedExecutor` workers receive flat sequential layer lists (intra-partition DAG not transmitted over wire)
+- `DistributedExecutor` workers receive flat sequential layer lists (intra-partition DAG not sent over wire)
+- Idle workers (registered but not selected by coordinator) get hard-killed by compose rather than receiving `Shutdown`
+- Device profiling, gradient norm logging, comparison harness not yet implemented
 
 ---
 
@@ -100,23 +131,49 @@ sliced.train(train_loader, devices=[...])
 conda run -n torchslicer python3 examples/test_local_dnn.py
 ```
 
-### Run the full gRPC stack (CPU)
+### Run the full gRPC stack
 ```bash
-docker compose up --build
-```
-Starts coordinator (port 50054) + worker1–4 (port 50051) on a bridged Docker network.
-Source and lib are volume-mounted; proto files are regenerated at container startup via `entrypoint.sh`.
+# CPU, using env vars
+N_WORKERS=2 EPOCHS=10 make run-cpu
 
-Environment variables (pass via shell or `.env`):
-```bash
-N_WORKERS=4 EPOCHS=20 USE_GPIPE=1 N_MICRO=4 docker compose up
+# CPU, using a YAML experiment config
+make run-cpu CONFIG=experiments/resnet18_2cpu.yaml
+
+# GPU, using a YAML experiment config
+make run-gpu CONFIG=experiments/resnet18_4gpu.yaml
+
+# GPU + monitoring dashboard
+make run-gpu-monitor CONFIG=experiments/resnet18_4gpu.yaml
 ```
 
-### Run the full gRPC stack (GPU)
+All `run-*` targets use `--abort-on-container-exit`: when the coordinator finishes, Docker Compose tears down all worker containers automatically.
+
+### Run workers outside Docker (any device on the network)
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+# On each worker machine (or container):
+COORDINATOR_ADDRESS=<coordinator-ip>:50054 conda run -n torchslicer \
+    python3 examples/train/centralized/GRPC/worker/main.py 50051
+
+# On the coordinator machine:
+conda run -n torchslicer \
+    python3 examples/train/centralized/GRPC/coordinator/main.py 50054 \
+    --config experiments/resnet18_4gpu.yaml
 ```
-Requires NVIDIA Container Toolkit. Workers get GPU access; coordinator runs on CPU.
+Workers register with the coordinator via `Register` RPC on startup. The coordinator waits for `N_WORKERS` registrations before dispatching model slices. Workers can run in Docker containers, bare-metal, or any mix.
+
+### Configure an experiment
+Three equivalent ways (highest priority first):
+```python
+# 1. Python API (one-shot tests)
+sliced.train(loader, optimizer_cfg, criterion_cfg, epochs=20, use_gpipe=True)
+
+# 2. YAML file (reproducible experiments)
+make run-gpu CONFIG=experiments/resnet18_4gpu.yaml
+
+# 3. .env file (persistent defaults for docker compose)
+cp .env.example .env  # edit .env
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --abort-on-container-exit
+```
 
 ### Build images manually
 ```bash
@@ -134,14 +191,7 @@ conda run -n torchslicer python3 -m grpc_tools.protoc \
     torchslicer/transport/grpc/coordinator/coordinator_service.proto \
     torchslicer/transport/grpc/worker/worker_service.proto
 ```
-Note: proto files are also auto-regenerated at container startup by `entrypoint.sh`.
-
-### Run directly (outside Docker)
-```bash
-# From examples/train/centralized/GRPC/
-python3 coordinator/main.py 50054
-python3 worker/main.py 50051
-```
+Proto files are also auto-regenerated at container startup by `entrypoint.sh`.
 
 ---
 
@@ -154,36 +204,46 @@ Two images, both role-agnostic (coordinator and worker run from the same image):
 | `Dockerfile.cpu` | `python:3.12-slim` | torch-cpu + grpcio + fastapi + torchslicer |
 | `Dockerfile.gpu` | `python:3.12-slim` | torch-cu121 + grpcio + fastapi + torchslicer |
 
-- `entrypoint.sh`: recompiles proto files from `/usr/local/lib/torchslicer` at startup, ensuring gencode/runtime version always match.
-- `docker-compose.gpu.yml`: override file that switches all services to the GPU image and adds NVIDIA device reservations to workers.
+- `entrypoint.sh`: recompiles proto files from `/usr/local/lib/torchslicer` at startup.
+- `docker-compose.gpu.yml`: override file — switches to GPU image, adds NVIDIA device reservations on workers.
+- `docker-compose.monitor.yml`: overlay — adds Jaeger (port 16686) + dashboard (port 8080).
 - Role (coordinator vs worker) is selected via `command:` in docker-compose, not by separate images.
+- Workers get `COORDINATOR_ADDRESS=coordinator:50054` from compose; override for non-Docker deployments.
 
 ---
 
 ## gRPC Protocol Design
 
 ### `coordinator_service.proto` (package `torchslicer.coordinator`)
-- `batch_done(BatchDoneRequest)` — first worker signals batch completion; carries `batch_id`
-- `report_metrics(MetricsMessage)` — last worker reports `loss`, `batch_id`, `worker` hostname
+- `register(RegisterRequest)` — worker announces itself at startup; coordinator assigns `run_id` and `worker_index`
+- `batch_done(BatchDoneRequest)` — first worker signals batch completion; carries `batch_id`, `run_id`
+- `report_metrics(MetricsMessage)` — last worker reports `loss`, `batch_id`, `worker`, `run_id`
 
 ### `worker_service.proto` (package `torchslicer.worker`)
-- `init(SliceConfig)` — send layers + optimizer + criterion to a worker at startup
+- `init(SliceConfig)` — send layers + optimizer + criterion; includes `run_id`, `worker_index`, `checkpoint_path`, `profile_verbosity`, `profile_memory`
 - `forward(ForwardRequest)` — carry `batch_id` + input tensor (or label for the last worker)
 - `backward(BackwardRequest)` — carry `batch_id` + gradient tensor
+- `shutdown(ShutdownRequest)` — graceful stop; `save_checkpoint` flag triggers slice save before `server.stop()`
+- `get_stats(GetStatsRequest)` — coordinator pulls per-phase profiling stats after each epoch; returns `WorkerStatsResponse` with `PhaseStats` per phase and optional `BatchStats` list (verbosity=3)
 
 Key design points:
-- **`batch_id`** on every message — required for correct gradient↔forward matching and for future pipeline parallelism
-- **Label travels in `ForwardRequest`** (not a separate `set_label` RPC) — coordinator sends `ForwardRequest(batch_id, label)` directly to the last worker, eliminating the label/activation race
-- **`LayerConfig`** holds `layer_type` (for logging) + `serialized` bytes (`torch.save(layer)`) — no JSON blobs, no attribute mining
-- **`Tensor`** carries `shape` and `DType` enum alongside `data` bytes — enables validation and future mixed-precision without full deserialisation
+- **`run_id`** on all messages — coordinator-assigned ID; forward-compat hook for coordinator restart detection and future re-registration
+- **`worker_index`** in `RegisterResponse` and `SliceConfig` — determines slice assignment order; decoupled from hostname
+- **`batch_id`** on every batch message — required for gradient↔forward matching and GPipe pipeline parallelism
+- **Label travels in `ForwardRequest`** — coordinator sends label directly to last worker, eliminating label/activation race
+- **`LayerConfig`** holds `layer_type` + `serialized` bytes (`torch.save(layer)`) — no JSON blobs, no attribute mining
+- **`Tensor`** carries `shape` and `DType` enum — enables validation and future mixed-precision
+- **`NodeInfo`** in `RegisterRequest` — carries `node_id`, `address`, `device`, `memory_mb`; used for logging and future splitter strategies
 
 ---
 
 ## Key Design Decisions
 
-- **Layer serialisation**: `torch.save(layer)` per layer captures architecture + weights in one shot. Works for any `nn.Module`; no inspect/regex/eval. Constraint: the layer class must be importable on the worker.
-- **ModelGraph tracing**: `from_module()` uses `torch.fx` with a `_ShallowTracer` that treats direct children as leaves. Functional ops (`torch.flatten`, `operator.add`) are wrapped in thin `nn.Module`s. Falls back to `from_sequential()` on trace failure.
-- **Cross-partition skip connections**: Not supported. `BaseSplitter.validate()` raises `ValueError` if a multi-input node's predecessors span partitions. Workaround: choose `n` so skip connections stay within one partition, or wrap the skip block in a single `nn.Module`.
-- **Tensor serialisation**: `torch.save()` → `bytes`. Simple but not the most efficient; revisit for optimization.
-- **Gradient flow**: Each `SplitLayer` stores its input with `detach().requires_grad_(True)` to enable `x.grad` retrieval after backward. For GPipe, `x_ref = self.layer.x` is captured immediately after each forward and keyed by batch_id to avoid overwrite across micro-batches.
-- **Hybrid clusters**: For GPU workers, `torch.save(layer)` serialises on CPU; the worker can `.to(device)` after loading. Device placement is the worker's responsibility.
+- **Layer serialisation**: `torch.save(layer)` per layer captures architecture + weights in one shot. Constraint: the layer class must be importable on the worker.
+- **ModelGraph tracing**: `from_module()` uses `torch.fx` with a `_ShallowTracer` that treats direct children as leaves. Functional ops auto-wrapped. Falls back to `from_sequential()` on trace failure.
+- **Dynamic discovery**: Workers register themselves. Coordinator never has hardcoded addresses. Any process (container or bare-metal) that reaches the coordinator's `Register` endpoint can join the cluster.
+- **Checkpoint design**: Distributed by nature — each worker saves its own slice independently. No full-model reassembly at checkpoint time. Coordinator saves `run_state.json` for resume metadata.
+- **Cross-partition skip connections**: Not supported. `BaseSplitter.validate()` raises `ValueError` if a multi-input node's predecessors span partitions. Workaround: choose `n` so skip connections stay within one partition, or wrap the block in a single `nn.Module`.
+- **Gradient flow**: Each `SplitLayer` stores its input with `detach().requires_grad_(True)`. For GPipe, `x_ref = self.layer.x` is captured immediately after each forward and keyed by `batch_id`.
+- **Hybrid clusters**: `torch.save(layer)` serialises on CPU; workers call `.to(device)` after loading. Device placement is the worker's responsibility, advertised via `NodeInfo.device` at registration.
+- **Fault tolerance (future)**: `BaseDiscovery.watch(on_join, on_leave)` is the hook point. A heartbeat mechanism will fire `on_leave(node)` on failure, letting the executor decide how to handle it without any interface refactor.
