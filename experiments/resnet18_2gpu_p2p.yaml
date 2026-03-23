@@ -1,0 +1,35 @@
+# ResNet18 / CIFAR-10 — 2-worker P2P GPU run
+# Usage:
+#   make run-p2p-gpu CONFIG=experiments/resnet18_2gpu_p2p.yaml
+
+run_id: resnet18_2gpu_p2p
+
+training:
+  epochs: 20
+  optimizer:
+    name: SGD
+    params:
+      lr: 0.05
+      momentum: 0.9
+      weight_decay: 0.0005
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: false
+  n_micro: 4
+
+discovery:
+  backend: static
+  n_workers: 2
+  peers:
+    - worker0:50051
+    - worker1:50051
+
+checkpoint:
+  enabled: false
+  dir: ./checkpoints
+  save_every: epoch
+  resume: null

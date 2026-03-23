@@ -57,6 +57,19 @@ run-gpu-monitor: _env ## Run GPU stack + Jaeger + dashboard. CONFIG= optional
 		-f docker-compose.monitor.yml \
 		up
 
+.PHONY: run-p2p-gpu
+run-p2p-gpu: _env ## Run P2P GPU stack (2 workers, no coordinator). CONFIG=path/to/experiment.yaml optional
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.p2p.yml \
+		-f docker-compose.p2p.gpu.yml \
+		up --abort-on-container-exit
+
+.PHONY: run-p2p-cpu
+run-p2p-cpu: _env ## Run P2P CPU stack (2 workers, no coordinator). CONFIG=path/to/experiment.yaml optional
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.p2p.yml \
+		up --abort-on-container-exit
+
 .PHONY: down
 down: _env ## Stop and remove all containers for this stack
 	docker compose down
