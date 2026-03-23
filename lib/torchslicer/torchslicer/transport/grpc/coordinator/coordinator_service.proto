@@ -3,18 +3,42 @@ syntax = "proto3";
 package torchslicer.coordinator;
 
 service CoordinatorService {
-    rpc batch_done (BatchDoneRequest) returns (Empty);
-    rpc report_metrics (MetricsMessage) returns (Empty);
+    rpc batch_done     (BatchDoneRequest)  returns (Empty);
+    rpc report_metrics (MetricsMessage)    returns (Empty);
+    rpc register       (RegisterRequest)   returns (RegisterResponse);
 }
 
 message Empty {}
 
 message BatchDoneRequest {
     uint32 batch_id = 1;
+    string run_id   = 2;
 }
 
 message MetricsMessage {
     uint32 batch_id = 1;
     float  loss     = 2;
     string worker   = 3;
+    string run_id   = 4;
+}
+
+// ── discovery ─────────────────────────────────────────────────────────────────
+
+message NodeInfo {
+    string node_id   = 1;  // unique ID (hostname or UUID)
+    string address   = 2;  // host:port of the worker's gRPC server
+    string device    = 3;  // "cpu", "cuda:0", etc.
+    uint64 memory_mb = 4;  // available memory in MB
+}
+
+message RegisterRequest {
+    NodeInfo node   = 1;
+    string   run_id = 2;  // empty on first registration; set for re-registration after coordinator crash
+}
+
+message RegisterResponse {
+    bool   ok           = 1;
+    string run_id       = 2;  // coordinator-assigned run ID
+    uint32 worker_index = 3;  // 0-based; determines slice assignment order
+    string message      = 4;
 }

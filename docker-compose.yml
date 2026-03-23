@@ -6,19 +6,36 @@ services:
     container_name: coordinator
     environment:
       - PYTHONUNBUFFERED=1
+      # ── experiment config ──────────────────────────────────────────────────
+      # Set EXPERIMENT_CONFIG to a YAML path to use file-based config.
+      # Individual env vars below override YAML values when set.
+      - EXPERIMENT_CONFIG
+      - RUN_ID
+      - N_WORKERS
       - EPOCHS
       - USE_GPIPE
       - N_MICRO
-      - N_WORKERS
+      - MIXED_PRECISION
+      - DISCOVERY_BACKEND
+      - DISCOVERY_TIMEOUT
+      - WORKER_PEERS
+      # ── checkpoint ────────────────────────────────────────────────────────
+      - CHECKPOINT_ENABLED
+      - CHECKPOINT_DIR
+      - CHECKPOINT_SAVE_EVERY
+      - CHECKPOINT_RESUME
+      # ── logging & profiling ───────────────────────────────────────────────
+      - LOG_ENABLED
+      - LOG_DIR
+      - PROFILE_VERBOSITY
+      - PROFILE_MEMORY
+      # ── post-run behaviour ────────────────────────────────────────────────
+      # Coordinator blocks on signal.pause() after training and exits only
+      # on SIGTERM/SIGINT. Use `docker compose down` to stop the stack.
     volumes:
-      - .:/workspace
+      - .:/workspace          # ./runs/ lands here on the host automatically
       - ./lib/torchslicer:/usr/local/lib/torchslicer
     command: python3 examples/train/centralized/GRPC/coordinator/main.py
-    depends_on:
-      - worker1
-      - worker2
-      - worker3
-      - worker4
     networks:
       - torchslicer-net
 
@@ -29,6 +46,7 @@ services:
     container_name: worker1
     environment:
       - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
@@ -43,6 +61,7 @@ services:
     container_name: worker2
     environment:
       - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
@@ -57,6 +76,7 @@ services:
     container_name: worker3
     environment:
       - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
@@ -71,6 +91,7 @@ services:
     container_name: worker4
     environment:
       - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer

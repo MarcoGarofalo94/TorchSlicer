@@ -6,7 +6,7 @@ GPU_TAG = $(DOCKER_REGISTRY)/$(PROJECT_NAME):gpu
 
 .PHONY: help
 help: ## Show available commands
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # ── build ──────────────────────────────────────────────────────────────────────
 .PHONY: build-cpu
@@ -19,6 +19,41 @@ build-gpu: ## Build GPU image (requires NVIDIA Container Toolkit)
 
 .PHONY: build
 build: build-cpu build-gpu ## Build all images
+
+# ── run ────────────────────────────────────────────────────────────────────────
+# Coordinator blocks after training until `docker compose down` (SIGTERM).
+# Workers stay up and accept the next run without restart.
+# Pass CONFIG= to use a YAML experiment config file:
+#   make run-cpu CONFIG=experiments/resnet18_4gpu.yaml
+.PHONY: run-cpu
+run-cpu: ## Run full stack (CPU). CONFIG=path/to/experiment.yaml optional
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose up
+
+.PHONY: run-gpu
+run-gpu: ## Run full stack (GPU). CONFIG=path/to/experiment.yaml optional
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.yml \
+		-f docker-compose.gpu.yml \
+		up
+
+.PHONY: run-monitor
+run-monitor: ## Run CPU stack + Jaeger + dashboard. CONFIG= optional
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.yml \
+		-f docker-compose.monitor.yml \
+		up
+
+.PHONY: run-gpu-monitor
+run-gpu-monitor: ## Run GPU stack + Jaeger + dashboard. CONFIG= optional
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.yml \
+		-f docker-compose.gpu.yml \
+		-f docker-compose.monitor.yml \
+		up
+
+.PHONY: down
+down: ## Stop and remove all containers for this stack
+	docker compose down
 
 # ── push ───────────────────────────────────────────────────────────────────────
 .PHONY: push-cpu

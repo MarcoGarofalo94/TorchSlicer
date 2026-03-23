@@ -1,0 +1,34 @@
+# ResNet18 / CIFAR-10 — 4-worker GPU run with GPipe pipeline parallelism
+# Usage:
+#   make run-gpu CONFIG=experiments/resnet18_4gpu.yaml
+#   EXPERIMENT_CONFIG=experiments/resnet18_4gpu.yaml docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --abort-on-container-exit
+
+run_id: resnet18_4gpu_gpipe
+
+training:
+  epochs: 20
+  optimizer:
+    name: SGD
+    params:
+      lr: 0.05
+      momentum: 0.9
+      weight_decay: 0.0005
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: true
+  n_micro: 4
+
+discovery:
+  backend: coordinator   # workers self-register; no hardcoded hostnames
+  n_workers: 4
+  timeout: 60            # seconds to wait for all workers to register
+
+checkpoint:
+  enabled: false         # set to true to save slice states after training
+  dir: ./checkpoints
+  save_every: epoch
+  resume: null           # set to path/to/run_state.json to resume

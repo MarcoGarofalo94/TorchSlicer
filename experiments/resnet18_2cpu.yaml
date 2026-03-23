@@ -1,0 +1,34 @@
+# ResNet18 / CIFAR-10 — 2-worker CPU run (dev/smoke-test)
+# Usage:
+#   make run-cpu CONFIG=experiments/resnet18_2cpu.yaml
+#   N_WORKERS=2 EXPERIMENT_CONFIG=experiments/resnet18_2cpu.yaml docker compose up --abort-on-container-exit
+
+run_id: resnet18_2cpu_dev
+
+training:
+  epochs: 5
+  optimizer:
+    name: SGD
+    params:
+      lr: 0.05
+      momentum: 0.9
+      weight_decay: 0.0005
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: false
+  n_micro: 1
+
+discovery:
+  backend: coordinator
+  n_workers: 2
+  timeout: 60
+
+checkpoint:
+  enabled: false
+  dir: ./checkpoints
+  save_every: epoch
+  resume: null
