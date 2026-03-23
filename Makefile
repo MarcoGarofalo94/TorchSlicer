@@ -71,8 +71,12 @@ run-p2p-cpu: _env ## Run P2P CPU stack (2 workers, no coordinator). CONFIG=path/
 		up --abort-on-container-exit
 
 .PHONY: down
-down: _env ## Stop and remove all containers for this stack
+down: _env ## Stop and remove centralized stack containers
 	docker compose down
+
+.PHONY: down-p2p
+down-p2p: _env ## Stop and remove P2P stack containers
+	docker compose -f docker-compose.p2p.yml down
 
 # ── push ───────────────────────────────────────────────────────────────────────
 .PHONY: push-cpu
