@@ -139,7 +139,11 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
             self._reset_state()
 
             layers = self._build_layers(request.layers)
-            self.layer   = SplitLayer(layers, is_last=request.is_last)
+            predecessors = (
+                [list(p.indices) for p in request.predecessors]
+                if request.predecessors else None
+            )
+            self.layer   = SplitLayer(layers, is_last=request.is_last, predecessors=predecessors)
             self.is_last = request.is_last
             self._run_id       = request.run_id
             self._worker_index = request.worker_index

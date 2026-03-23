@@ -47,6 +47,12 @@ message CriterionConfig {
     bytes  extra_params = 2;  // torch.save(dict) for label_smoothing, etc.
 }
 
+// Encodes one layer's intra-partition predecessor indices (partition-local).
+// Empty list means the layer takes the partition's external input.
+message PredecessorList {
+    repeated int32 indices = 1;
+}
+
 message SliceConfig {
     repeated LayerConfig layers    = 1;
     OptimizerConfig      optimizer = 2;
@@ -61,6 +67,7 @@ message SliceConfig {
     uint32  worker_index           = 11; // 0-based index; used for checkpoint naming
     uint32  profile_verbosity      = 12; // 0=off 1=epoch totals 2=phase breakdown 3=per-batch
     bool    profile_memory         = 13; // capture GPU memory snapshots per phase
+    repeated PredecessorList predecessors = 14; // intra-partition DAG; one entry per layer
 }
 
 // ── forward / backward ────────────────────────────────────────────────────────

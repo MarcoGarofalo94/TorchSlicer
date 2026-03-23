@@ -305,6 +305,10 @@ class DistributedExecutor(BaseExecutor):
         for i, proxy in enumerate(self._proxies):
             is_last = (i == n - 1)
             partition_layers = [layers[j] for j in partitions[i].layer_indices]
+            pred_proto = [
+                worker_service_pb2.PredecessorList(indices=list(p))
+                for p in (partitions[i].predecessors or [[] for _ in partition_layers])
+            ]
             slice_cfg = worker_service_pb2.SliceConfig(
                 layers             = _build_layer_configs(partition_layers),
                 optimizer          = opt_cfg,
@@ -319,6 +323,7 @@ class DistributedExecutor(BaseExecutor):
                 worker_index       = i,
                 profile_verbosity  = cfg.profile.verbosity,
                 profile_memory     = cfg.profile.memory,
+                predecessors       = pred_proto,
             )
             try:
                 res = proxy.stub().init(slice_cfg)
