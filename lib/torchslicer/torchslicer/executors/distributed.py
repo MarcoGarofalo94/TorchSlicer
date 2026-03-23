@@ -583,7 +583,7 @@ class DistributedExecutor(BaseExecutor):
             run_id   = state.get("run_id", self._run_id)
             paths = {}
             for i in range(len(self._proxies)):
-                p = os.path.join(ckpt_dir, run_id, f"worker_{i}_epoch_{epoch}.pt")
+                p = os.path.join(ckpt_dir, f"worker_{i}_epoch_{epoch}.pt")
                 if os.path.exists(p):
                     paths[i] = p
             return paths

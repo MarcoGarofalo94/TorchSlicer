@@ -495,9 +495,8 @@ class WorkerServicer(worker_service_pb2_grpc.WorkerServiceServicer):
 
     def _save_checkpoint(self, checkpoint_dir: str, run_id: str, epoch: int, worker_index: int):
         import os
-        run_dir = os.path.join(checkpoint_dir, run_id)
-        os.makedirs(run_dir, exist_ok=True)
-        path = os.path.join(run_dir, f"worker_{worker_index}_epoch_{epoch}.pt")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        path = os.path.join(checkpoint_dir, f"worker_{worker_index}_epoch_{epoch}.pt")
         torch.save({
             "layer_state_dict":     self.layer.state_dict(),
             "optimizer_state_dict": self.layer.optimizer.state_dict() if self.layer.optimizer else None,
