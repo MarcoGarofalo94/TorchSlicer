@@ -106,7 +106,7 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 - ResNet18/50 work natively via `from_module()`
 - Intra-partition DAG wired over gRPC: `SliceConfig` carries `PredecessorList` per layer; workers reconstruct and pass to `SplitLayer` — multi-input (skip connection) layers execute correctly in distributed mode
 - GPipe micro-batch pipeline parallelism — 1.9× speedup with 4 workers (ResNet18/CIFAR-10 GPU)
-- Clean lifecycle: coordinator sends `Shutdown` RPC to all workers on teardown; workers exit cleanly (code 0); coordinator then blocks on `signal.pause()` — only exits on `SIGTERM` (`docker compose down`)
+- Clean lifecycle: coordinator sends `Shutdown` RPC to all workers on teardown; workers exit cleanly (code 0); coordinator then blocks on `signal.pause()` — only exits on `SIGTERM` (`docker compose down`); idle workers (registered but not selected) also receive `Shutdown` at teardown via `CoordinatorDiscovery.idle_nodes()`
 - Worker state reset on `init()` — workers reusable across runs without container restart
 - Optional checkpoint: each worker saves `{run_dir}/worker_{i}_epoch_{n}.pt`; coordinator saves `run_state.json`; resume via `checkpoint_path` in `SliceConfig`; disabled by default
 - `run_id` on all proto messages — forward-compat hook for coordinator restart detection
@@ -121,10 +121,9 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 ### What is incomplete
 - No P2P topology implementation (`StaticDiscovery` ready, topology logic missing)
 - No REST transport logic (Dockerfiles ready)
-- No fault tolerance: crash aborts the run; `BaseDiscovery.watch()` hook is in place for future heartbeat-based detection
+- No fault tolerance: crash aborts the run; `BaseDiscovery.watch()` hook is in place for future heartbeat-based detection; `discover()` raises `TimeoutError` on timeout (intentional, deferred to fault tolerance work)
 - No `EnergySplitter` / `DeadlineSplitter`
 - Cross-partition skip connections not supported (intra-partition DAG sent over wire and works end-to-end; cross-partition requires protocol changes)
-- Idle workers (registered but not selected by coordinator) get hard-killed by compose rather than receiving `Shutdown`
 - Device profiling, gradient norm logging, comparison harness not yet implemented
 
 ---

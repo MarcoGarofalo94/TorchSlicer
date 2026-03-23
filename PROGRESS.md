@@ -42,6 +42,7 @@
 - [x] `DistributedExecutor.teardown()` — calls `Shutdown` on all workers before stopping own gRPC server; all containers exit cleanly
 - [x] Worker state reset on `init()` — `_reset_state()` clears all per-batch dicts/stubs; workers reusable across runs without container restart
 - [x] Coordinator blocks on `signal.pause()` after training — exits only on `SIGTERM` (`make down`); workers stay up and accept next run without restart; `make _env` writes `UID`/`GID` to `.env` so run artifacts are owned by host user
+- [x] Idle workers (registered but not selected by `discover()`) receive `Shutdown` RPC at `teardown()` via `BaseDiscovery.idle_nodes()` — all workers exit cleanly (code 0) regardless of selection
 - [x] Optional checkpoint — each worker saves `{checkpoint_dir}/{run_id}/worker_{index}_epoch_{n}.pt` with layer + optimizer state; coordinator saves `run_state.json`; resume via `checkpoint_path` field in `SliceConfig`; disabled by default (`CHECKPOINT_ENABLED=0`)
 - [x] `run_id` on all proto messages — forward-compat hook for fault tolerance (coordinator restart detection, worker re-registration)
 - [x] `COORDINATOR_ADDRESS` env var on workers — no more hardcoded coordinator hostname; defaults to `coordinator:50054`
