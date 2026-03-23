@@ -75,7 +75,7 @@
 - [x] `ModelGraph.is_dag()` — detects non-sequential graphs
 - [x] `Partition.predecessors` — intra-partition DAG edges carried from splitter to `SplitLayer`
 - [x] `SplitLayer` DAG-aware `forward()` — per-layer output caching, multi-input routing
-- [x] Intra-partition skip connections work (e.g. skip model with n=1)
+- [x] Intra-partition skip connections work end-to-end (local and distributed): `SliceConfig` carries `PredecessorList` per layer; worker passes to `SplitLayer`; verified with explicit skip-connection model over gRPC (`examples/test_dag_distributed.py`)
 - [x] Cross-partition multi-input nodes raise `ValueError` with actionable hint
 - [x] ResNet18/50 work natively — `torch.flatten` captured automatically, no wrapper needed
 - [ ] Cross-partition skip connections (requires executor protocol changes)
@@ -131,6 +131,5 @@
 ## Known limitations
 - Cross-partition skip connections not supported — if a multi-input node's predecessors span partition boundaries, `validate()` raises `ValueError`. Workaround: choose `n` so skip connections stay within one partition, or wrap the block in a single `nn.Module`.
 - Worker hostnames no longer hardcoded — `CoordinatorDiscovery` replaces the `worker{i}` loop; workers advertise their own address at registration time
-- `DistributedExecutor` workers receive layers as a flat sequential list; intra-partition DAG info is not sent over the wire (proto would need to carry predecessor indices). For standard models (ResNet etc.) the partitions are sequential anyway.
 - `Transport`, `Topology`, `Monitor` in `lib/` are interfaces only; implementations live in `examples/`
 - No fault tolerance — coordinator or worker crash aborts the run; checkpoint support mitigates data loss; heartbeat-based failure detection is a future addition via `BaseDiscovery.watch()` (hook already in place)

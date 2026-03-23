@@ -104,6 +104,7 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 - `UniformSplitter` + strategy registry
 - Top-level `ts.slice()` + `SlicedModel.train()` API
 - ResNet18/50 work natively via `from_module()`
+- Intra-partition DAG wired over gRPC: `SliceConfig` carries `PredecessorList` per layer; workers reconstruct and pass to `SplitLayer` — multi-input (skip connection) layers execute correctly in distributed mode
 - GPipe micro-batch pipeline parallelism — 1.9× speedup with 4 workers (ResNet18/CIFAR-10 GPU)
 - Clean lifecycle: coordinator sends `Shutdown` RPC to all workers on teardown; workers exit cleanly (code 0); coordinator then blocks on `signal.pause()` — only exits on `SIGTERM` (`docker compose down`)
 - Worker state reset on `init()` — workers reusable across runs without container restart
@@ -122,8 +123,7 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 - No REST transport logic (Dockerfiles ready)
 - No fault tolerance: crash aborts the run; `BaseDiscovery.watch()` hook is in place for future heartbeat-based detection
 - No `EnergySplitter` / `DeadlineSplitter`
-- Cross-partition skip connections not supported (intra-partition DAG works; cross-partition requires protocol changes)
-- `DistributedExecutor` workers receive flat sequential layer lists (intra-partition DAG not sent over wire)
+- Cross-partition skip connections not supported (intra-partition DAG sent over wire and works end-to-end; cross-partition requires protocol changes)
 - Idle workers (registered but not selected by coordinator) get hard-killed by compose rather than receiving `Shutdown`
 - Device profiling, gradient norm logging, comparison harness not yet implemented
 
@@ -225,7 +225,7 @@ Two images, both role-agnostic (coordinator and worker run from the same image):
 - `report_metrics(MetricsMessage)` — last worker reports `loss`, `batch_id`, `worker`, `run_id`
 
 ### `worker_service.proto` (package `torchslicer.worker`)
-- `init(SliceConfig)` — send layers + optimizer + criterion; includes `run_id`, `worker_index`, `checkpoint_path`, `profile_verbosity`, `profile_memory`
+- `init(SliceConfig)` — send layers + optimizer + criterion; includes `run_id`, `worker_index`, `checkpoint_path`, `profile_verbosity`, `profile_memory`, `predecessors` (repeated `PredecessorList` — partition-local DAG edges, one per layer)
 - `forward(ForwardRequest)` — carry `batch_id` + input tensor (or label for the last worker)
 - `backward(BackwardRequest)` — carry `batch_id` + gradient tensor
 - `shutdown(ShutdownRequest)` — graceful stop; `save_checkpoint` flag triggers slice save before `server.stop()`
