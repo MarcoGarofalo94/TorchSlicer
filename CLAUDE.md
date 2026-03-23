@@ -81,10 +81,15 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 - OpenTelemetry tracer with `configure()`, `span()` context manager.
 - `LocalExecutor` and `DistributedExecutor` emit spans for batch/forward/backward with timing and memory attributes.
 - Dashboard: FastAPI backend + React/Recharts frontend. Jaeger for trace storage.
-- **`RunLogger`**: Per-run artifact writer and reader. Writes `run_manifest.json` (static metadata: config, model, split layout, workers, training summary) and `metrics.jsonl` (append-only time-series, one JSON dict per line) to `{logging.dir}/{run_id}/`. All checkpoints also land in this directory when enabled. `RunLogger.load(run_dir)` + `to_dataframe()` for pandas-based plotting.
+- **`RunLogger`**: Per-run artifact writer and reader. Writes per-phase JSONL files to `{logging.dir}/{run_id}/` — each file is schema-homogeneous and directly loadable with pandas. All checkpoints also land in this directory when enabled. `RunLogger.load(run_dir)` + `to_dataframe(phase)` for plotting.
 - **`TrainingCallback`**: Base class with no-op defaults (`on_train_begin`, `on_epoch_begin`, `on_epoch_end`, `on_batch_end`, `on_train_end`). `on_epoch_end` receives and returns the metrics dict — custom keys injected here are written to `metrics.jsonl`.
 - **`WorkerProfiler`**: Worker-side per-phase timer. Phases: `forward`, `backward`, `optimizer`, `send_fwd`, `send_bwd`, `idle_fwd`, `idle_bwd`. Verbosity 0 = zero overhead. Memory snapshots optional (`profile_memory=True`). Coordinator pulls stats via `get_stats` RPC after each epoch.
-- **`metrics.jsonl` phases** (filter with `df[df.phase == "..."]`): `"epoch"`, `"coordinator_epoch"`, `"worker_epoch"`, `"worker_batch"` (verbosity=3), `"partition_epoch"` (local), `"partition_batch"` (local, verbosity=3).
+- **Per-phase log files** (each homogeneous, load with `pd.read_json(path, lines=True)`):
+  - `metrics.jsonl` — epoch loss + duration
+  - `coordinator.jsonl` — coordinator overhead (data_load, send, wait) per epoch
+  - `worker_epoch.jsonl` — per-worker epoch aggregates (avg/min/max/p95/total per phase + GPU memory)
+  - `worker_batch.jsonl` — per-worker per-batch detail (verbosity=3 only)
+  - `partition_epoch.jsonl` / `partition_batch.jsonl` — local executor equivalents
 
 ---
 
@@ -100,12 +105,12 @@ New layer. Abstracts cluster membership for both centralized and P2P topologies.
 - Top-level `ts.slice()` + `SlicedModel.train()` API
 - ResNet18/50 work natively via `from_module()`
 - GPipe micro-batch pipeline parallelism — 1.9× speedup with 4 workers (ResNet18/CIFAR-10 GPU)
-- Clean lifecycle: coordinator sends `Shutdown` RPC to all workers on teardown; workers exit cleanly (code 0); `--abort-on-container-exit` propagates coordinator exit to all containers
+- Clean lifecycle: coordinator sends `Shutdown` RPC to all workers on teardown; workers exit cleanly (code 0); coordinator then blocks on `signal.pause()` — only exits on `SIGTERM` (`docker compose down`)
 - Worker state reset on `init()` — workers reusable across runs without container restart
 - Optional checkpoint: each worker saves `{run_dir}/worker_{i}_epoch_{n}.pt`; coordinator saves `run_state.json`; resume via `checkpoint_path` in `SliceConfig`; disabled by default
 - `run_id` on all proto messages — forward-compat hook for coordinator restart detection
 - `RunConfig` with YAML + env var loading; `.env.example`; `experiments/` directory with ready-to-use configs
-- **Run logging system**: always-on by default (`logging.enabled=True`); every run writes `runs/{run_id}/run_manifest.json` + `metrics.jsonl`; checkpoints co-located in the same directory when enabled
+- **Run logging system**: always-on by default (`logging.enabled=True`); every run writes `runs/{run_id}/run_manifest.json` + per-phase JSONL files; checkpoints co-located in the same directory when enabled; files owned by host user (UID/GID written to `.env` by `make _env`)
 - **Per-phase profiling**: `profile.verbosity` controls granularity (0=off, 1=epoch totals, 2=phase breakdown, 3=per-batch); workers instrument forward/backward/optimizer/send/idle phases; coordinator pulls via new `get_stats` RPC after each epoch
 - **Callback system**: `SlicedModel.train(callbacks=[...])` accepts `TrainingCallback` subclasses; `on_epoch_end` can inject custom metrics (accuracy, lr, etc.) into `metrics.jsonl`
 - `COORDINATOR_ADDRESS` env var on workers; `WORKER_ADDRESS` for custom address advertisement
@@ -146,7 +151,7 @@ make run-gpu CONFIG=experiments/resnet18_4gpu.yaml
 make run-gpu-monitor CONFIG=experiments/resnet18_4gpu.yaml
 ```
 
-All `run-*` targets use `--abort-on-container-exit`: when the coordinator finishes, Docker Compose tears down all worker containers automatically.
+After training the coordinator blocks on `signal.pause()` and only exits on `SIGTERM`. Use `make down` to stop the full stack. Workers stay up and accept the next run without restart.
 
 ### Run workers outside Docker (any device on the network)
 ```bash
@@ -172,7 +177,7 @@ make run-gpu CONFIG=experiments/resnet18_4gpu.yaml
 
 # 3. .env file (persistent defaults for docker compose)
 cp .env.example .env  # edit .env
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --abort-on-container-exit
+make run-gpu           # writes UID/GID to .env then runs compose
 ```
 
 ### Build images manually

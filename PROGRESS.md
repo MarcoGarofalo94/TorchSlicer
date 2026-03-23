@@ -41,7 +41,7 @@
 - [x] `Shutdown` RPC on `WorkerService` — graceful stop; `save_checkpoint` flag triggers slice save before `server.stop()`; runs in background thread so RPC returns `Ack` before shutdown
 - [x] `DistributedExecutor.teardown()` — calls `Shutdown` on all workers before stopping own gRPC server; all containers exit cleanly
 - [x] Worker state reset on `init()` — `_reset_state()` clears all per-batch dicts/stubs; workers reusable across runs without container restart
-- [x] `--abort-on-container-exit` in Makefile `run-*` targets — compose tears down all workers when coordinator exits
+- [x] Coordinator blocks on `signal.pause()` after training — exits only on `SIGTERM` (`make down`); workers stay up and accept next run without restart; `make _env` writes `UID`/`GID` to `.env` so run artifacts are owned by host user
 - [x] Optional checkpoint — each worker saves `{checkpoint_dir}/{run_id}/worker_{index}_epoch_{n}.pt` with layer + optimizer state; coordinator saves `run_state.json`; resume via `checkpoint_path` field in `SliceConfig`; disabled by default (`CHECKPOINT_ENABLED=0`)
 - [x] `run_id` on all proto messages — forward-compat hook for fault tolerance (coordinator restart detection, worker re-registration)
 - [x] `COORDINATOR_ADDRESS` env var on workers — no more hardcoded coordinator hostname; defaults to `coordinator:50054`
@@ -97,12 +97,13 @@
 - [x] Timeline tab — swimlane chart with per-worker forward/backward timing per batch
 - [x] Dashboard auto-resets on new run — detects new `worker.init` span timestamps, clears stale batch data so frontend never shows data from a previous run
 - [x] Dashboard Node build OOM fix — `NODE_OPTIONS=--max-old-space-size=512` caps V8 heap during Vite build; `restart: on-failure` in compose overlay
-- [x] **`RunLogger`** (`monitor/run_logger.py`) — per-run artifact writer/reader; writes `{logging.dir}/{run_id}/run_manifest.json` + `metrics.jsonl`; `load(run_dir)` + `to_dataframe()` for pandas-based plotting; checkpoints co-located when enabled
+- [x] **`RunLogger`** (`monitor/run_logger.py`) — per-run artifact writer/reader; writes `run_manifest.json` + per-phase JSONL files to `{logging.dir}/{run_id}/`; each file is schema-homogeneous (`pd.read_json(path, lines=True)` just works); `load(run_dir)` + `to_dataframe(phase)` for plotting; checkpoints co-located when enabled
+- [x] **Per-phase log files**: `metrics.jsonl` (epoch loss/duration), `coordinator.jsonl` (overhead), `worker_epoch.jsonl` (per-worker aggregates with avg/min/max/p95 + GPU memory), `worker_batch.jsonl` (verbosity=3, per-batch detail), `partition_epoch/batch.jsonl` (local executor)
 - [x] **`TrainingCallback`** (`monitor/callback.py`) — base class for training hooks; `on_epoch_end(epoch, metrics) -> dict` lets users inject custom metrics (accuracy, lr, etc.) into `metrics.jsonl`; passed via `SlicedModel.train(callbacks=[...])`
 - [x] **`WorkerProfiler`** (`monitor/profiler.py`) — worker-side per-phase timer (forward, backward, optimizer, send_fwd, send_bwd, idle_fwd, idle_bwd); verbosity=0 is zero-overhead; optional GPU memory snapshots; coordinator pulls via `get_stats` RPC after each epoch
 - [x] **`get_stats` RPC** on `worker_service.proto` — `GetStatsRequest` / `WorkerStatsResponse` with `PhaseStats` (avg/min/max/p95/total) per phase; `BatchStats` list at verbosity=3; resets worker profiler after each pull
-- [x] **Coordinator-side overhead logging** — `data_load_total_ms`, `send_total_ms`, `wait_total_ms` per epoch logged as `"coordinator_epoch"` phase in `metrics.jsonl`
-- [x] **Unified run directory** — logs + checkpoints in same `{logging.dir}/{run_id}/`; `shutdown` sends the unified path so worker `.pt` files land alongside `run_manifest.json`
+- [x] **Coordinator-side overhead logging** — `data_load_total_ms`, `send_total_ms`, `wait_total_ms` per epoch logged to `coordinator.jsonl`
+- [x] **Unified run directory** — logs + checkpoints in same `{logging.dir}/{run_id}/`; files owned by host user (UID/GID injected via `.env` by `make _env`)
 - [ ] Device profiling (energy, latency)
 - [ ] Gradient norm logging per slice
 - [ ] Comparison harness: strategies × transports × topologies
