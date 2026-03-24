@@ -76,6 +76,25 @@ def _serialize_tensor(t: torch.Tensor):
 
 # ── config builders ────────────────────────────────────────────────────────────
 
+def _unpack_inputs(inputs):
+    """Unpack batch inputs into ``(main_tensor, aux_dict)``.
+
+    See ``local._unpack_inputs`` for full documentation.
+    """
+    if isinstance(inputs, torch.Tensor):
+        return inputs, {}
+    if isinstance(inputs, dict):
+        main_key = "input_ids" if "input_ids" in inputs else next(iter(inputs))
+        return inputs[main_key], {k: v for k, v in inputs.items() if k != main_key}
+    if (isinstance(inputs, (list, tuple))
+            and len(inputs) == 2
+            and isinstance(inputs[1], dict)):
+        return inputs[0], inputs[1]
+    if isinstance(inputs, (list, tuple)):
+        return inputs[0], {}
+    return inputs, {}
+
+
 def _build_layer_configs(layers: list) -> list:
     configs = []
     for layer in layers:
@@ -341,7 +360,8 @@ class DistributedExecutor(BaseExecutor):
             except Exception as e:
                 print(f"[callback] on_train_begin error: {e}")
 
-    def train_epoch(self, data_loader, epoch: int = 0, verbose: bool = False) -> dict:
+    def train_epoch(self, data_loader, epoch: int = 0, verbose: bool = False,
+                    total_epochs: int = 0) -> dict:
         self._last_epoch = epoch
         total_loss       = 0.0
         n_batches        = 0
@@ -370,12 +390,14 @@ class DistributedExecutor(BaseExecutor):
                     self._batch_losses.clear()
                 self._batch_done.clear()
 
+                _shape = (str(tuple(inputs.shape)) if isinstance(inputs, torch.Tensor)
+                          else "multimodal")
                 with tracer.span(
                     "torchslicer.batch",
                     epoch=epoch,
                     batch_id=batch_id,
                     batch_index=n_batches,
-                    input_shape=str(tuple(inputs.shape)),
+                    input_shape=_shape,
                 ) as batch_span:
                     send_t0 = time.perf_counter()
                     self._send_batch(batch_id, inputs, labels)
@@ -403,14 +425,16 @@ class DistributedExecutor(BaseExecutor):
                     )
 
                 if verbose:
-                    print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss:.4f}")
+                    ep_suffix = f"/{total_epochs}" if total_epochs else ""
+                    print(f"  [epoch {epoch}{ep_suffix} | batch {n_batches}/{n_total}] loss={loss:.4f}")
 
                 iter_t0 = time.perf_counter()
 
         epoch_duration_s = time.perf_counter() - epoch_t0
         avg = total_loss / n_batches if n_batches > 0 else 0.0
         if verbose:
-            print(f"[epoch {epoch}] avg_loss={avg:.4f}")
+            suffix = f"/{total_epochs}" if total_epochs else ""
+            print(f"[epoch {epoch}{suffix}] avg_loss={avg:.4f}  duration={epoch_duration_s:.1f}s")
 
         # Build epoch metrics dict, allow callbacks to augment it
         epoch_metrics = {
@@ -450,6 +474,63 @@ class DistributedExecutor(BaseExecutor):
                     self._run_logger.log(**ws)
 
         return {"loss": avg}
+
+    def reinit(
+        self,
+        model_graph,
+        partitions,
+        optimizer_cfg: dict,
+        criterion_cfg: dict,
+        n_micro_batches: int = 1,
+        model_name: str = "unknown",
+        strategy_name: str = "unknown",
+    ) -> None:
+        """Re-initialise existing workers with a new model — no server restart or re-discovery.
+
+        Workers stay alive between runs.  Call this after a completed training loop
+        (but before ``teardown()``) to push a different model to the same worker set.
+        The gRPC server and proxies must already be established via ``setup()``.
+        """
+        layers = model_graph.get_layers()
+        n = len(self._proxies)
+        self._n_micro     = max(1, n_micro_batches)
+        self._model_name  = model_name
+        self._strategy_name = strategy_name
+        cfg = self._run_config
+
+        opt_cfg  = _build_optimizer_config(optimizer_cfg)
+        crit_cfg = _build_criterion_config(criterion_cfg)
+
+        for i, proxy in enumerate(self._proxies):
+            is_last = (i == n - 1)
+            partition_layers = [layers[j] for j in partitions[i].layer_indices]
+            pred_proto = [
+                worker_service_pb2.PredecessorList(indices=list(p))
+                for p in (partitions[i].predecessors or [[] for _ in partition_layers])
+            ]
+            slice_cfg = worker_service_pb2.SliceConfig(
+                layers             = _build_layer_configs(partition_layers),
+                optimizer          = opt_cfg,
+                criterion          = crit_cfg if is_last else None,
+                is_last            = is_last,
+                prev_worker        = self._proxies[i - 1].address if i > 0 else "",
+                next_worker        = self._proxies[i + 1].address if i < n - 1 else "",
+                coordinator        = self.coordinator_addr,
+                n_micro            = self._n_micro,
+                run_id             = self._run_id,
+                checkpoint_path    = "",
+                worker_index       = i,
+                profile_verbosity  = cfg.profile.verbosity,
+                profile_memory     = cfg.profile.memory,
+                predecessors       = pred_proto,
+            )
+            try:
+                res = proxy.stub().init(slice_cfg)
+                print(f"[reinit] {proxy.name}: ok={res.ok}  {res.message}  ({res.hostname})")
+            except grpc.RpcError as e:
+                print(f"[reinit] {proxy.name}: ERROR — {e}")
+
+        print(f"[coordinator] reinit complete — {n} workers loaded new model ({model_name})")
 
     def teardown(self) -> None:
         cfg  = self._run_config
@@ -640,11 +721,19 @@ class DistributedExecutor(BaseExecutor):
             json.dump(state, f, indent=2)
         print(f"[checkpoint] run_state saved → {path}")
 
-    def _send_batch(self, batch_id: int, inputs: torch.Tensor, labels: torch.Tensor):
+    def _send_batch(self, batch_id: int, inputs, labels: torch.Tensor):
+        main, aux = _unpack_inputs(inputs)
         M = self._n_micro
+
         if M > 1:
-            micro_inputs = inputs.chunk(M)
+            micro_mains  = main.chunk(M)
             micro_labels = labels.chunk(M)
+            # Chunk aux tensors that share the batch dim; broadcast others
+            micro_aux = [
+                {k: v.chunk(M)[m] if v.dim() > 0 and v.shape[0] == main.shape[0] else v
+                 for k, v in aux.items()}
+                for m in range(M)
+            ]
             for m in range(M):
                 mbid = batch_id * M + m
                 self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
@@ -653,7 +742,8 @@ class DistributedExecutor(BaseExecutor):
                 ))
                 self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
                     batch_id=mbid,
-                    input=_serialize_tensor(micro_inputs[m]),
+                    input=_serialize_tensor(micro_mains[m]),
+                    aux_inputs={k: _serialize_tensor(v) for k, v in micro_aux[m].items()},
                 ))
         else:
             self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
@@ -662,5 +752,6 @@ class DistributedExecutor(BaseExecutor):
             ))
             self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
                 batch_id=batch_id,
-                input=_serialize_tensor(inputs),
+                input=_serialize_tensor(main),
+                aux_inputs={k: _serialize_tensor(v) for k, v in aux.items()},
             ))

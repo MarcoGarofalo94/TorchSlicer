@@ -1,0 +1,35 @@
+# Architecture extension distributed smoke test — 2 workers, 2 epochs each
+# Runs: Mistral-tiny (LLaMA/RoPE branch) + synthetic DeepSeek-V2 MoE
+
+run_id: arch_ext_2worker
+
+training:
+  epochs: 2
+  optimizer:
+    name: AdamW
+    params:
+      lr: 5.0e-4
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: false
+  n_micro: 1
+
+discovery:
+  backend: coordinator
+  n_workers: 2
+  timeout: 120
+
+checkpoint:
+  enabled: false
+
+logging:
+  enabled: true
+  dir: ./runs
+
+profile:
+  verbosity: 1
+  memory: false

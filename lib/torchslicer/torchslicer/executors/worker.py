@@ -198,6 +198,7 @@ class WorkerServicer(
                 self._load_checkpoint(request.checkpoint_path)
 
             self.layer = self.layer.to(self.device)
+            self.layer.train()
             if self.loss_fn:
                 self.loss_fn = self.loss_fn.to(self.device)
 
@@ -339,6 +340,11 @@ class WorkerServicer(
                 return
 
             tensor = deserialize_tensor(request.input).to(self.device)
+            # Unpack aux inputs (multimodal models — sent to first worker only)
+            aux = {}
+            if request.aux_inputs:
+                aux = {k: deserialize_tensor(v).to(self.device)
+                       for k, v in request.aux_inputs.items()}
             with _tracer.span(
                 "torchslicer.worker.forward",
                 batch_id=batch_id,
@@ -346,7 +352,7 @@ class WorkerServicer(
                 input_shape=str(tuple(tensor.shape)),
             ) as s:
                 with self._profiler.phase("forward"):
-                    out   = self.layer(tensor)
+                    out   = self.layer(tensor, **aux)
                     x_ref = self.layer.x
                 if s:
                     s.set_attribute("output_shape", str(tuple(out.shape)))
@@ -430,7 +436,14 @@ class WorkerServicer(
                 is_last=False,
             ):
                 with self._profiler.phase("backward"):
-                    out.backward(grad_in)
+                    # Pop MoE aux loss BEFORE backward — same graph nodes, would
+                    # fail if popped after loss.backward() frees saved tensors.
+                    moe = self.layer.pop_moe_aux_loss() if is_last_micro else None
+                    if moe is not None:
+                        out.backward(grad_in, retain_graph=True)
+                        moe.backward()
+                    else:
+                        out.backward(grad_in)
                     grad = x_ref.grad if x_ref is not None else None
                 if is_last_micro:
                     with self._profiler.phase("optimizer"):
@@ -476,7 +489,11 @@ class WorkerServicer(
                 loss=loss_unscaled.item(),
             ):
                 with self._profiler.phase("backward"):
-                    loss.backward()
+                    # Pop MoE aux loss BEFORE backward — add to loss so both
+                    # backward through the same graph in one pass.
+                    moe = self.layer.pop_moe_aux_loss() if is_last_micro else None
+                    total_loss = loss + moe if moe is not None else loss
+                    total_loss.backward()
                     grad = x_ref.grad
                 if is_last_micro:
                     with self._profiler.phase("optimizer"):

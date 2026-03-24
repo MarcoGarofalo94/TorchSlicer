@@ -13,6 +13,31 @@ from ..monitor.run_logger import RunLogger
 from ..monitor.callback import TrainingCallback
 
 
+def _unpack_inputs(inputs):
+    """Unpack batch inputs into ``(main_tensor, aux_dict)``.
+
+    Supports three DataLoader conventions:
+
+    * ``torch.Tensor``           → ``(inputs, {})``
+    * ``dict``                   → ``(inputs["input_ids"], rest)`` — key
+      ``"input_ids"`` is the main tensor; everything else is aux.  If
+      ``"input_ids"`` is absent, the first key is treated as main.
+    * ``(Tensor, dict)``         → ``(inputs[0], inputs[1])``
+    """
+    if isinstance(inputs, torch.Tensor):
+        return inputs, {}
+    if isinstance(inputs, dict):
+        main_key = "input_ids" if "input_ids" in inputs else next(iter(inputs))
+        return inputs[main_key], {k: v for k, v in inputs.items() if k != main_key}
+    if (isinstance(inputs, (list, tuple))
+            and len(inputs) == 2
+            and isinstance(inputs[1], dict)):
+        return inputs[0], inputs[1]
+    if isinstance(inputs, (list, tuple)):
+        return inputs[0], {}
+    return inputs, {}
+
+
 class LocalExecutor(BaseExecutor):
     def __init__(self):
         self.split_layers: list[SplitLayer] = []
@@ -47,6 +72,7 @@ class LocalExecutor(BaseExecutor):
             preds = partition.predecessors if partition.predecessors else None
             sl = SplitLayer(partition_layers, is_last=is_last, predecessors=preds,
                             mixed_precision=mixed_precision)
+            sl.train()
             trainable = [p for p in sl.parameters() if p.requires_grad]
             params = trainable if trainable else list(sl.parameters())
             opt = getattr(optim, optimizer_cfg["name"])(params, **optimizer_cfg["params"])
@@ -89,7 +115,8 @@ class LocalExecutor(BaseExecutor):
             except Exception as e:
                 print(f"[callback] on_train_begin error: {e}")
 
-    def train_epoch(self, data_loader, epoch: int = 0, verbose: bool = False) -> dict:
+    def train_epoch(self, data_loader, epoch: int = 0, verbose: bool = False,
+                    total_epochs: int = 0) -> dict:
         total_loss = 0.0
         n_batches  = 0
         n_total    = len(data_loader)
@@ -105,13 +132,15 @@ class LocalExecutor(BaseExecutor):
         with tracer.span("torchslicer.epoch", epoch=epoch) as epoch_span:
             for inputs, labels in data_loader:
                 batch_id = epoch * n_total + n_batches
+                _shape = (str(tuple(inputs.shape)) if isinstance(inputs, torch.Tensor)
+                          else "multimodal")
 
                 with tracer.span(
                     "torchslicer.batch",
                     epoch=epoch,
                     batch_id=batch_id,
                     batch_index=n_batches,
-                    input_shape=str(tuple(inputs.shape)),
+                    input_shape=_shape,
                 ) as batch_span:
 
                     for p in self._profilers:
@@ -137,12 +166,14 @@ class LocalExecutor(BaseExecutor):
                     )
 
                 if verbose:
-                    print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss_val:.4f}")
+                    ep_suffix = f"/{total_epochs}" if total_epochs else ""
+                    print(f"  [epoch {epoch}{ep_suffix} | batch {n_batches}/{n_total}] loss={loss_val:.4f}")
 
         epoch_duration_s = time.perf_counter() - epoch_t0
         avg = total_loss / n_batches if n_batches > 0 else 0.0
         if verbose:
-            print(f"[epoch {epoch}] avg_loss={avg:.4f}")
+            suffix = f"/{total_epochs}" if total_epochs else ""
+            print(f"[epoch {epoch}{suffix}] avg_loss={avg:.4f}")
 
         # Build epoch metrics, let callbacks augment
         epoch_metrics = {
@@ -188,9 +219,15 @@ class LocalExecutor(BaseExecutor):
     # ── standard (non-GPipe) batch ─────────────────────────────────────────────
 
     def _standard_batch(self, inputs, labels, batch_id: int) -> float:
+        device = next(self.split_layers[0].parameters()).device
+        main, aux = _unpack_inputs(inputs)
+        main   = main.to(device)
+        labels = labels.to(device)
+        aux    = {k: v.to(device) for k, v in aux.items()}
+
         # forward
         outputs = []
-        x = inputs
+        x = main
         for i, sl in enumerate(self.split_layers):
             with tracer.span(
                 "torchslicer.partition.forward",
@@ -199,25 +236,35 @@ class LocalExecutor(BaseExecutor):
                 input_shape=str(tuple(x.shape)),
             ) as fwd_span:
                 with self._profilers[i].phase("forward"):
-                    x = sl(x)
+                    x = sl(x, **aux) if (i == 0 and aux) else sl(x)
                 if fwd_span:
                     fwd_span.set_attribute("output_shape", str(tuple(x.shape)))
             outputs.append(x)
 
         loss = self.criterion(outputs[-1], labels)
 
-        # backward
+        # backward — pop MoE aux loss BEFORE backward (same graph, would fail after)
         with tracer.span("torchslicer.partition.backward",
                          partition=len(self.split_layers) - 1, batch_id=batch_id):
             with self._profilers[-1].phase("backward"):
-                grad = self.split_layers[-1].backward(loss=loss)
+                moe = self.split_layers[-1].pop_moe_aux_loss()
+                total_loss = loss + moe if moe is not None else loss
+                grad = self.split_layers[-1].backward(loss=total_loss)
             with self._profilers[-1].phase("optimizer"):
                 self.split_layers[-1].optimize()
 
         for i in range(len(self.split_layers) - 2, -1, -1):
             with tracer.span("torchslicer.partition.backward", partition=i, batch_id=batch_id):
                 with self._profilers[i].phase("backward"):
-                    grad = self.split_layers[i].backward(prev_g=grad, out=outputs[i])
+                    moe = self.split_layers[i].pop_moe_aux_loss()
+                    if moe is not None:
+                        # retain graph so moe.backward() can reuse the same nodes
+                        outputs[i].backward(gradient=grad, retain_graph=True)
+                        moe.backward()
+                        sl_x = self.split_layers[i].x
+                        grad = sl_x.grad if sl_x is not None else None
+                    else:
+                        grad = self.split_layers[i].backward(prev_g=grad, out=outputs[i])
                 with self._profilers[i].phase("optimizer"):
                     self.split_layers[i].optimize()
 
@@ -235,19 +282,33 @@ class LocalExecutor(BaseExecutor):
         Each micro-batch loss is scaled by 1/M so accumulated gradients match
         the magnitude of a full-batch gradient.
         """
-        M = self._n_micro
-        n_sl = len(self.split_layers)
-        micro_inputs = inputs.chunk(M)
-        micro_labels = labels.chunk(M)
+        device = next(self.split_layers[0].parameters()).device
+        main, aux = _unpack_inputs(inputs)
+        main   = main.to(device)
+        labels = labels.to(device)
+        aux    = {k: v.to(device) for k, v in aux.items()}
 
-        # Step 1: forward all micro-batches
+        M    = self._n_micro
+        n_sl = len(self.split_layers)
+        micro_mains  = main.chunk(M)
+        micro_labels = labels.chunk(M)
+        # Chunk aux tensors that share the batch dimension; broadcast scalars/constants
+        micro_aux = [
+            {k: v.chunk(M)[m] if v.dim() > 0 and v.shape[0] == main.shape[0] else v
+             for k, v in aux.items()}
+            for m in range(M)
+        ]
+
+        # Step 1: forward all micro-batches; collect per-micro MoE aux losses immediately
+        # (must pop before backward — they share the same computation graph nodes)
         micro_outs: list[list[torch.Tensor]] = []
         x_refs:     list[list[torch.Tensor]] = []
+        micro_moe:  list[list] = []  # micro_moe[m][i] = Optional[Tensor]
 
         for m in range(M):
             outs: list[torch.Tensor] = []
             refs: list[torch.Tensor] = []
-            x = micro_inputs[m]
+            x = micro_mains[m]
             for i, sl in enumerate(self.split_layers):
                 with tracer.span(
                     "torchslicer.partition.forward",
@@ -256,11 +317,13 @@ class LocalExecutor(BaseExecutor):
                     input_shape=str(tuple(x.shape)),
                 ):
                     with self._profilers[i].phase("forward"):
-                        x = sl(x)
+                        x = sl(x, **micro_aux[m]) if (i == 0 and micro_aux[m]) else sl(x)
                 refs.append(sl.x)
                 outs.append(x)
             micro_outs.append(outs)
             x_refs.append(refs)
+            # Pop MoE aux per micro-batch right after forward so graph is still alive
+            micro_moe.append([sl.pop_moe_aux_loss() for sl in self.split_layers])
 
         # Step 2: backward all micro-batches, accumulate gradients
         total_loss = 0.0
@@ -268,6 +331,11 @@ class LocalExecutor(BaseExecutor):
             loss_m = self.criterion(micro_outs[m][-1], micro_labels[m])
             total_loss += loss_m.item()
             scaled = loss_m / M
+
+            # Last partition: add MoE aux (scaled by 1/M) to activation loss
+            moe_last = micro_moe[m][-1]
+            if moe_last is not None:
+                scaled = scaled + moe_last / M
 
             with tracer.span("torchslicer.partition.backward",
                              partition=n_sl - 1, batch_id=batch_id * M + m):
@@ -278,9 +346,15 @@ class LocalExecutor(BaseExecutor):
                 with tracer.span("torchslicer.partition.backward",
                                  partition=i, batch_id=batch_id * M + m):
                     with self._profilers[i].phase("backward"):
-                        micro_outs[m][i].backward(x_refs[m][i + 1].grad)
+                        moe_i = micro_moe[m][i]
+                        if moe_i is not None:
+                            micro_outs[m][i].backward(x_refs[m][i + 1].grad,
+                                                      retain_graph=True)
+                            (moe_i / M).backward()
+                        else:
+                            micro_outs[m][i].backward(x_refs[m][i + 1].grad)
 
-        # Step 3: single optimizer step for all split layers
+        # Step 3: optimizer
         for i, sl in enumerate(self.split_layers):
             with self._profilers[i].phase("optimizer"):
                 sl.optimizer.step()

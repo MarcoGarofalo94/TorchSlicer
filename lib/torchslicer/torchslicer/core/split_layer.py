@@ -50,7 +50,18 @@ class SplitLayer(nn.Module):
 
     # ── forward ───────────────────────────────────────────────────────────────
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, **aux) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        input : torch.Tensor
+            The main activation (or int64 token ids for the first partition).
+        **aux :
+            Optional extra named tensors for the first layer only.  Used by
+            ``AuxInputStage`` subclasses (e.g. LLaVA vision encoder) that need
+            ``pixel_values`` or other non-activation inputs.  Ignored by layers
+            that do not declare ``accepts_aux_inputs = True``.
+        """
         # Wrap external input so we can retrieve its gradient at the cut point
         if input.is_floating_point():
             self.x = input.detach().requires_grad_(True)
@@ -70,8 +81,11 @@ class SplitLayer(nn.Module):
             if preds is None or all(len(p) == 0 for p in preds):
                 # Fast path: purely sequential
                 current = x_in
-                for layer in self.layers:
-                    current = layer(current)
+                for i, layer in enumerate(self.layers):
+                    if i == 0 and aux and getattr(layer, 'accepts_aux_inputs', False):
+                        current = layer(current, **aux)
+                    else:
+                        current = layer(current)
                 return current
 
             # DAG execution: track each layer's output, route inputs accordingly
@@ -80,16 +94,33 @@ class SplitLayer(nn.Module):
                 local_preds = preds[i]
                 if not local_preds:
                     inp = x_in
+                    if i == 0 and aux and getattr(layer, 'accepts_aux_inputs', False):
+                        outputs[i] = layer(inp, **aux)
+                        continue
                 elif len(local_preds) == 1:
                     inp = outputs[local_preds[0]]
                 else:
                     # Multi-input layer (e.g. _AddWrapper for skip connections)
-                    inputs = [outputs[p] for p in local_preds]
-                    outputs[i] = layer(*inputs)
+                    layer_inputs = [outputs[p] for p in local_preds]
+                    outputs[i] = layer(*layer_inputs)
                     continue
                 outputs[i] = layer(inp)
 
         return outputs[len(self.layers) - 1]
+
+    def pop_moe_aux_loss(self) -> "torch.Tensor | None":
+        """Sum and clear accumulated MoE aux losses from all MoEBlockStage in this partition.
+
+        Called after each backward pass so MoE router weights receive a separate
+        gradient that does not travel across partition boundaries.
+        """
+        total = None
+        for layer in self.layers:
+            if hasattr(layer, 'pop_aux_loss'):
+                aux = layer.pop_aux_loss()
+                if aux is not None:
+                    total = aux if total is None else total + aux
+        return total
 
     # ── backward ──────────────────────────────────────────────────────────────
 

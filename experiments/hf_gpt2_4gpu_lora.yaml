@@ -1,0 +1,48 @@
+# DistilGPT-2 / WikiText-2 — 4-worker GPU, LoRA fine-tuning
+# LoRA r=8 on c_attn + c_proj (~0.3% trainable params)
+# Usage:
+#   make run-hf-dist-gpu CONFIG=experiments/hf_gpt2_4gpu_lora.yaml
+
+run_id: hf_gpt2_lora
+
+model:
+  name: distilgpt2
+  task: causal_lm
+  use_lora: true
+  lora_r: 32
+  lora_alpha: 64
+  lora_target_modules: [c_attn, c_proj, c_fc]   # attn + mlp projections
+  block_size: 128
+  n_train: 4000
+  batch_size: 16
+
+training:
+  epochs: 15
+  optimizer:
+    name: AdamW
+    params:
+      lr: 3.0e-4        # higher LR typical for LoRA
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: false
+  n_micro: 1
+
+discovery:
+  backend: coordinator
+  n_workers: 4
+  timeout: 120
+
+checkpoint:
+  enabled: false
+
+logging:
+  enabled: true
+  dir: ./runs
+
+profile:
+  verbosity: 1
+  memory: false

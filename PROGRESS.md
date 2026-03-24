@@ -143,6 +143,47 @@
 - [x] GPipe micro-batch pipeline parallelism — opt-in via `use_gpipe=True, n_micro_batches=4` on `SlicedModel.train()`; `USE_GPIPE=1 N_MICRO=4` env vars for Docker; each micro-batch loss scaled by 1/M for correct gradient accumulation; single optimizer step after all M micro-batches; **benchmarked: 1.9× speedup with 4 workers** (282s → 149s / 5 epochs, ResNet18/CIFAR-10 GPU); 2-worker case is slower due to gRPC overhead exceeding pipeline gain; compute pool serialized (max_workers=1) to prevent concurrent backward races on shared model weights; x_ref saved per batch_id to avoid cut-point tensor overwrite across micro-batches
 - [ ] More efficient gradient propagation beyond basic autograd
 
+## Fault tolerance
+- [ ] **Heartbeat / failure detection** — `BaseDiscovery.watch(on_join, on_leave)` hook is in place but nothing calls it; a worker crash silently stalls the run (forward/backward RPCs time out); need a background heartbeat thread per worker that fires `on_leave` on missed pings
+- [ ] **Automatic re-slicing on worker failure** — once a failure is detected, executor must re-partition the model over the remaining workers, re-send `SliceConfig`, and resume from the last completed batch (requires checkpoint + batch-id tracking)
+- [ ] **Coordinator failover** — if the coordinator crashes in centralized topology, all workers stall; `run_id` on all messages is already in place as a hook for re-registration on coordinator restart
+
+## HuggingFace / transformer support ✅
+- [x] **`ts.wrap_hf(model, task)`** — wraps any HF model as `HFAdapter(nn.Sequential)`; flat sequence of opaque stage modules (embed + N blocks + head); no cross-partition skip connections; `HFAdapter` is a drop-in `nn.Module` for `ts.slice()`
+- [x] **Architecture detection** — GPT-2 (`_GPT2EmbedStage`), BERT, LLaMA/Mistral, generic fallback; task types: `causal_lm`, `seq_cls`, `masked_lm`
+- [x] **`_CausalLMHeadStage`** — transposes output to `[B, V, T]` for `CrossEntropyLoss` compatibility (HF lm_head outputs `[B, T, V]`)
+- [x] **Worker train mode fix** — `WorkerServicer.init()` calls `self.layer.train()` after `torch.load()` + `.to(device)`; `LocalExecutor.setup()` calls `sl.train()` on each partition; fixes silent eval-mode dropout suppression when using `from_pretrained()` weights
+- [x] **LoRA split learning: lm_head unfreeze** — weight tying between `wte` and `lm_head` is broken at serialization; last worker must train its own output projection; fix: `p.requires_grad_(True)` on `lm_head` before `peft_unwrap()` in coordinator
+- [x] **Device placement fix** — `LocalExecutor._standard_batch()` and `_gpipe_batch()` move `inputs`/`labels` to device at batch start; required for GPU training with CPU DataLoader tensors
+- [x] **Epoch progress logging** — `train_epoch()` accepts `total_epochs`; both `LocalExecutor` and `DistributedExecutor` print `[epoch N/M]` headers
+- [x] **`transformers>=4.40.0` + `datasets>=2.18.0`** added to `Dockerfile.cpu` and `Dockerfile.gpu`; `HF_HOME` bind-mount in all HF compose files for dataset/model cache persistence
+- [x] **HF distributed experiment** (`examples/train/hf/coordinator/main.py`) — `DistributedExecutor` + `CoordinatorDiscovery`; loads distilgpt2 + WikiText-2; three modes (baseline, LoRA, GPipe) from YAML; verified 4-GPU workers
+- [x] **Experiment configs**: `hf_gpt2_4gpu_baseline.yaml` (b=16, 10 ep, lr=5e-5), `hf_gpt2_4gpu_lora.yaml` (r=32, α=64, c_attn+c_proj+c_fc, 15 ep, lr=3e-4), `hf_gpt2_4gpu_gpipe.yaml` (b=64, n_micro=4, 40 ep, lr=2e-4), `hf_gpt2_4gpu_baseline_b64.yaml` (b=64, 40 ep — fair GPipe comparison)
+- [x] **Docker compose**: `docker-compose.hf-dist.yml` + GPU override; `docker-compose.hf.yml` + GPU override (LocalExecutor); `make run-hf-dist-gpu/cpu`, `run-hf-gpu/cpu`, `down-hf-dist`, `down-hf` targets
+- [x] **Verified results**: baseline loss 3.86→1.67 (10 ep); LoRA loss 3.95→1.44 (15 ep, 3.26% trainable); GPipe throughput ~1.57× vs sequential at same gradient-step budget
+- [ ] **Intra-block splitting** — splitting attention from FFN within a block would require cross-partition skip connections; not supported; current granularity is one block per stage
+
+## Architecture extension system ✅
+- [x] **`register_hf_architecture(name, detect, extract)`** — public registry; `detect(model)->bool` selects extractor, `extract(model, task)->list[nn.Module]` returns flat stage list; checked before all built-in detectors (last registered wins); no library fork required
+- [x] **`AuxInputStage`** — base class (`accepts_aux_inputs=True`) for multimodal stage 0; `forward(main, **aux) -> Tensor` contract; `SplitLayer.forward(input, **aux)` passes kwargs to first sub-layer only if it declares `accepts_aux_inputs`; zero overhead for all other stages
+- [x] **`MoEBlockStage`** — wraps MoE blocks returning `(hidden_states, scalar_aux_loss)`; accumulates weighted aux loss during forward; `pop_aux_loss()` clears buffer; `SplitLayer.pop_moe_aux_loss()` sums across partition; executors call it after activation backward and run a local `.backward()` — router weights trained correctly without crossing partition boundaries
+- [x] **Auto MoE detection** — `wrap_hf()` / `_stages_llama()` probes each block's child names for MoE indicators (`experts`, `router`, `gate`, class names containing `moe`/`expert`/`router`); wraps in `MoEBlockStage` automatically; DeepSeek-V2/V3 and Mixtral handled transparently
+- [x] **Qwen2/2.5 + DeepSeek-dense** — auto-detected via existing LLaMA branch (`model.model.embed_tokens + model.model.layers + model.model.norm`); no changes needed; work with `wrap_hf()` unchanged
+- [x] **Proto: `map<string, Tensor> aux_inputs = 4`** on `ForwardRequest` — backward-compatible optional field; coordinator serializes aux tensors (pixel_values etc.) and sends to worker 0 only; workers deserialize and unpack into `**aux` kwargs; empty map = zero overhead
+- [x] **Multi-modal DataLoader convention** — coordinator accepts `({"input_ids":…, "pixel_values":…}, labels)`, `((main, aux_dict), labels)`, or plain `(Tensor, labels)`; `_unpack_inputs()` helper in both `LocalExecutor` and `DistributedExecutor`; aux tensors chunked per micro-batch when GPipe is active
+- [x] **Public stage aliases** — `ts.BlockStage`, `ts.CausalLMHeadStage`, `ts.MoEBlockStage`, `ts.SimpleEmbedStage` exported at top level; users build custom stage lists without importing private `_`-prefixed names
+- [x] **RoPE fix for transformers ≥ 4.43** — `_BlockStage` and `_MoEBlockStage` accept optional `rotary_emb`; `_stages_llama()` passes `core.rotary_emb` when present; stages compute `position_embeddings=(cos, sin)` per-forward so Mistral/Qwen/DeepSeek blocks work with both old and new transformers interfaces
+- [x] **MoE aux loss graph fix** — pop aux loss *before* calling `backward()` and combine with primary loss (`total = loss + moe`) to avoid double-backward on shared graph nodes; non-last partitions use `retain_graph=True`; fix applied in `LocalExecutor`, `DistributedExecutor._gpipe_batch`, and `WorkerServicer`
+- [x] **`DistributedExecutor.reinit()`** — re-sends `SliceConfig` to existing workers without restarting the gRPC server or re-discovering workers; enables sequential multi-model tests on the same cluster
+- [x] **Arch extension smoke test** — `examples/test_arch_extension.py`: Mistral-tiny (from config, no download) + synthetic DeepSeek-V2 MoE; both pass with `LocalExecutor` (2 partitions, 2 epochs, CPU/GPU)
+- [x] **Arch extension distributed test** — `examples/test_arch_ext_dist/coordinator/main.py` + custom worker; runs both models sequentially on same 2 GPU workers via `reinit()`; `docker-compose.arch-ext.yml` + GPU override; `make run-arch-ext-gpu/cpu`, `down-arch-ext`; verified: Mistral 6.26→6.04, DeepSeek-MoE 6.39→6.23, both workers exit 0
+- [ ] **Built-in LLaVA/InternVL/Qwen-VL extractors** — plumbing is ready; users must write and register the fusion stage 0 for now
+
+## Dynamic cluster management
+- [ ] **Dynamic re-slicing** — no way to add/remove workers mid-run or rebalance partitions; the slice assignment is fixed at `init()` time for the entire training run
+- [ ] **Heterogeneous batch routing** — all workers receive the same micro-batch size; devices with more memory (or faster compute) could be assigned larger shares; `NodeInfo.memory_mb` and `NodeInfo.device` are already advertised at registration but not used by any splitter
+- [ ] **Intra-layer parallelism** — if a single layer is too large for one device's memory, there is no way to split it further; the current model requires every direct child of the root to fit on one worker
+
 ## Platform support
 - [ ] ARM64 (aarch64) support — Dockerfiles use x86-only PyTorch wheel URLs; need ARM64-compatible base image and wheel source
 
@@ -158,3 +199,5 @@
 - Worker hostnames no longer hardcoded — `CoordinatorDiscovery` replaces the `worker{i}` loop; workers advertise their own address at registration time
 - `Transport`, `Topology`, `Monitor` in `lib/` are interfaces only; implementations live in `examples/`
 - No fault tolerance — coordinator or worker crash aborts the run; checkpoint support mitigates data loss; heartbeat-based failure detection is a future addition via `BaseDiscovery.watch()` (hook already in place)
+- HuggingFace models are supported via `ts.wrap_hf()` at transformer block granularity; intra-block splitting requires cross-partition skip connections (unsupported). Multi-modal models need a custom `AuxInputStage` registered via `ts.register_hf_architecture()`.
+- All workers receive equal-sized batches regardless of device capability — `NodeInfo` carries device/memory info but no splitter or executor uses it for load balancing yet

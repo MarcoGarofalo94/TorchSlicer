@@ -76,6 +76,7 @@ message ForwardRequest {
     uint32 batch_id = 1;  // monotonic counter, used to match backward
     Tensor input    = 2;
     Tensor label    = 3;  // only sent to the last worker
+    map<string, Tensor> aux_inputs = 4;  // optional extra tensors (multimodal etc.), first worker only
 }
 
 message BackwardRequest {

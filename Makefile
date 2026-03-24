@@ -70,6 +70,57 @@ run-p2p-cpu: _env ## Run P2P CPU stack (2 workers, no coordinator). CONFIG=path/
 		-f docker-compose.p2p.yml \
 		up --abort-on-container-exit
 
+.PHONY: run-arch-ext-gpu
+run-arch-ext-gpu: _env ## Run architecture extension smoke test (GPU, 2 workers: Mistral + DeepSeek MoE)
+	docker compose \
+		-f docker-compose.arch-ext.yml \
+		-f docker-compose.arch-ext.gpu.yml \
+		up --abort-on-container-exit
+
+.PHONY: run-arch-ext-cpu
+run-arch-ext-cpu: _env ## Run architecture extension smoke test (CPU, 2 workers: Mistral + DeepSeek MoE)
+	docker compose \
+		-f docker-compose.arch-ext.yml \
+		up --abort-on-container-exit
+
+.PHONY: down-arch-ext
+down-arch-ext: ## Stop and remove arch extension test stack
+	docker compose -f docker-compose.arch-ext.yml down
+
+.PHONY: run-hf-dist-gpu
+run-hf-dist-gpu: _env ## Run HuggingFace GPT-2 distributed training (GPU, 4 workers). CONFIG=path/to/experiment.yaml
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.hf-dist.yml \
+		-f docker-compose.hf-dist.gpu.yml \
+		up --abort-on-container-exit
+
+.PHONY: run-hf-dist-cpu
+run-hf-dist-cpu: _env ## Run HuggingFace GPT-2 distributed training (CPU, 4 workers). CONFIG=path/to/experiment.yaml
+	EXPERIMENT_CONFIG=$(CONFIG) docker compose \
+		-f docker-compose.hf-dist.yml \
+		up --abort-on-container-exit
+
+.PHONY: down-hf-dist
+down-hf-dist: ## Stop and remove HF distributed stack
+	docker compose -f docker-compose.hf-dist.yml down
+
+.PHONY: run-hf-gpu
+run-hf-gpu: _env ## Run HuggingFace GPT-2 fine-tuning (GPU, LocalExecutor)
+	docker compose \
+		-f docker-compose.hf.yml \
+		-f docker-compose.hf.gpu.yml \
+		up --abort-on-container-exit
+
+.PHONY: run-hf-cpu
+run-hf-cpu: _env ## Run HuggingFace GPT-2 fine-tuning (CPU, LocalExecutor)
+	docker compose \
+		-f docker-compose.hf.yml \
+		up --abort-on-container-exit
+
+.PHONY: down-hf
+down-hf: ## Stop and remove HF fine-tuning container
+	docker compose -f docker-compose.hf.yml down
+
 .PHONY: run-lm-gpu
 run-lm-gpu: _env ## Run TinyGPT LM experiment (GPU, P2P). CONFIG=path/to/experiment.yaml
 	EXPERIMENT_CONFIG=$(CONFIG) docker compose \

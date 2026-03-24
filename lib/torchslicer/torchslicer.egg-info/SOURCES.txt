@@ -9,6 +9,8 @@ torchslicer.egg-info/SOURCES.txt
 torchslicer.egg-info/dependency_links.txt
 torchslicer.egg-info/requires.txt
 torchslicer.egg-info/top_level.txt
+torchslicer/adapters/__init__.py
+torchslicer/adapters/hf.py
 torchslicer/core/__init__.py
 torchslicer/core/model_graph.py
 torchslicer/core/slicer.py

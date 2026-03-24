@@ -19,6 +19,11 @@ from .config import (
     CheckpointConfig, LoggingConfig, ProfileConfig,
 )
 from .monitor import TrainingCallback, RunLogger
+from .adapters.hf import (
+    HFAdapter, wrap_hf,
+    AuxInputStage, register_hf_architecture,
+    BlockStage, CausalLMHeadStage, MoEBlockStage, SimpleEmbedStage,
+)
 
 
 def peft_unwrap(model) -> "nn.Module":
@@ -99,7 +104,8 @@ class SlicedModel:
         )
         history = []
         for epoch in range(1, epochs + 1):
-            history.append(self.executor.train_epoch(data_loader, epoch=epoch, verbose=verbose))
+            history.append(self.executor.train_epoch(
+                data_loader, epoch=epoch, verbose=verbose, total_epochs=epochs))
         self.executor.teardown()
         return history
 

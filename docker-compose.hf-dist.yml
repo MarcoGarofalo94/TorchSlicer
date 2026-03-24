@@ -1,0 +1,94 @@
+# HuggingFace GPT-2 split learning — centralized topology, 4 workers.
+# GPU override: docker-compose.hf-dist.gpu.yml
+#
+# Usage:
+#   make run-hf-dist-gpu CONFIG=experiments/hf_gpt2_4gpu_baseline.yaml
+#   make run-hf-dist-gpu CONFIG=experiments/hf_gpt2_4gpu_lora.yaml
+#   make run-hf-dist-gpu CONFIG=experiments/hf_gpt2_4gpu_gpipe.yaml
+
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: hf-coordinator
+    user: "${UID}:${GID}"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - EXPERIMENT_CONFIG
+      - HF_HOME=/workspace/.cache/huggingface
+      - HF_DATASETS_CACHE=/workspace/.cache/huggingface/datasets
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/hf/coordinator/main.py 50054
+    networks:
+      - torchslicer-hf
+
+  worker1:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: hf-worker1
+    user: "${UID}:${GID}"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/centralized/GRPC/worker/main.py
+    networks:
+      - torchslicer-hf
+
+  worker2:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: hf-worker2
+    user: "${UID}:${GID}"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/centralized/GRPC/worker/main.py
+    networks:
+      - torchslicer-hf
+
+  worker3:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: hf-worker3
+    user: "${UID}:${GID}"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/centralized/GRPC/worker/main.py
+    networks:
+      - torchslicer-hf
+
+  worker4:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: hf-worker4
+    user: "${UID}:${GID}"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/train/centralized/GRPC/worker/main.py
+    networks:
+      - torchslicer-hf
+
+networks:
+  torchslicer-hf:
+    driver: bridge

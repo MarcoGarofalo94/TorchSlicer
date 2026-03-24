@@ -1,0 +1,15 @@
+# GPU override for HuggingFace fine-tuning example.
+# Usage: make run-hf-gpu
+
+services:
+  hf-worker:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -2,9 +2,11 @@ torchslicer/build
 torchslicer/torchslicer/__pycache__
 torchslicer/torchslicer.egg-info
 examples/train/server_.py
-configCLAUDE.md
+config
+CLAUDE.md
 data/
 runs/
+.cache/
 .env
 
 examples/monitor/frontend/node_modules

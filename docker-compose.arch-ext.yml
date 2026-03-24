@@ -1,0 +1,59 @@
+# Architecture extension distributed smoke test — 1 coordinator + 2 workers.
+# GPU override: docker-compose.arch-ext.gpu.yml
+#
+# Usage:
+#   make run-arch-ext-gpu
+#   make run-arch-ext-cpu
+
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: arch-ext-coordinator
+    user: "${UID}:${GID}"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - EXPERIMENT_CONFIG=/workspace/experiments/arch_ext_2worker.yaml
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/test_arch_ext_dist/coordinator/main.py 50054
+    networks:
+      - torchslicer-arch-ext
+
+  worker1:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: arch-ext-worker1
+    user: "${UID}:${GID}"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/test_arch_ext_dist/worker/main.py
+    networks:
+      - torchslicer-arch-ext
+
+  worker2:
+    build:
+      context: .
+      dockerfile: docker-images/Dockerfile.cpu
+    container_name: arch-ext-worker2
+    user: "${UID}:${GID}"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS=coordinator:50054
+    volumes:
+      - .:/workspace
+      - ./lib/torchslicer:/usr/local/lib/torchslicer
+    command: python3 examples/test_arch_ext_dist/worker/main.py
+    networks:
+      - torchslicer-arch-ext
+
+networks:
+  torchslicer-arch-ext:
+    driver: bridge
