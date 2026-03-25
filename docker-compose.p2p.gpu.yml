@@ -1,11 +1,16 @@
 # GPU override for P2P topology.
-# Usage: make run-p2p-gpu CONFIG=experiments/resnet18_2gpu_p2p.yaml
+# Adds NVIDIA device reservations to all P2P workers.
+#
+# Usage:
+#   docker compose -f docker-compose.p2p.yml -f docker-compose.p2p.gpu.yml up --abort-on-container-exit
+# Or via Makefile:
+#   make run-p2p DEVICE=gpu CONFIG=...
+#
+# Requires: NVIDIA Container Toolkit + docker-images/Dockerfile.gpu image.
+# Set IMAGE_TAG=gpu in .env or pass as env var so the GPU image is used.
 
 services:
   worker0:
-    build:
-      context: .
-      dockerfile: docker-images/Dockerfile.gpu
     deploy:
       resources:
         reservations:
@@ -15,9 +20,6 @@ services:
               capabilities: [gpu]
 
   worker1:
-    build:
-      context: .
-      dockerfile: docker-images/Dockerfile.gpu
     deploy:
       resources:
         reservations:

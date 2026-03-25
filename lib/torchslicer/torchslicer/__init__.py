@@ -10,8 +10,8 @@ from .strategies.registry import register as register_strategy, get as _get_stra
 from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
 from .executors.distributed import DistributedExecutor, WorkerFailureError
+from .executors.worker import resolve_device
 from .transport.base import BaseTransport
-from .topology.base import BaseTopology
 from .discovery import BaseDiscovery, NodeInfo, AnnounceResult
 from .discovery import CoordinatorDiscovery, announce_to_coordinator, StaticDiscovery
 from .config import (
@@ -19,10 +19,13 @@ from .config import (
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
 )
 from .monitor import TrainingCallback, RunLogger
-from .adapters.hf import (
-    HFAdapter, wrap_hf,
-    AuxInputStage, register_hf_architecture,
-    BlockStage, CausalLMHeadStage, MoEBlockStage, SimpleEmbedStage,
+from .core.stages import (
+    AuxInputStage,
+    BlockStage,
+    CausalLMHeadStage,
+    GPT2EmbedStage,
+    MoEBlockStage,
+    SimpleEmbedStage,
 )
 
 
@@ -119,8 +122,46 @@ class SlicedModel:
         return history
 
 
-def slice(model, strategy="uniform", n=2, executor=None) -> SlicedModel:
-    graph = ModelGraph.from_module(model)
+def slice(model, strategy="uniform", n=2, executor=None, pack=None) -> SlicedModel:
+    """Slice a model into ``n`` partitions for distributed training.
+
+    Args:
+        model:    Any ``nn.Module``.
+        strategy: Splitting strategy name, class, or instance.
+        n:        Number of partitions.
+        executor: Executor to use. Defaults to ``LocalExecutor``.
+        pack:     Optional callable ``(model) -> list[nn.Module]``.
+                  When provided, the function is called to produce a flat
+                  list of stages; torch.fx tracing is skipped entirely.
+                  Use this for models with cross-partition residuals, MoE
+                  blocks, or any architecture the default tracer cannot
+                  handle.  Example::
+
+                      def pack_qwen(model):
+                          return [
+                              ts.BlockStage(model.model.embed_tokens),
+                              *[ts.BlockStage(l) for l in model.model.layers],
+                              ts.BlockStage(model.model.norm),
+                              ts.BlockStage(model.lm_head),
+                          ]
+
+                      sliced = ts.slice(model, n=4, pack=pack_qwen)
+
+    Serialization constraint
+    ------------------------
+    Slices are shipped to workers via ``torch.save`` / ``torch.load``.
+    Every class instantiated inside ``pack`` must be importable on workers
+    under the same module path.  Prefer torchslicer library classes
+    (``BlockStage``, ``GPT2EmbedStage``, ``CausalLMHeadStage``, etc.) and
+    standard PyTorch (``nn.Sequential``) which are always available.
+    For custom stage classes, either install them as a package on all
+    workers or expose them via ``PYTHONPATH``.
+    """
+    if pack is not None:
+        stages = pack(model)
+        graph = ModelGraph.from_stages(stages)
+    else:
+        graph = ModelGraph.from_module(model)
     splitter = _get_strategy(strategy)
     partitions = splitter.split(graph, n)
     splitter.validate(graph, partitions)

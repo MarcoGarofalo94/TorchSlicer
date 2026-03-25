@@ -1,18 +1,55 @@
+# Centralized topology — coordinator + N workers.
+#
+# Quick start (CPU):
+#   make run-centralized CONFIG=experiments/resnet18_4gpu.yaml
+#
+# Quick start (GPU):
+#   make run-centralized DEVICE=gpu CONFIG=experiments/resnet18_4gpu.yaml
+#
+# Image selection via IMAGE_TAG env var (or .env file):
+#   IMAGE_TAG=cpu  (default) — CPU-only torch install
+#   IMAGE_TAG=gpu            — CUDA torch install; also requires docker-compose.gpu.yml
+#
+# Device selection per worker via DEVICE env var:
+#   DEVICE=auto  (default) — use cuda if available, else cpu
+#   DEVICE=cuda            — always use CUDA
+#   DEVICE=cpu             — always use CPU
+#
+# All experiment parameters come from EXPERIMENT_CONFIG (YAML path) or individual env vars.
+# N_WORKERS controls how many workers the coordinator waits for before dispatching slices.
+
+x-worker: &worker
+  build:
+    context: .
+    dockerfile: docker-images/Dockerfile.${IMAGE_TAG:-cpu}
+  image: torchslicer:${IMAGE_TAG:-cpu}
+  user: "${UID}:${GID}"
+  environment:
+    - PYTHONUNBUFFERED=1
+    - COORDINATOR_ADDRESS=coordinator:50054
+    - DEVICE=${DEVICE:-auto}
+  volumes:
+    - .:/workspace
+    - ./lib/torchslicer:/usr/local/lib/torchslicer
+  command: python3 examples/train/centralized/GRPC/worker/main.py
+  networks:
+    - torchslicer-net
+
 services:
   coordinator:
     build:
       context: .
-      dockerfile: docker-images/Dockerfile.cpu
+      dockerfile: docker-images/Dockerfile.${IMAGE_TAG:-cpu}
+    image: torchslicer:${IMAGE_TAG:-cpu}
     container_name: coordinator
     user: "${UID}:${GID}"
     environment:
       - PYTHONUNBUFFERED=1
-      # ── experiment config ──────────────────────────────────────────────────
-      # Set EXPERIMENT_CONFIG to a YAML path to use file-based config.
-      # Individual env vars below override YAML values when set.
       - EXPERIMENT_CONFIG
       - RUN_ID
       - N_WORKERS
+      - HF_HOME=${HF_HOME:-/workspace/.cache/huggingface}
+      - HF_TOKEN
       - EPOCHS
       - USE_GPIPE
       - N_MICRO
@@ -20,89 +57,40 @@ services:
       - DISCOVERY_BACKEND
       - DISCOVERY_TIMEOUT
       - WORKER_PEERS
-      # ── checkpoint ────────────────────────────────────────────────────────
       - CHECKPOINT_ENABLED
       - CHECKPOINT_DIR
       - CHECKPOINT_SAVE_EVERY
       - CHECKPOINT_RESUME
-      # ── logging & profiling ───────────────────────────────────────────────
       - LOG_ENABLED
       - LOG_DIR
       - PROFILE_VERBOSITY
       - PROFILE_MEMORY
-      # ── post-run behaviour ────────────────────────────────────────────────
-      # Coordinator blocks on signal.pause() after training and exits only
-      # on SIGTERM/SIGINT. Use `docker compose down` to stop the stack.
+      - FAULT_TOLERANCE_ENABLED
+      - HEARTBEAT_INTERVAL
+      - HEARTBEAT_TIMEOUT
+      - FAULT_MAX_RETRIES
     volumes:
-      - .:/workspace          # ./runs/ lands here on the host automatically
+      - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
-    command: python3 examples/train/centralized/GRPC/coordinator/main.py
+    command: ${COORDINATOR_CMD:-python3 examples/train/centralized/GRPC/coordinator/main.py}
     networks:
       - torchslicer-net
 
   worker1:
-    build:
-      context: .
-      dockerfile: docker-images/Dockerfile.cpu
+    <<: *worker
     container_name: worker1
-    user: "${UID}:${GID}"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - COORDINATOR_ADDRESS=coordinator:50054
-    volumes:
-      - .:/workspace
-      - ./lib/torchslicer:/usr/local/lib/torchslicer
-    command: python3 examples/train/centralized/GRPC/worker/main.py
-    networks:
-      - torchslicer-net
 
   worker2:
-    build:
-      context: .
-      dockerfile: docker-images/Dockerfile.cpu
+    <<: *worker
     container_name: worker2
-    user: "${UID}:${GID}"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - COORDINATOR_ADDRESS=coordinator:50054
-    volumes:
-      - .:/workspace
-      - ./lib/torchslicer:/usr/local/lib/torchslicer
-    command: python3 examples/train/centralized/GRPC/worker/main.py
-    networks:
-      - torchslicer-net
 
   worker3:
-    build:
-      context: .
-      dockerfile: docker-images/Dockerfile.cpu
+    <<: *worker
     container_name: worker3
-    user: "${UID}:${GID}"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - COORDINATOR_ADDRESS=coordinator:50054
-    volumes:
-      - .:/workspace
-      - ./lib/torchslicer:/usr/local/lib/torchslicer
-    command: python3 examples/train/centralized/GRPC/worker/main.py
-    networks:
-      - torchslicer-net
 
   worker4:
-    build:
-      context: .
-      dockerfile: docker-images/Dockerfile.cpu
+    <<: *worker
     container_name: worker4
-    user: "${UID}:${GID}"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - COORDINATOR_ADDRESS=coordinator:50054
-    volumes:
-      - .:/workspace
-      - ./lib/torchslicer:/usr/local/lib/torchslicer
-    command: python3 examples/train/centralized/GRPC/worker/main.py
-    networks:
-      - torchslicer-net
 
 networks:
   torchslicer-net:

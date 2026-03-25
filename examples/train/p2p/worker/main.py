@@ -67,8 +67,10 @@ from torchslicer.config import RunConfig
 
 # ── dataset / model (customize per experiment) ─────────────────────────────────
 
-def get_dataset(data_dir: str = '/workspace/data', batch_size: int = 64,
-                n_train: int = 10000):
+def get_dataset(data_dir: str = '/workspace/data', batch_size: int = None,
+                n_train: int = None):
+    batch_size = batch_size or int(os.environ.get("BATCH_SIZE", 64))
+    n_train    = n_train    or int(os.environ.get("N_TRAIN",    10000))
     transform = T.Compose([
         T.RandomHorizontalFlip(),
         T.RandomCrop(32, padding=4),

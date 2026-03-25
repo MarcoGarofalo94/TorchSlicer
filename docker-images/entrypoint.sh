@@ -10,4 +10,10 @@ python3 -m grpc_tools.protoc \
     torchslicer/transport/grpc/coordinator/coordinator_service.proto \
     torchslicer/transport/grpc/worker/worker_service.proto
 
+# PyTorch cache-dir setup calls getpass.getuser() → pwd.getpwuid(uid) which fails
+# when the container runs as a numeric UID not present in /etc/passwd.
+# Setting LOGNAME makes getpass use the env var path instead.
+export LOGNAME=${LOGNAME:-user}
+export HOME=${HOME:-/tmp}
+
 exec "$@"

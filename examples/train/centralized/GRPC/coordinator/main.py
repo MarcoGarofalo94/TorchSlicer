@@ -15,7 +15,9 @@ from torchslicer.config import RunConfig
 from torchslicer.monitor import tracer
 
 
-def get_dataset(data_dir='/workspace/data', batch_size=64, n_train=10000):
+def get_dataset(data_dir='/workspace/data', batch_size=None, n_train=None):
+    batch_size = batch_size or int(os.environ.get("BATCH_SIZE", 64))
+    n_train    = n_train    or int(os.environ.get("N_TRAIN",    10000))
     transform = T.Compose([
         T.RandomHorizontalFlip(),
         T.RandomCrop(32, padding=4),

@@ -68,6 +68,25 @@ class ModelGraph:
         return graph
 
     @classmethod
+    def from_stages(cls, stages: list) -> "ModelGraph":
+        """Build a sequential graph from a pre-packed list of nn.Module stages.
+
+        Use this when you provide a ``pack`` function to ``ts.slice()`` — the
+        returned list is treated as a flat sequential chain with no skip
+        connections between stages.
+        """
+        graph = cls()
+        n = len(stages)
+        for i, module in enumerate(stages):
+            graph.nodes.append(LayerNode(
+                index=i,
+                module=module,
+                predecessors=[i - 1] if i > 0 else [],
+                successors=[i + 1] if i < n - 1 else [],
+            ))
+        return graph
+
+    @classmethod
     def from_module(cls, network: nn.Module) -> "ModelGraph":
         """
         Build graph by tracing the module with torch.fx.

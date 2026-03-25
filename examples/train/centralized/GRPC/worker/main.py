@@ -9,6 +9,7 @@ from concurrent import futures
 from torchslicer.executors.worker import (
     WorkerServicer,
     get_available_memory_mb,
+    resolve_device,
     _GRPC_OPTS,
 )
 from torchslicer.transport.grpc.worker import worker_service_pb2_grpc
@@ -32,7 +33,7 @@ def serve():
     servicer.set_server(server)
     print(f"[worker] started on port {port}  (hostname={hostname})")
 
-    device    = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
+    device    = resolve_device()
     memory_mb = get_available_memory_mb(device)
     node_info = NodeInfo(
         node_id=hostname, address=node_address, device=device, memory_mb=memory_mb

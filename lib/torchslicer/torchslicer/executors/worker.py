@@ -84,6 +84,21 @@ def serialize_tensor(t: torch.Tensor):
     )
 
 
+def resolve_device() -> str:
+    """Resolve the target device from the DEVICE environment variable.
+
+    DEVICE=auto  (default) — use ``cuda`` if available, else ``cpu``
+    DEVICE=cuda            — always use CUDA; ``torch.cuda.is_available()``
+                             must be True (GPU image + NVIDIA runtime required)
+    DEVICE=cpu             — always use CPU regardless of hardware
+    """
+    import os
+    val = os.environ.get("DEVICE", "auto").lower().strip()
+    if val == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return val
+
+
 def get_available_memory_mb(device: str) -> int:
     try:
         if device.startswith("cuda"):
@@ -112,7 +127,7 @@ class WorkerServicer(
 ):
     def __init__(self):
         super().__init__()
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(resolve_device())
         self._server = None
 
         self._reset_state()

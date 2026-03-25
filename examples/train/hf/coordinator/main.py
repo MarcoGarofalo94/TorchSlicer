@@ -44,6 +44,8 @@ from torchslicer.config import RunConfig
 from torchslicer.discovery import CoordinatorDiscovery
 from torchslicer.executors.distributed import DistributedExecutor
 from torchslicer.monitor import tracer
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
+from examples.pack.gpt2 import pack_gpt2
 
 
 # ── dataset ───────────────────────────────────────────────────────────────────
@@ -82,7 +84,7 @@ def build_loader(model_name: str, block_size: int, n_train: int, batch_size: int
 
 # ── model ─────────────────────────────────────────────────────────────────────
 
-def build_model(model_cfg: dict) -> ts.HFAdapter:
+def build_model(model_cfg: dict):
     model_name = model_cfg.get("name", "distilgpt2")
     use_lora   = model_cfg.get("use_lora", False)
     task       = model_cfg.get("task", "causal_lm")
@@ -113,9 +115,9 @@ def build_model(model_cfg: dict) -> ts.HFAdapter:
               f"({100 * trainable / n_params:.2f}%)")
         model = ts.peft_unwrap(model)
 
-    adapter = ts.wrap_hf(model, task=task)
-    print(f"[coordinator]   {adapter}")
-    return adapter
+    stages = pack_gpt2(model)
+    print(f"[coordinator]   stages ({len(stages)}): {[type(s).__name__ for s in stages]}")
+    return model
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
@@ -150,7 +152,7 @@ def serve():
     )
 
     model  = build_model(model_cfg)
-    sliced = ts.slice(model, strategy="uniform", n=n, executor=executor)
+    sliced = ts.slice(model, strategy="uniform", n=n, pack=pack_gpt2, executor=executor)
 
     print(f"[coordinator] partitions ({n}):")
     for p in sliced.partitions:

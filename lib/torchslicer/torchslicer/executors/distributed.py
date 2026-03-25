@@ -441,7 +441,20 @@ class DistributedExecutor(BaseExecutor):
                     input_shape=_shape,
                 ) as batch_span:
                     send_t0 = time.perf_counter()
-                    self._send_batch(batch_id, inputs, labels)
+                    try:
+                        self._send_batch(batch_id, inputs, labels)
+                    except grpc.RpcError:
+                        # A gRPC error here means a worker died mid-batch.
+                        # Wait briefly for the heartbeat to mark it failed, then raise.
+                        self._failure_event.wait(timeout=5.0)
+                        if self._failure_event.is_set():
+                            failed_idx = next(iter(self._failed_workers))
+                            raise WorkerFailureError(
+                                failed_idx,
+                                self._failure_info.get(failed_idx, "unknown"),
+                                epoch,
+                            )
+                        raise
                     send_total_ms += (time.perf_counter() - send_t0) * 1000.0
 
                     wait_t0 = time.perf_counter()

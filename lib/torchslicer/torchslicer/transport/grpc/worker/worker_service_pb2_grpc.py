@@ -105,7 +105,8 @@ class WorkerServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def save_checkpoint(self, request, context):
-        """Save slice checkpoint without stopping the worker server."""
+        """save without stopping server
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')

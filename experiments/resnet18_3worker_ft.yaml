@@ -1,0 +1,50 @@
+# ResNet18 / CIFAR-10 — 3-worker centralized, fault-tolerance test
+#
+# Worker 2 (index 1) kills itself after epoch 2 via FAULT_KILL_EPOCH=2.
+# The coordinator detects the failure via heartbeat (~5 s), saves epoch-2
+# checkpoints on the two survivors, re-slices across workers 1 and 3, and
+# continues training through epoch 6.
+#
+# Usage:
+#   make run-ft-cpu CONFIG=experiments/resnet18_3worker_ft.yaml
+#   make run-ft-gpu CONFIG=experiments/resnet18_3worker_ft.yaml
+
+run_id: resnet18_3worker_ft
+
+training:
+  epochs: 6
+  optimizer:
+    name: SGD
+    params:
+      lr: 0.05
+      momentum: 0.9
+      weight_decay: 0.0005
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: false
+  n_micro: 1
+
+discovery:
+  backend: coordinator
+  n_workers: 3
+  timeout: 60
+
+checkpoint:
+  enabled: false
+
+logging:
+  enabled: true
+  dir: ./runs
+
+profile:
+  verbosity: 0
+
+fault_tolerance:
+  enabled: true
+  heartbeat_interval_s: 3.0   # short for fast test: detect failure within ~5 s
+  ping_timeout_s: 2.0
+  max_retries: 2

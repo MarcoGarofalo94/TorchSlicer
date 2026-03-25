@@ -1,19 +1,25 @@
 # P2P topology — no coordinator process.
-# Worker 0 (driver) owns the DataLoader, distributes model slices, drives training.
-# Worker 1 (follower) waits for init() from driver, then serves forward/backward RPCs.
 #
-# Usage (GPU):
-#   make run-p2p-gpu CONFIG=experiments/resnet18_2gpu_p2p.yaml
+# Worker 0 (driver): owns the DataLoader, builds the model, distributes slices, drives training.
+# Worker 1..N (followers): wait for init() from driver, serve forward/backward RPCs.
 #
-# Usage (CPU):
-#   EXPERIMENT_CONFIG=experiments/resnet18_2gpu_p2p.yaml \
-#     docker compose -f docker-compose.p2p.yml up --abort-on-container-exit
+# Quick start (CPU, 2 workers):
+#   make run-p2p CONFIG=experiments/resnet18_2gpu_p2p.yaml
+#
+# Quick start (GPU, 2 workers):
+#   make run-p2p DEVICE=gpu CONFIG=experiments/resnet18_2gpu_p2p.yaml
+#
+# To add workers: extend WORKER_PEERS and add worker2, worker3, ... services below
+# following the same pattern as worker1.  Update discovery.peers in the YAML config.
+#
+# See docker-compose.gpu.yml for NVIDIA device reservations (required for DEVICE=cuda).
 
 services:
   worker0:
     build:
       context: .
-      dockerfile: docker-images/Dockerfile.cpu
+      dockerfile: docker-images/Dockerfile.${IMAGE_TAG:-cpu}
+    image: torchslicer:${IMAGE_TAG:-cpu}
     container_name: p2p-worker0
     user: "${UID}:${GID}"
     environment:
@@ -33,6 +39,7 @@ services:
       - PROFILE_VERBOSITY
       - PROFILE_MEMORY
       - CHECKPOINT_ENABLED
+      - DEVICE=${DEVICE:-auto}
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
@@ -43,7 +50,8 @@ services:
   worker1:
     build:
       context: .
-      dockerfile: docker-images/Dockerfile.cpu
+      dockerfile: docker-images/Dockerfile.${IMAGE_TAG:-cpu}
+    image: torchslicer:${IMAGE_TAG:-cpu}
     container_name: p2p-worker1
     user: "${UID}:${GID}"
     environment:
@@ -51,6 +59,7 @@ services:
       - IS_DRIVER=false
       - WORKER_INDEX=1
       - WORKER_ADDRESS=worker1:50051
+      - DEVICE=${DEVICE:-auto}
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer

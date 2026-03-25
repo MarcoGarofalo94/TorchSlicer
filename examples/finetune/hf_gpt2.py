@@ -1,32 +1,32 @@
 """
 DistilGPT-2 causal LM fine-tuning via split learning (LocalExecutor).
 
-Demonstrates ts.wrap_hf() replacing the manual wrapping in bert_sst2.py.
-The adapter decomposes distilgpt2 (6 blocks) into:
+Uses pack_gpt2 to decompose distilgpt2 (6 blocks) into:
   stage 0  : GPT-2 token + position embedding
   stages 1-6: 6 x GPT2Block (opaque — residuals stay internal)
   stage 7  : ln_f + lm_head  (output: [B, vocab_size, T])
 
-ts.slice() calls ModelGraph.from_sequential() on the HFAdapter, producing a
-purely linear DAG → validate() always passes regardless of n_partitions.
-
 The head stage returns logits transposed to [B, V, T] so that PyTorch's
-built-in CrossEntropyLoss(logits [B,V,T], labels [B,T]) works directly
-(matches the [N, C, d1] convention).
+built-in CrossEntropyLoss(logits [B,V,T], labels [B,T]) works directly.
 
 Dataset: tiny synthetic text repeated to give enough batches for a loss curve.
 
-Run:
+Run (from repo root):
     conda run -n torchslicer python3 examples/finetune/hf_gpt2.py
 
 Requires: pip install transformers
 """
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 
 import torchslicer as ts
+from examples.pack.gpt2 import pack_gpt2
 
 
 # ── dataset ───────────────────────────────────────────────────────────────────
@@ -69,10 +69,9 @@ def main():
     print(f"  blocks     : {model.config.n_layer}")
     print(f"  device     : {device}")
 
-    adapter = ts.wrap_hf(model, task="causal_lm")
-    print(f"\n{adapter}")
-
-    sliced = ts.slice(adapter, strategy="uniform", n=n_partitions)
+    sliced = ts.slice(model, strategy="uniform", n=n_partitions, pack=pack_gpt2)
+    stages = sliced.graph.get_layers()
+    print(f"\nStages ({len(stages)}): {[type(s).__name__ for s in stages]}")
     print(f"\nPartitions ({n_partitions}):")
     for p in sliced.partitions:
         print(f"  partition {p.index}: layers {p.layer_indices}")

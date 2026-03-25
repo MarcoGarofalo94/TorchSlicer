@@ -2,17 +2,26 @@
 Architecture extension smoke test.
 
 Tests:
-  1. Mistral (tiny from config, no download) — LLaMA branch detection, 2 epochs
-  2. Synthetic DeepSeek-V2 MoE structure — MoEBlockStage detection + aux loss backward, 2 epochs
+  1. Mistral (tiny from config, no download) — LLaMA branch, pack_llama, 2 epochs
+  2. Synthetic DeepSeek-V2 MoE structure — pack_moe + MoEBlockStage aux loss, 2 epochs
 
 Both use LocalExecutor on CPU with random data. No internet required.
+
+Run (from repo root):
+    conda run -n torchslicer python3 examples/test_arch_extension.py
 """
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 import torchslicer as ts
+from examples.pack.llama import pack_llama
+from examples.pack.deepseek_moe import pack_moe
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -23,20 +32,19 @@ def make_lm_loader(vocab, seq, batch, n):
     return DataLoader(TensorDataset(ids, labels), batch_size=batch, drop_last=True)
 
 
-def run(name, model, task, loader, n_workers, epochs=2):
+def run(name, model, pack_fn, loader, n_workers, epochs=2):
     print(f"\n{'='*60}")
     print(f"  {name}")
     print(f"{'='*60}")
-    adapter = ts.wrap_hf(model, task=task)
-    stages  = [type(s).__name__ for s in adapter]
-    print(f"  stages ({len(adapter)}): {stages}")
+    sliced = ts.slice(model, strategy="uniform", n=n_workers, pack=pack_fn)
+    stages = sliced.graph.get_layers()
+    print(f"  stages ({len(stages)}): {[type(s).__name__ for s in stages]}")
 
-    moe_stages = [s for s in adapter if isinstance(s, ts.MoEBlockStage)]
+    moe_stages = [s for s in stages if isinstance(s, ts.MoEBlockStage)]
     if moe_stages:
         print(f"  MoEBlockStage count: {len(moe_stages)}  "
               f"aux_loss_weight={moe_stages[0].aux_loss_weight}")
 
-    sliced = ts.slice(adapter, strategy="uniform", n=n_workers)
     history = sliced.train(
         loader,
         optimizer  = {"name": "AdamW", "params": {"lr": 5e-4}},
@@ -48,6 +56,7 @@ def run(name, model, task, loader, n_workers, epochs=2):
     print(f"  loss: {losses[0]} → {losses[-1]}")
     assert losses[-1] < losses[0] * 1.1, "loss did not decrease (possible gradient bug)"
     print(f"  OK")
+    return sliced
 
 
 # ── Test 1: Mistral (from config, no download) ────────────────────────────────
@@ -70,7 +79,7 @@ def test_mistral():
     model  = MistralForCausalLM(config)
     loader = make_lm_loader(VOCAB, SEQ, BATCH, n=32)
 
-    run("Mistral-tiny (from config, LLaMA branch)", model, "causal_lm", loader, n_workers=2)
+    run("Mistral-tiny (from config, pack_llama)", model, pack_llama, loader, n_workers=2)
 
 
 # ── Test 2: Synthetic DeepSeek-V2 MoE structure ───────────────────────────────
@@ -79,18 +88,14 @@ class _MoEExpertGroup(nn.Module):
     """Mimics DeepSeek-V2 MoE gating + experts."""
     def __init__(self, d, n_experts=4):
         super().__init__()
-        # Child names "gate" and "experts" trigger _block_is_moe detection
         self.gate    = nn.Linear(d, n_experts, bias=False)
         self.experts = nn.ModuleList([nn.Sequential(nn.Linear(d, d), nn.SiLU()) for _ in range(n_experts)])
 
     def forward(self, x):
-        # Top-1 routing
-        logits = self.gate(x)                          # [B, T, n_experts]
-        idx    = logits.argmax(-1)                     # [B, T]
-        # Load-balancing aux loss (variance of per-expert usage)
+        logits   = self.gate(x)
+        idx      = logits.argmax(-1)
         probs    = logits.softmax(-1)
-        aux_loss = probs.var()                         # scalar
-        # Route tokens
+        aux_loss = probs.var()
         out = torch.zeros_like(x)
         for e in range(len(self.experts)):
             mask = (idx == e).unsqueeze(-1).float()
@@ -102,14 +107,12 @@ class _DeepSeekBlock(nn.Module):
     def __init__(self, d):
         super().__init__()
         self.attn_norm = nn.LayerNorm(d)
-        self.self_attn = nn.Linear(d, d)      # simplified self-attention
+        self.self_attn = nn.Linear(d, d)
         self.mlp_norm  = nn.LayerNorm(d)
-        self.mlp       = _MoEExpertGroup(d)   # MoE MLP replacement
+        self.mlp       = _MoEExpertGroup(d)
 
     def forward(self, hidden_states):
-        # Attention sub-layer (simplified — no KV, no mask)
         h = hidden_states + self.self_attn(self.attn_norm(hidden_states))
-        # MoE MLP sub-layer — returns (output, aux_loss)
         moe_out, aux_loss = self.mlp(self.mlp_norm(h))
         h = h + moe_out
         return h, aux_loss
@@ -124,7 +127,6 @@ class _DeepSeekInner(nn.Module):
 
 
 class DeepSeekMoEModel(nn.Module):
-    """Minimal model matching DeepSeek-V2 top-level structure."""
     def __init__(self, vocab=512, d=64, n_layers=2):
         super().__init__()
         self.model   = _DeepSeekInner(vocab, d, n_layers)
@@ -136,14 +138,12 @@ def test_deepseek_moe():
     model  = DeepSeekMoEModel(vocab=VOCAB, d=64, n_layers=2)
     loader = make_lm_loader(VOCAB, SEQ, BATCH, n=32)
 
-    run("DeepSeek-MoE-synthetic (MoEBlockStage, aux loss backward)",
-        model, "causal_lm", loader, n_workers=2)
+    sliced = run("DeepSeek-MoE-synthetic (pack_moe, MoEBlockStage, aux loss backward)",
+                 model, pack_moe, loader, n_workers=2)
 
-    # Extra check: verify MoE aux loss buffer is cleared after each batch
-    adapter = ts.wrap_hf(model, task="causal_lm")
-    moe_stages = [s for s in adapter if isinstance(s, ts.MoEBlockStage)]
+    # Verify MoE aux loss buffer is cleared after each batch
+    moe_stages = [s for s in sliced.graph.get_layers() if isinstance(s, ts.MoEBlockStage)]
     assert len(moe_stages) == 2, f"expected 2 MoEBlockStages, got {len(moe_stages)}"
-    # After training, buffers should be empty (cleared by executor)
     for s in moe_stages:
         assert s._aux_loss is None, "aux_loss buffer not cleared after training"
     print("  MoE buffer clear check: OK")

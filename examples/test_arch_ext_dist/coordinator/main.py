@@ -20,6 +20,8 @@ import torchslicer as ts
 from torchslicer.config import RunConfig
 from torchslicer.discovery import CoordinatorDiscovery
 from torchslicer.executors.distributed import DistributedExecutor
+from examples.pack.llama import pack_llama
+from examples.pack.deepseek_moe import pack_moe
 
 # Shared synthetic model classes — must be importable with the same module path
 # on both coordinator and workers so torch.load() can deserialize slices.
@@ -63,13 +65,13 @@ def build_mistral():
         num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=2,
         max_position_embeddings=64, _attn_implementation="eager",
     )
-    return ts.wrap_hf(MistralForCausalLM(config), task="causal_lm")
+    return MistralForCausalLM(config)
 
 
 # ── Test 2: Synthetic DeepSeek MoE ───────────────────────────────────────────
 
 def build_deepseek():
-    return ts.wrap_hf(DeepSeekMoEModel(vocab=VOCAB, d=64, n_layers=2), task="causal_lm")
+    return DeepSeekMoEModel(vocab=VOCAB, d=64, n_layers=2)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
@@ -94,10 +96,10 @@ def serve():
     loader = make_loader()
 
     # ── Test 1: Mistral ───────────────────────────────────────────────────────
-    adapter1 = build_mistral()
-    stages1  = [type(s).__name__ for s in adapter1]
-    print(f"[coordinator] Mistral stages ({len(adapter1)}): {stages1}")
-    sliced1  = ts.slice(adapter1, strategy="uniform", n=n_workers, executor=executor)
+    model1   = build_mistral()
+    sliced1  = ts.slice(model1, strategy="uniform", n=n_workers, pack=pack_llama, executor=executor)
+    stages1  = [type(s).__name__ for s in sliced1.graph.get_layers()]
+    print(f"[coordinator] Mistral stages ({len(stages1)}): {stages1}")
 
     executor.setup(
         sliced1.graph, sliced1.partitions, OPT, CRIT,
@@ -106,12 +108,12 @@ def serve():
     run_epochs(executor, loader, EPOCHS, "Test 1 — Mistral-tiny (LLaMA/RoPE branch)")
 
     # ── Test 2: DeepSeek MoE ─────────────────────────────────────────────────
-    adapter2   = build_deepseek()
-    stages2    = [type(s).__name__ for s in adapter2]
-    moe_count  = sum(1 for s in adapter2 if isinstance(s, ts.MoEBlockStage))
-    print(f"[coordinator] DeepSeek stages ({len(adapter2)}): {stages2}  "
+    model2    = build_deepseek()
+    sliced2   = ts.slice(model2, strategy="uniform", n=n_workers, pack=pack_moe, executor=executor)
+    stages2   = [type(s).__name__ for s in sliced2.graph.get_layers()]
+    moe_count = sum(1 for s in sliced2.graph.get_layers() if isinstance(s, ts.MoEBlockStage))
+    print(f"[coordinator] DeepSeek stages ({len(stages2)}): {stages2}  "
           f"MoEBlockStage={moe_count}")
-    sliced2 = ts.slice(adapter2, strategy="uniform", n=n_workers, executor=executor)
 
     executor.reinit(
         sliced2.graph, sliced2.partitions, OPT, CRIT,

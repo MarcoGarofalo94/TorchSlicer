@@ -1,8 +1,5 @@
-from .hf import (
-    HFAdapter,
-    wrap_hf,
+from ..core.stages import (
     AuxInputStage,
-    register_hf_architecture,
     BlockStage,
     CausalLMHeadStage,
     MoEBlockStage,
@@ -10,10 +7,7 @@ from .hf import (
 )
 
 __all__ = [
-    "HFAdapter",
-    "wrap_hf",
     "AuxInputStage",
-    "register_hf_architecture",
     "BlockStage",
     "CausalLMHeadStage",
     "MoEBlockStage",

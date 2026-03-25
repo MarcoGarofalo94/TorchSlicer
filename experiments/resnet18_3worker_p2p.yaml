@@ -1,0 +1,46 @@
+# ResNet18 / CIFAR-10 — 3-worker P2P (no coordinator process)
+#
+# Driver (worker0) owns the DataLoader, builds ResNet18, slices it into 3
+# partitions, and sends partition 1 to worker1 and partition 2 to worker2.
+# Labels travel directly from driver to worker2 (last worker).
+#
+# Usage:
+#   make run-p2p3-cpu CONFIG=experiments/resnet18_3worker_p2p.yaml
+#   make run-p2p3-gpu CONFIG=experiments/resnet18_3worker_p2p.yaml
+
+run_id: resnet18_3worker_p2p
+
+training:
+  epochs: 5
+  optimizer:
+    name: SGD
+    params:
+      lr: 0.05
+      momentum: 0.9
+      weight_decay: 0.0005
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: false
+  n_micro: 1
+
+discovery:
+  backend: static
+  n_workers: 3
+  peers:
+    - worker0:50051
+    - worker1:50051
+    - worker2:50051
+
+checkpoint:
+  enabled: false
+
+logging:
+  enabled: true
+  dir: ./runs
+
+profile:
+  verbosity: 0
