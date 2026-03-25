@@ -64,6 +64,11 @@ class WorkerServiceStub(object):
                 request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.GetStatsRequest.SerializeToString,
                 response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.WorkerStatsResponse.FromString,
                 _registered_method=True)
+        self.save_checkpoint = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/save_checkpoint',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+                _registered_method=True)
 
 
 class WorkerServiceServicer(object):
@@ -99,6 +104,12 @@ class WorkerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def save_checkpoint(self, request, context):
+        """Save slice checkpoint without stopping the worker server."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -126,6 +137,11 @@ def add_WorkerServiceServicer_to_server(servicer, server):
                     servicer.get_stats,
                     request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.GetStatsRequest.FromString,
                     response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.WorkerStatsResponse.SerializeToString,
+            ),
+            'save_checkpoint': grpc.unary_unary_rpc_method_handler(
+                    servicer.save_checkpoint,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -263,6 +279,33 @@ class WorkerService(object):
             '/torchslicer.worker.WorkerService/get_stats',
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.GetStatsRequest.SerializeToString,
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.WorkerStatsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def save_checkpoint(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/save_checkpoint',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,

@@ -9,14 +9,14 @@ from .strategies.uniform import UniformSplitter
 from .strategies.registry import register as register_strategy, get as _get_strategy
 from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
-from .executors.distributed import DistributedExecutor
+from .executors.distributed import DistributedExecutor, WorkerFailureError
 from .transport.base import BaseTransport
 from .topology.base import BaseTopology
 from .discovery import BaseDiscovery, NodeInfo, AnnounceResult
 from .discovery import CoordinatorDiscovery, announce_to_coordinator, StaticDiscovery
 from .config import (
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
-    CheckpointConfig, LoggingConfig, ProfileConfig,
+    CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
 )
 from .monitor import TrainingCallback, RunLogger
 from .adapters.hf import (
@@ -103,9 +103,18 @@ class SlicedModel:
             run_config=run_config,
         )
         history = []
+        max_retries = getattr(self.executor, '_max_fault_retries', 0)
         for epoch in range(1, epochs + 1):
-            history.append(self.executor.train_epoch(
-                data_loader, epoch=epoch, verbose=verbose, total_epochs=epochs))
+            for attempt in range(max_retries + 1):
+                try:
+                    history.append(self.executor.train_epoch(
+                        data_loader, epoch=epoch, verbose=verbose, total_epochs=epochs))
+                    break
+                except WorkerFailureError as e:
+                    if attempt >= max_retries or not hasattr(self.executor, 'recover'):
+                        raise
+                    print(f"[fault] epoch {epoch} attempt {attempt + 1} failed: {e}")
+                    self.executor.recover(epoch - 1)
         self.executor.teardown()
         return history
 

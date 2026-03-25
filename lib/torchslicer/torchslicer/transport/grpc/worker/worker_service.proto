@@ -3,11 +3,12 @@ syntax = "proto3";
 package torchslicer.worker;
 
 service WorkerService {
-    rpc init      (SliceConfig)      returns (StatusMessage);
-    rpc forward   (ForwardRequest)   returns (Ack);
-    rpc backward  (BackwardRequest)  returns (Ack);
-    rpc shutdown  (ShutdownRequest)  returns (Ack);
-    rpc get_stats (GetStatsRequest)  returns (WorkerStatsResponse);
+    rpc init             (SliceConfig)      returns (StatusMessage);
+    rpc forward          (ForwardRequest)   returns (Ack);
+    rpc backward         (BackwardRequest)  returns (Ack);
+    rpc shutdown         (ShutdownRequest)  returns (Ack);
+    rpc get_stats        (GetStatsRequest)  returns (WorkerStatsResponse);
+    rpc save_checkpoint  (ShutdownRequest)  returns (Ack);  // save without stopping server
 }
 
 // ── tensor ────────────────────────────────────────────────────────────────────

@@ -44,14 +44,13 @@ class BaseDiscovery(ABC):
         """Block until `expected` peers are known. Returns NodeInfos in assignment order."""
         ...
 
-    @abstractmethod
     def watch(
         self,
-        on_join:  Callable[[NodeInfo], None],
-        on_leave: Callable[[NodeInfo], None],
+        on_join:  Callable[[NodeInfo], None] = None,
+        on_leave: Callable[[NodeInfo], None] = None,
     ) -> None:
-        """Register callbacks for membership changes (fault-tolerance hook, stub for now)."""
-        ...
+        """Register callbacks for membership changes (no-op default; heartbeat wired in DistributedExecutor)."""
+        pass
 
     def idle_nodes(self) -> List[NodeInfo]:
         """

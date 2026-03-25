@@ -266,6 +266,22 @@ class WorkerServicer(
         threading.Thread(target=_do_shutdown, daemon=True).start()
         return worker_service_pb2.Ack(batch_id=0)
 
+    # ── save_checkpoint ────────────────────────────────────────────────────────
+
+    def save_checkpoint(self, request, context):
+        """Save slice checkpoint without stopping the server (fault-tolerance hook)."""
+        if self.layer is not None:
+            try:
+                self._save_checkpoint(
+                    checkpoint_dir=request.checkpoint_dir,
+                    run_id=request.run_id,
+                    epoch=request.epoch,
+                    worker_index=request.worker_index,
+                )
+            except Exception as e:
+                print(f"[save_checkpoint] error: {e}")
+        return worker_service_pb2.Ack(batch_id=0)
+
     # ── get_stats ──────────────────────────────────────────────────────────────
 
     def get_stats(self, request, context):

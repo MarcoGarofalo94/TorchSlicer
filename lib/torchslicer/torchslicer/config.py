@@ -81,14 +81,23 @@ class ProfileConfig:
 
 
 @dataclass
+class FaultToleranceConfig:
+    enabled:              bool  = False  # enable heartbeat monitoring and auto-recovery
+    heartbeat_interval_s: float = 5.0   # seconds between pings
+    ping_timeout_s:       float = 3.0   # gRPC call timeout for the liveness check
+    max_retries:          int   = 3     # max epoch retries after a worker failure
+
+
+@dataclass
 class RunConfig:
-    run_id:     str             = field(default_factory=_default_run_id)
-    training:   TrainingConfig  = field(default_factory=TrainingConfig)
-    pipeline:   PipelineConfig  = field(default_factory=PipelineConfig)
-    discovery:  DiscoveryConfig = field(default_factory=DiscoveryConfig)
-    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
-    logging:    LoggingConfig   = field(default_factory=LoggingConfig)
-    profile:    ProfileConfig   = field(default_factory=ProfileConfig)
+    run_id:           str                  = field(default_factory=_default_run_id)
+    training:         TrainingConfig       = field(default_factory=TrainingConfig)
+    pipeline:         PipelineConfig       = field(default_factory=PipelineConfig)
+    discovery:        DiscoveryConfig      = field(default_factory=DiscoveryConfig)
+    checkpoint:       CheckpointConfig     = field(default_factory=CheckpointConfig)
+    logging:          LoggingConfig        = field(default_factory=LoggingConfig)
+    profile:          ProfileConfig        = field(default_factory=ProfileConfig)
+    fault_tolerance:  FaultToleranceConfig = field(default_factory=FaultToleranceConfig)
 
     # ── loaders ───────────────────────────────────────────────────────────────
 
@@ -158,6 +167,16 @@ class RunConfig:
         if v := os.environ.get("PROFILE_MEMORY"):
             pr.memory = v.lower() in ("1", "true", "yes")
 
+        ft = cfg.fault_tolerance
+        if v := os.environ.get("FAULT_TOLERANCE_ENABLED"):
+            ft.enabled = v.lower() in ("1", "true", "yes")
+        if v := os.environ.get("HEARTBEAT_INTERVAL"):
+            ft.heartbeat_interval_s = float(v)
+        if v := os.environ.get("HEARTBEAT_TIMEOUT"):
+            ft.ping_timeout_s = float(v)
+        if v := os.environ.get("FAULT_MAX_RETRIES"):
+            ft.max_retries = int(v)
+
         return cfg
 
     @classmethod
@@ -224,6 +243,14 @@ class RunConfig:
                 memory    = pr.get("memory",    cfg.profile.memory),
             )
 
+        if ft := data.get("fault_tolerance"):
+            cfg.fault_tolerance = FaultToleranceConfig(
+                enabled              = ft.get("enabled",              cfg.fault_tolerance.enabled),
+                heartbeat_interval_s = ft.get("heartbeat_interval_s", cfg.fault_tolerance.heartbeat_interval_s),
+                ping_timeout_s       = ft.get("ping_timeout_s",       cfg.fault_tolerance.ping_timeout_s),
+                max_retries          = ft.get("max_retries",          cfg.fault_tolerance.max_retries),
+            )
+
         return cfg
 
 
@@ -265,3 +292,11 @@ def _apply_env_overrides(cfg: RunConfig) -> None:
         cfg.profile.verbosity = int(env("PROFILE_VERBOSITY"))
     if env("PROFILE_MEMORY"):
         cfg.profile.memory = env("PROFILE_MEMORY").lower() in ("1", "true", "yes")
+    if env("FAULT_TOLERANCE_ENABLED"):
+        cfg.fault_tolerance.enabled = env("FAULT_TOLERANCE_ENABLED").lower() in ("1", "true", "yes")
+    if env("HEARTBEAT_INTERVAL"):
+        cfg.fault_tolerance.heartbeat_interval_s = float(env("HEARTBEAT_INTERVAL"))
+    if env("HEARTBEAT_TIMEOUT"):
+        cfg.fault_tolerance.ping_timeout_s = float(env("HEARTBEAT_TIMEOUT"))
+    if env("FAULT_MAX_RETRIES"):
+        cfg.fault_tolerance.max_retries = int(env("FAULT_MAX_RETRIES"))
