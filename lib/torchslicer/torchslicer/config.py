@@ -26,7 +26,7 @@ Example::
 import datetime
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 
 def _default_run_id() -> str:
@@ -54,10 +54,22 @@ class PipelineConfig:
 
 @dataclass
 class DiscoveryConfig:
-    backend:   str   = "coordinator"  # "coordinator" | "static"
-    n_workers: int   = 2
-    timeout:   float = 60.0
-    peers:     list  = field(default_factory=list)  # for "static" backend: ["host:port", ...]
+    backend:    str   = "coordinator"  # "coordinator" | "static"
+    n_workers:  int   = 2
+    timeout:    float = 60.0
+    peers:      list  = field(default_factory=list)   # for "static" backend: ["host:port", ...]
+    tag_filter: list  = field(default_factory=list)   # only accept workers with ALL these tags
+    registration_max_attempts: int = 30
+    registration_delay_s: float = 3.0
+    registration_rpc_timeout_s: float = 5.0
+    watchdog_interval_s: float = 15.0
+
+
+@dataclass
+class StartupConfig:
+    worker_init_max_attempts: int = 20
+    worker_init_delay_s: float = 1.0
+    worker_init_rpc_timeout_s: float = 5.0
 
 
 @dataclass
@@ -72,6 +84,7 @@ class CheckpointConfig:
 class LoggingConfig:
     enabled: bool = True
     dir:     str  = "./runs"    # parent dir; each run writes to {dir}/{run_id}/
+    level:   str  = "INFO"
 
 
 @dataclass
@@ -94,6 +107,7 @@ class RunConfig:
     training:         TrainingConfig       = field(default_factory=TrainingConfig)
     pipeline:         PipelineConfig       = field(default_factory=PipelineConfig)
     discovery:        DiscoveryConfig      = field(default_factory=DiscoveryConfig)
+    startup:          StartupConfig        = field(default_factory=StartupConfig)
     checkpoint:       CheckpointConfig     = field(default_factory=CheckpointConfig)
     logging:          LoggingConfig        = field(default_factory=LoggingConfig)
     profile:          ProfileConfig        = field(default_factory=ProfileConfig)
@@ -119,64 +133,7 @@ class RunConfig:
     def from_env(cls) -> "RunConfig":
         """Load from environment variables (reads Docker Compose / .env vars)."""
         cfg = cls()
-
-        if v := os.environ.get("RUN_ID"):
-            cfg.run_id = v
-
-        t = cfg.training
-        if v := os.environ.get("EPOCHS"):
-            t.epochs = int(v)
-        if v := os.environ.get("MIXED_PRECISION"):
-            t.mixed_precision = v.lower() in ("1", "true", "yes")
-
-        p = cfg.pipeline
-        if v := os.environ.get("USE_GPIPE"):
-            p.use_gpipe = v.lower() in ("1", "true", "yes")
-        if v := os.environ.get("N_MICRO"):
-            p.n_micro = int(v)
-
-        d = cfg.discovery
-        if v := os.environ.get("N_WORKERS"):
-            d.n_workers = int(v)
-        if v := os.environ.get("DISCOVERY_BACKEND"):
-            d.backend = v
-        if v := os.environ.get("DISCOVERY_TIMEOUT"):
-            d.timeout = float(v)
-        if v := os.environ.get("WORKER_PEERS"):
-            d.peers = [p.strip() for p in v.split(",") if p.strip()]
-
-        c = cfg.checkpoint
-        if v := os.environ.get("CHECKPOINT_ENABLED"):
-            c.enabled = v.lower() in ("1", "true", "yes")
-        if v := os.environ.get("CHECKPOINT_DIR"):
-            c.dir = v
-        if v := os.environ.get("CHECKPOINT_SAVE_EVERY"):
-            c.save_every = v
-        if v := os.environ.get("CHECKPOINT_RESUME"):
-            c.resume = v or None
-
-        lg = cfg.logging
-        if v := os.environ.get("LOG_ENABLED"):
-            lg.enabled = v.lower() in ("1", "true", "yes")
-        if v := os.environ.get("LOG_DIR"):
-            lg.dir = v
-
-        pr = cfg.profile
-        if v := os.environ.get("PROFILE_VERBOSITY"):
-            pr.verbosity = int(v)
-        if v := os.environ.get("PROFILE_MEMORY"):
-            pr.memory = v.lower() in ("1", "true", "yes")
-
-        ft = cfg.fault_tolerance
-        if v := os.environ.get("FAULT_TOLERANCE_ENABLED"):
-            ft.enabled = v.lower() in ("1", "true", "yes")
-        if v := os.environ.get("HEARTBEAT_INTERVAL"):
-            ft.heartbeat_interval_s = float(v)
-        if v := os.environ.get("HEARTBEAT_TIMEOUT"):
-            ft.ping_timeout_s = float(v)
-        if v := os.environ.get("FAULT_MAX_RETRIES"):
-            ft.max_retries = int(v)
-
+        _apply_env_overrides(cfg)
         return cfg
 
     @classmethod
@@ -217,10 +174,29 @@ class RunConfig:
 
         if d := data.get("discovery"):
             cfg.discovery = DiscoveryConfig(
-                backend   = d.get("backend",   cfg.discovery.backend),
-                n_workers = d.get("n_workers", cfg.discovery.n_workers),
-                timeout   = d.get("timeout",   cfg.discovery.timeout),
-                peers     = d.get("peers",     cfg.discovery.peers) or [],
+                backend    = d.get("backend",    cfg.discovery.backend),
+                n_workers  = d.get("n_workers",  cfg.discovery.n_workers),
+                timeout    = d.get("timeout",    cfg.discovery.timeout),
+                peers      = d.get("peers",      cfg.discovery.peers) or [],
+                tag_filter = d.get("tag_filter", cfg.discovery.tag_filter) or [],
+                registration_max_attempts = d.get(
+                    "registration_max_attempts", cfg.discovery.registration_max_attempts),
+                registration_delay_s = d.get(
+                    "registration_delay_s", cfg.discovery.registration_delay_s),
+                registration_rpc_timeout_s = d.get(
+                    "registration_rpc_timeout_s", cfg.discovery.registration_rpc_timeout_s),
+                watchdog_interval_s = d.get(
+                    "watchdog_interval_s", cfg.discovery.watchdog_interval_s),
+            )
+
+        if s := data.get("startup"):
+            cfg.startup = StartupConfig(
+                worker_init_max_attempts = s.get(
+                    "worker_init_max_attempts", cfg.startup.worker_init_max_attempts),
+                worker_init_delay_s = s.get(
+                    "worker_init_delay_s", cfg.startup.worker_init_delay_s),
+                worker_init_rpc_timeout_s = s.get(
+                    "worker_init_rpc_timeout_s", cfg.startup.worker_init_rpc_timeout_s),
             )
 
         if c := data.get("checkpoint"):
@@ -235,6 +211,7 @@ class RunConfig:
             cfg.logging = LoggingConfig(
                 enabled = lg.get("enabled", cfg.logging.enabled),
                 dir     = lg.get("dir",     cfg.logging.dir),
+                level   = lg.get("level",   cfg.logging.level),
             )
 
         if pr := data.get("profile"):
@@ -254,49 +231,77 @@ class RunConfig:
         return cfg
 
 
-def _apply_env_overrides(cfg: RunConfig) -> None:
-    """Apply env vars on top of a YAML-loaded config (env wins over YAML)."""
-    env = os.environ.get
+def _parse_bool(value: str) -> bool:
+    return value.lower() in ("1", "true", "yes")
 
-    if env("RUN_ID"):
-        cfg.run_id = env("RUN_ID")
-    if env("EPOCHS"):
-        cfg.training.epochs = int(env("EPOCHS"))
-    if env("MIXED_PRECISION"):
-        cfg.training.mixed_precision = env("MIXED_PRECISION").lower() in ("1", "true", "yes")
-    if env("USE_GPIPE"):
-        cfg.pipeline.use_gpipe = env("USE_GPIPE").lower() in ("1", "true", "yes")
-    if env("N_MICRO"):
-        cfg.pipeline.n_micro = int(env("N_MICRO"))
-    if env("N_WORKERS"):
-        cfg.discovery.n_workers = int(env("N_WORKERS"))
-    if env("DISCOVERY_BACKEND"):
-        cfg.discovery.backend = env("DISCOVERY_BACKEND")
-    if env("DISCOVERY_TIMEOUT"):
-        cfg.discovery.timeout = float(env("DISCOVERY_TIMEOUT"))
-    if env("WORKER_PEERS"):
-        cfg.discovery.peers = [p.strip() for p in env("WORKER_PEERS").split(",") if p.strip()]
-    if env("CHECKPOINT_ENABLED"):
-        cfg.checkpoint.enabled = env("CHECKPOINT_ENABLED").lower() in ("1", "true", "yes")
-    if env("CHECKPOINT_DIR"):
-        cfg.checkpoint.dir = env("CHECKPOINT_DIR")
-    if env("CHECKPOINT_SAVE_EVERY"):
-        cfg.checkpoint.save_every = env("CHECKPOINT_SAVE_EVERY")
-    if env("CHECKPOINT_RESUME"):
-        cfg.checkpoint.resume = env("CHECKPOINT_RESUME") or None
-    if env("LOG_ENABLED"):
-        cfg.logging.enabled = env("LOG_ENABLED").lower() in ("1", "true", "yes")
-    if env("LOG_DIR"):
-        cfg.logging.dir = env("LOG_DIR")
-    if env("PROFILE_VERBOSITY"):
-        cfg.profile.verbosity = int(env("PROFILE_VERBOSITY"))
-    if env("PROFILE_MEMORY"):
-        cfg.profile.memory = env("PROFILE_MEMORY").lower() in ("1", "true", "yes")
-    if env("FAULT_TOLERANCE_ENABLED"):
-        cfg.fault_tolerance.enabled = env("FAULT_TOLERANCE_ENABLED").lower() in ("1", "true", "yes")
-    if env("HEARTBEAT_INTERVAL"):
-        cfg.fault_tolerance.heartbeat_interval_s = float(env("HEARTBEAT_INTERVAL"))
-    if env("HEARTBEAT_TIMEOUT"):
-        cfg.fault_tolerance.ping_timeout_s = float(env("HEARTBEAT_TIMEOUT"))
-    if env("FAULT_MAX_RETRIES"):
-        cfg.fault_tolerance.max_retries = int(env("FAULT_MAX_RETRIES"))
+
+def _parse_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+_EnvOverride = tuple[str, Callable[[RunConfig, str], None]]
+
+_ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
+    ("RUN_ID", lambda cfg, value: setattr(cfg, "run_id", value)),
+    ("EPOCHS", lambda cfg, value: setattr(cfg.training, "epochs", int(value))),
+    ("MIXED_PRECISION", lambda cfg, value: setattr(cfg.training, "mixed_precision", _parse_bool(value))),
+    ("USE_GPIPE", lambda cfg, value: setattr(cfg.pipeline, "use_gpipe", _parse_bool(value))),
+    ("N_MICRO", lambda cfg, value: setattr(cfg.pipeline, "n_micro", int(value))),
+    ("N_WORKERS", lambda cfg, value: setattr(cfg.discovery, "n_workers", int(value))),
+    ("DISCOVERY_BACKEND", lambda cfg, value: setattr(cfg.discovery, "backend", value)),
+    ("DISCOVERY_TIMEOUT", lambda cfg, value: setattr(cfg.discovery, "timeout", float(value))),
+    ("WORKER_PEERS", lambda cfg, value: setattr(cfg.discovery, "peers", _parse_csv(value))),
+    ("WORKER_TAG_FILTER", lambda cfg, value: setattr(cfg.discovery, "tag_filter", _parse_csv(value))),
+    (
+        "DISCOVERY_REGISTRATION_MAX_ATTEMPTS",
+        lambda cfg, value: setattr(cfg.discovery, "registration_max_attempts", int(value)),
+    ),
+    (
+        "DISCOVERY_REGISTRATION_DELAY",
+        lambda cfg, value: setattr(cfg.discovery, "registration_delay_s", float(value)),
+    ),
+    (
+        "DISCOVERY_REGISTRATION_RPC_TIMEOUT",
+        lambda cfg, value: setattr(cfg.discovery, "registration_rpc_timeout_s", float(value)),
+    ),
+    (
+        "DISCOVERY_WATCHDOG_INTERVAL",
+        lambda cfg, value: setattr(cfg.discovery, "watchdog_interval_s", float(value)),
+    ),
+    (
+        "WORKER_INIT_MAX_ATTEMPTS",
+        lambda cfg, value: setattr(cfg.startup, "worker_init_max_attempts", int(value)),
+    ),
+    ("WORKER_INIT_DELAY", lambda cfg, value: setattr(cfg.startup, "worker_init_delay_s", float(value))),
+    (
+        "WORKER_INIT_RPC_TIMEOUT",
+        lambda cfg, value: setattr(cfg.startup, "worker_init_rpc_timeout_s", float(value)),
+    ),
+    ("CHECKPOINT_ENABLED", lambda cfg, value: setattr(cfg.checkpoint, "enabled", _parse_bool(value))),
+    ("CHECKPOINT_DIR", lambda cfg, value: setattr(cfg.checkpoint, "dir", value)),
+    ("CHECKPOINT_SAVE_EVERY", lambda cfg, value: setattr(cfg.checkpoint, "save_every", value)),
+    ("CHECKPOINT_RESUME", lambda cfg, value: setattr(cfg.checkpoint, "resume", value or None)),
+    ("LOG_ENABLED", lambda cfg, value: setattr(cfg.logging, "enabled", _parse_bool(value))),
+    ("LOG_DIR", lambda cfg, value: setattr(cfg.logging, "dir", value)),
+    ("LOG_LEVEL", lambda cfg, value: setattr(cfg.logging, "level", value)),
+    ("PROFILE_VERBOSITY", lambda cfg, value: setattr(cfg.profile, "verbosity", int(value))),
+    ("PROFILE_MEMORY", lambda cfg, value: setattr(cfg.profile, "memory", _parse_bool(value))),
+    (
+        "FAULT_TOLERANCE_ENABLED",
+        lambda cfg, value: setattr(cfg.fault_tolerance, "enabled", _parse_bool(value)),
+    ),
+    (
+        "HEARTBEAT_INTERVAL",
+        lambda cfg, value: setattr(cfg.fault_tolerance, "heartbeat_interval_s", float(value)),
+    ),
+    ("HEARTBEAT_TIMEOUT", lambda cfg, value: setattr(cfg.fault_tolerance, "ping_timeout_s", float(value))),
+    ("FAULT_MAX_RETRIES", lambda cfg, value: setattr(cfg.fault_tolerance, "max_retries", int(value))),
+)
+
+
+def _apply_env_overrides(cfg: RunConfig) -> None:
+    """Apply env vars on top of an existing config (env wins over lower-priority sources)."""
+    for env_var, apply_value in _ENV_OVERRIDES:
+        value = os.environ.get(env_var)
+        if value:
+            apply_value(cfg, value)
