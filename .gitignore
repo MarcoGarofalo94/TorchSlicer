@@ -4,10 +4,19 @@ torchslicer/torchslicer.egg-info
 examples/train/server_.py
 config
 CLAUDE.md
+CLAUDE*.md
+AGENTS.md
+ISSUES.md
 data/
 runs/
 .cache/
 .env
+*.log
+*.pid
+*.tmp
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
 
 examples/monitor/frontend/node_modules
 examples/monitor/frontend/dist
