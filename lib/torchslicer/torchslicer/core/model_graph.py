@@ -48,8 +48,9 @@ class LayerNode:
 # ── ModelGraph ─────────────────────────────────────────────────────────────────
 
 class ModelGraph:
-    def __init__(self):
+    def __init__(self, source: str = "unknown"):
         self.nodes: list[LayerNode] = []
+        self.source = source
 
     # ── constructors ──────────────────────────────────────────────────────────
 
@@ -57,7 +58,7 @@ class ModelGraph:
     def from_sequential(cls, network: nn.Module) -> "ModelGraph":
         """Build graph from network.children() — fast path for simple sequential models."""
         layers = list(network.children())
-        graph = cls()
+        graph = cls(source="sequential")
         for i, module in enumerate(layers):
             graph.nodes.append(LayerNode(
                 index=i,
@@ -73,9 +74,11 @@ class ModelGraph:
 
         Use this when you provide a ``pack`` function to ``ts.slice()`` — the
         returned list is treated as a flat sequential chain with no skip
-        connections between stages.
+        connections between stages. These stage boundaries are authoritative:
+        recovery and re-slicing operate on the packed stages, not on the
+        original model internals hidden inside them.
         """
-        graph = cls()
+        graph = cls(source="packed")
         n = len(stages)
         for i, module in enumerate(stages):
             graph.nodes.append(LayerNode(
@@ -119,7 +122,7 @@ class ModelGraph:
         fx_graph = tracer.trace(network)
         gm = fx.GraphModule(network, fx_graph)
 
-        mg = cls()
+        mg = cls(source="traced")
         node_to_idx: dict = {}
 
         for fx_node in gm.graph.nodes:
@@ -194,6 +197,10 @@ class ModelGraph:
     def is_dag(self) -> bool:
         """True if any node has more than one predecessor (not purely sequential)."""
         return any(len(n.predecessors) > 1 for n in self.nodes)
+
+    def is_packed(self) -> bool:
+        """True when the graph came from an explicit pack(model) stage list."""
+        return self.source == "packed"
 
     def get_layers(self) -> list[nn.Module]:
         return [node.module for node in self.nodes]
