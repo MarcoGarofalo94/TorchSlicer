@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torchslicer"
+version = "0.2.0"
+description = "Split learning framework for PyTorch."
+authors = [{ name = "Marco Garofalo", email = "garofalomarco58@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+peft = ["peft>=0.10"]
+grpc = ["grpcio>=1.64.0", "grpcio-tools>=1.64.0", "protobuf"]
+monitor = [
+    "opentelemetry-api>=1.24.0",
+    "opentelemetry-sdk>=1.24.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.24.0",
+]
+
+[tool.setuptools]
+package-dir = { "" = "lib/torchslicer" }
+
+[tool.setuptools.packages.find]
+where = ["lib/torchslicer"]
+
+[tool.setuptools.package-data]
+torchslicer = ["transport/grpc/**/*.proto"]
