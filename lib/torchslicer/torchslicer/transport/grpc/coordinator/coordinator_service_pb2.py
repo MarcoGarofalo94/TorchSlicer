@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n@torchslicer/transport/grpc/coordinator/coordinator_service.proto\x12\x17torchslicer.coordinator\"\x07\n\x05\x45mpty\"4\n\x10\x42\x61tchDoneRequest\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\x12\x0e\n\x06run_id\x18\x02 \x01(\t\"P\n\x0eMetricsMessage\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\x12\x0c\n\x04loss\x18\x02 \x01(\x02\x12\x0e\n\x06worker\x18\x03 \x01(\t\x12\x0e\n\x06run_id\x18\x04 \x01(\t\"O\n\x08NodeInfo\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0f\n\x07\x61\x64\x64ress\x18\x02 \x01(\t\x12\x0e\n\x06\x64\x65vice\x18\x03 \x01(\t\x12\x11\n\tmemory_mb\x18\x04 \x01(\x04\"R\n\x0fRegisterRequest\x12/\n\x04node\x18\x01 \x01(\x0b\x32!.torchslicer.coordinator.NodeInfo\x12\x0e\n\x06run_id\x18\x02 \x01(\t\"U\n\x10RegisterResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0e\n\x06run_id\x18\x02 \x01(\t\x12\x14\n\x0cworker_index\x18\x03 \x01(\r\x12\x0f\n\x07message\x18\x04 \x01(\t2\xa9\x02\n\x12\x43oordinatorService\x12W\n\nbatch_done\x12).torchslicer.coordinator.BatchDoneRequest\x1a\x1e.torchslicer.coordinator.Empty\x12Y\n\x0ereport_metrics\x12\'.torchslicer.coordinator.MetricsMessage\x1a\x1e.torchslicer.coordinator.Empty\x12_\n\x08register\x12(.torchslicer.coordinator.RegisterRequest\x1a).torchslicer.coordinator.RegisterResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n@torchslicer/transport/grpc/coordinator/coordinator_service.proto\x12\x17torchslicer.coordinator\"\x07\n\x05\x45mpty\"4\n\x10\x42\x61tchDoneRequest\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\x12\x0e\n\x06run_id\x18\x02 \x01(\t\"P\n\x0eMetricsMessage\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\r\x12\x0c\n\x04loss\x18\x02 \x01(\x02\x12\x0e\n\x06worker\x18\x03 \x01(\t\x12\x0e\n\x06run_id\x18\x04 \x01(\t\"]\n\x08NodeInfo\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0f\n\x07\x61\x64\x64ress\x18\x02 \x01(\t\x12\x0e\n\x06\x64\x65vice\x18\x03 \x01(\t\x12\x11\n\tmemory_mb\x18\x04 \x01(\x04\x12\x0c\n\x04tags\x18\x05 \x03(\t\"R\n\x0fRegisterRequest\x12/\n\x04node\x18\x01 \x01(\x0b\x32!.torchslicer.coordinator.NodeInfo\x12\x0e\n\x06run_id\x18\x02 \x01(\t\"U\n\x10RegisterResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0e\n\x06run_id\x18\x02 \x01(\t\x12\x14\n\x0cworker_index\x18\x03 \x01(\r\x12\x0f\n\x07message\x18\x04 \x01(\t\"\x97\x01\n\x0bWorkerError\x12\x14\n\x0cworker_index\x18\x01 \x01(\r\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\r\x12\x0e\n\x06run_id\x18\x03 \x01(\t\x12\x0e\n\x06worker\x18\x04 \x01(\t\x12\r\n\x05phase\x18\x05 \x01(\t\x12\x0f\n\x07message\x18\x06 \x01(\t\x12\x11\n\ttraceback\x18\x07 \x01(\t\x12\r\n\x05\x66\x61tal\x18\x08 \x01(\x08\x32\x86\x03\n\x12\x43oordinatorService\x12W\n\nbatch_done\x12).torchslicer.coordinator.BatchDoneRequest\x1a\x1e.torchslicer.coordinator.Empty\x12Y\n\x0ereport_metrics\x12\'.torchslicer.coordinator.MetricsMessage\x1a\x1e.torchslicer.coordinator.Empty\x12_\n\x08register\x12(.torchslicer.coordinator.RegisterRequest\x1a).torchslicer.coordinator.RegisterResponse\x12[\n\x13report_worker_error\x12$.torchslicer.coordinator.WorkerError\x1a\x1e.torchslicer.coordinator.Emptyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -28,11 +28,13 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_METRICSMESSAGE']._serialized_start=156
   _globals['_METRICSMESSAGE']._serialized_end=236
   _globals['_NODEINFO']._serialized_start=238
-  _globals['_NODEINFO']._serialized_end=317
-  _globals['_REGISTERREQUEST']._serialized_start=319
-  _globals['_REGISTERREQUEST']._serialized_end=401
-  _globals['_REGISTERRESPONSE']._serialized_start=403
-  _globals['_REGISTERRESPONSE']._serialized_end=488
-  _globals['_COORDINATORSERVICE']._serialized_start=491
-  _globals['_COORDINATORSERVICE']._serialized_end=788
+  _globals['_NODEINFO']._serialized_end=331
+  _globals['_REGISTERREQUEST']._serialized_start=333
+  _globals['_REGISTERREQUEST']._serialized_end=415
+  _globals['_REGISTERRESPONSE']._serialized_start=417
+  _globals['_REGISTERRESPONSE']._serialized_end=502
+  _globals['_WORKERERROR']._serialized_start=505
+  _globals['_WORKERERROR']._serialized_end=656
+  _globals['_COORDINATORSERVICE']._serialized_start=659
+  _globals['_COORDINATORSERVICE']._serialized_end=1049
 # @@protoc_insertion_point(module_scope)

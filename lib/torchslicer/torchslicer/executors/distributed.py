@@ -12,11 +12,16 @@ from torch import nn
 from ..core.split_layer import SplitLayer
 
 from .base import BaseExecutor
+from .startup import init_worker_with_retry
 from ..monitor import tracer
+from ..monitor.process_logger import get_logger, configure as configure_process_logging
 from ..monitor.run_logger import RunLogger
 from ..monitor.callback import TrainingCallback
 from ..discovery.base import BaseDiscovery, NodeInfo
 from ..config import RunConfig, CheckpointConfig
+from ..retry import RetryPolicy
+from ..strategies.base import Partition
+from ..strategies.uniform import UniformSplitter
 
 try:
     import grpc
@@ -29,15 +34,19 @@ try:
 except ImportError:
     _GRPC_AVAILABLE = False
 
+_LOG = get_logger("torchslicer.coordinator")
+
 class WorkerFailureError(RuntimeError):
     """Raised by train_epoch() when a worker's heartbeat times out."""
-    def __init__(self, worker_idx: int, address: str, epoch: int):
+    def __init__(self, worker_idx: int, address: str, epoch: int, reason: str | None = None):
         self.worker_idx = worker_idx
         self.address    = address
         self.epoch      = epoch
-        super().__init__(
-            f"Worker {worker_idx} ({address}) failed during epoch {epoch}"
-        )
+        self.reason     = reason or ""
+        msg = f"Worker {worker_idx} ({address}) failed during epoch {epoch}"
+        if self.reason:
+            msg = f"{msg}: {self.reason}"
+        super().__init__(msg)
 
 
 _MAX_MSG = 256 * 1024 * 1024
@@ -174,6 +183,7 @@ class _CoordinatorServicer(
             device    = request.node.device,
             memory_mb = request.node.memory_mb,
             run_id    = request.run_id,
+            tags      = list(request.node.tags),
         )
         return coordinator_service_pb2.RegisterResponse(
             ok=ok,
@@ -181,6 +191,10 @@ class _CoordinatorServicer(
             worker_index=worker_index,
             message=msg,
         )
+
+    def report_worker_error(self, request, context):
+        self._executor._on_worker_runtime_error(request)
+        return coordinator_service_pb2.Empty()
 
 
 # ── worker proxy ───────────────────────────────────────────────────────────────
@@ -238,6 +252,7 @@ class DistributedExecutor(BaseExecutor):
         self,
         discovery: BaseDiscovery,
         coordinator_addr: str,
+        coordinator_bind_addr: str | None = None,
         run_config: RunConfig = None,
     ):
         if not _GRPC_AVAILABLE:
@@ -245,9 +260,10 @@ class DistributedExecutor(BaseExecutor):
                 "grpcio is required for DistributedExecutor. "
                 "Install it with: pip install grpcio"
             )
-        self._discovery       = discovery
-        self.coordinator_addr = coordinator_addr
-        self._run_config      = run_config or RunConfig()
+        self._discovery           = discovery
+        self.coordinator_addr     = coordinator_addr
+        self.coordinator_bind_addr = coordinator_bind_addr
+        self._run_config          = run_config or RunConfig()
 
         self._proxies: list[_WorkerProxy] = []
         self._nodes:   list               = []
@@ -270,10 +286,12 @@ class DistributedExecutor(BaseExecutor):
         self._failure_event    = threading.Event()
         self._failed_workers:  set[int] = set()
         self._failure_info:    dict[int, str] = {}   # idx -> address
+        self._failure_reason:  dict[int, str] = {}   # idx -> runtime failure detail
         self._heartbeat_threads: list[threading.Thread] = []
         self._heartbeat_stop   = threading.Event()
         self._max_fault_retries: int = 0
         # Layer/partition snapshot for recovery re-slicing
+        self._stored_model_graph = None
         self._stored_layers:           list = []
         self._stored_partition_indices: list[list[int]] = []
         self._stored_opt_cfg = None
@@ -302,6 +320,7 @@ class DistributedExecutor(BaseExecutor):
         self._model_name = model_name
         self._strategy_name = strategy_name
         cfg = self._run_config
+        configure_process_logging(cfg.logging.level)
 
         # Start embedded coordinator gRPC server FIRST so the Register endpoint
         # is available before discover() blocks waiting for registrations.
@@ -311,16 +330,29 @@ class DistributedExecutor(BaseExecutor):
         coordinator_service_pb2_grpc.add_CoordinatorServiceServicer_to_server(
             _CoordinatorServicer(self), self._grpc_server
         )
-        port = self.coordinator_addr.split(":")[-1]
-        self._grpc_server.add_insecure_port(f"[::]:{port}")
+        bind_addr = self.coordinator_bind_addr
+        if not bind_addr:
+            port = self.coordinator_addr.split(":")[-1]
+            bind_addr = f"[::]:{port}"
+        self._grpc_server.add_insecure_port(bind_addr)
         self._grpc_server.start()
-        print(f"[coordinator] gRPC server started on port {port} (run_id={self._run_id})")
+        _LOG.info("gRPC server started bind_addr=%s run_id=%s", bind_addr, self._run_id)
 
         # Wait for workers to register (CoordinatorDiscovery) or use static list
-        print(f"[coordinator] waiting for {n} workers "
-              f"via {type(self._discovery).__name__} ...")
-        self._nodes = self._discovery.discover(expected=n, timeout=cfg.discovery.timeout)
-        print(f"[coordinator] all {n} workers ready: {[nd.address for nd in self._nodes]}")
+        tag_filter = cfg.discovery.tag_filter or []
+        filter_str = f" with tags {tag_filter}" if tag_filter else ""
+        _LOG.info(
+            "waiting for workers expected=%s discovery=%s timeout_s=%.1f%s",
+            n,
+            type(self._discovery).__name__,
+            cfg.discovery.timeout,
+            filter_str,
+        )
+        discover_kwargs = {"expected": n, "timeout": cfg.discovery.timeout}
+        if tag_filter and hasattr(self._discovery, "discover"):
+            discover_kwargs["tag_filter"] = tag_filter
+        self._nodes = self._discovery.discover(**discover_kwargs)
+        _LOG.info("workers ready count=%s addresses=%s", n, [nd.address for nd in self._nodes])
 
         # Build proxies from discovered node list (addresses come from workers themselves)
         self._proxies = [
@@ -345,6 +377,7 @@ class DistributedExecutor(BaseExecutor):
         checkpoint_paths = self._resolve_checkpoint_paths()
 
         # Snapshot layers and partitions for potential fault-recovery re-slicing
+        self._stored_model_graph       = model_graph
         self._stored_layers            = layers
         self._stored_partition_indices = [list(p.layer_indices) for p in partitions]
 
@@ -377,19 +410,25 @@ class DistributedExecutor(BaseExecutor):
                 profile_memory     = cfg.profile.memory,
                 predecessors       = pred_proto,
             )
-            try:
-                res = proxy.stub().init(slice_cfg)
-                print(f"[init] {proxy.name}: ok={res.ok}  {res.message}  ({res.hostname})")
-            except grpc.RpcError as e:
-                print(f"[init] {proxy.name}: ERROR — {e}")
+            res = self._init_worker(proxy, slice_cfg, phase="init")
+            _LOG.info(
+                "worker init complete worker=%s address=%s hostname=%s message=%s",
+                proxy.name,
+                proxy.address,
+                res.hostname,
+                res.message,
+            )
 
         # Start heartbeat threads if fault tolerance is enabled
         ft = cfg.fault_tolerance
         if ft.enabled:
             self._max_fault_retries = ft.max_retries
             self._start_heartbeats(ft.heartbeat_interval_s, ft.ping_timeout_s)
-            print(f"[coordinator] fault tolerance enabled — heartbeat every "
-                  f"{ft.heartbeat_interval_s}s, timeout {ft.ping_timeout_s}s")
+            _LOG.info(
+                "fault tolerance enabled heartbeat_interval_s=%.1f ping_timeout_s=%.1f",
+                ft.heartbeat_interval_s,
+                ft.ping_timeout_s,
+            )
 
         # Notify callbacks that training is about to begin
         for cb in self._callbacks:
@@ -399,7 +438,7 @@ class DistributedExecutor(BaseExecutor):
                     config=cfg.logging.__dict__ if hasattr(cfg, "logging") else {},
                 )
             except Exception as e:
-                print(f"[callback] on_train_begin error: {e}")
+                _LOG.warning("callback on_train_begin failed: %s", e)
 
     def train_epoch(self, data_loader, epoch: int = 0, verbose: bool = False,
                     total_epochs: int = 0) -> dict:
@@ -417,7 +456,7 @@ class DistributedExecutor(BaseExecutor):
             try:
                 cb.on_epoch_begin(epoch)
             except Exception as e:
-                print(f"[callback] on_epoch_begin error: {e}")
+                _LOG.warning("callback on_epoch_begin failed: %s", e)
 
         epoch_t0 = time.perf_counter()
 
@@ -453,6 +492,7 @@ class DistributedExecutor(BaseExecutor):
                                 failed_idx,
                                 self._failure_info.get(failed_idx, "unknown"),
                                 epoch,
+                                reason=self._failure_reason.get(failed_idx),
                             )
                         raise
                     send_total_ms += (time.perf_counter() - send_t0) * 1000.0
@@ -468,6 +508,7 @@ class DistributedExecutor(BaseExecutor):
                             failed_idx,
                             self._failure_info.get(failed_idx, "unknown"),
                             epoch,
+                            reason=self._failure_reason.get(failed_idx),
                         )
                     wait_total_ms += (time.perf_counter() - wait_t0) * 1000.0
 
@@ -490,7 +531,14 @@ class DistributedExecutor(BaseExecutor):
 
                 if verbose:
                     ep_suffix = f"/{total_epochs}" if total_epochs else ""
-                    print(f"  [epoch {epoch}{ep_suffix} | batch {n_batches}/{n_total}] loss={loss:.4f}")
+                    _LOG.info(
+                        "epoch progress epoch=%s%s batch=%s/%s loss=%.4f",
+                        epoch,
+                        ep_suffix,
+                        n_batches,
+                        n_total,
+                        loss,
+                    )
 
                 iter_t0 = time.perf_counter()
 
@@ -498,7 +546,13 @@ class DistributedExecutor(BaseExecutor):
         avg = total_loss / n_batches if n_batches > 0 else 0.0
         if verbose:
             suffix = f"/{total_epochs}" if total_epochs else ""
-            print(f"[epoch {epoch}{suffix}] avg_loss={avg:.4f}  duration={epoch_duration_s:.1f}s")
+            _LOG.info(
+                "epoch complete epoch=%s%s avg_loss=%.4f duration_s=%.1f",
+                epoch,
+                suffix,
+                avg,
+                epoch_duration_s,
+            )
 
         # Build epoch metrics dict, allow callbacks to augment it
         epoch_metrics = {
@@ -514,7 +568,7 @@ class DistributedExecutor(BaseExecutor):
                 if isinstance(result, dict):
                     epoch_metrics = result
             except Exception as e:
-                print(f"[callback] on_epoch_end error: {e}")
+                _LOG.warning("callback on_epoch_end failed: %s", e)
 
         # Fault-tolerance: save per-epoch checkpoint for potential recovery
         if self._run_config.fault_tolerance.enabled:
@@ -592,13 +646,16 @@ class DistributedExecutor(BaseExecutor):
                 profile_memory     = cfg.profile.memory,
                 predecessors       = pred_proto,
             )
-            try:
-                res = proxy.stub().init(slice_cfg)
-                print(f"[reinit] {proxy.name}: ok={res.ok}  {res.message}  ({res.hostname})")
-            except grpc.RpcError as e:
-                print(f"[reinit] {proxy.name}: ERROR — {e}")
+            res = self._init_worker(proxy, slice_cfg, phase="reinit")
+            _LOG.info(
+                "worker reinit complete worker=%s address=%s hostname=%s message=%s",
+                proxy.name,
+                proxy.address,
+                res.hostname,
+                res.message,
+            )
 
-        print(f"[coordinator] reinit complete — {n} workers loaded new model ({model_name})")
+        _LOG.info("reinit complete workers=%s model=%s", n, model_name)
 
     def teardown(self) -> None:
         self._stop_heartbeats()
@@ -623,10 +680,14 @@ class DistributedExecutor(BaseExecutor):
                     epoch           = self._last_epoch,
                     worker_index    = i,
                 ))
-                print(f"[teardown] {proxy.name}: shutdown sent "
-                      f"(checkpoint={'yes' if ckpt.enabled else 'no'})")
+                _LOG.info(
+                    "shutdown sent worker=%s address=%s checkpoint=%s",
+                    proxy.name,
+                    proxy.address,
+                    "yes" if ckpt.enabled else "no",
+                )
             except Exception as e:
-                print(f"[teardown] {proxy.name}: shutdown failed — {e}")
+                _LOG.warning("shutdown failed worker=%s address=%s error=%s", proxy.name, proxy.address, e)
 
         # Gracefully shut down workers that registered but weren't selected
         self._shutdown_idle_workers()
@@ -651,7 +712,7 @@ class DistributedExecutor(BaseExecutor):
             try:
                 cb.on_train_end(log_history)
             except Exception as e:
-                print(f"[callback] on_train_end error: {e}")
+                _LOG.warning("callback on_train_end failed: %s", e)
 
         if self._run_logger:
             self._run_logger.flush()
@@ -692,10 +753,49 @@ class DistributedExecutor(BaseExecutor):
                 return
             self._failed_workers.add(idx)
             self._failure_info[idx] = proxy.address
-        print(f"[fault] worker {idx} ({proxy.address}) is unreachable — signalling recovery")
+        _LOG.error("worker unreachable worker=%s address=%s", idx, proxy.address)
         # Unblock train_epoch()'s _batch_done.wait() poll loop
         self._batch_done.set()
         self._failure_event.set()
+
+    def _on_worker_runtime_error(self, request) -> None:
+        idx = int(request.worker_index)
+        address = self._failure_info.get(idx)
+        if address is None and 0 <= idx < len(self._proxies):
+            address = self._proxies[idx].address
+        reason = f"{request.phase}: {request.message}"
+        with self._lock:
+            if idx in self._failed_workers:
+                return
+            self._failed_workers.add(idx)
+            self._failure_info[idx] = address or request.worker or "unknown"
+            self._failure_reason[idx] = reason
+        _LOG.error(
+            "worker runtime error worker=%s address=%s phase=%s batch_id=%s message=%s",
+            idx,
+            self._failure_info[idx],
+            request.phase,
+            request.batch_id,
+            request.message,
+        )
+        self._batch_done.set()
+        self._failure_event.set()
+
+    def _init_worker(self, proxy: "_WorkerProxy", slice_cfg, phase: str):
+        policy = RetryPolicy(
+            max_attempts=self._run_config.startup.worker_init_max_attempts,
+            delay_s=self._run_config.startup.worker_init_delay_s,
+            rpc_timeout_s=self._run_config.startup.worker_init_rpc_timeout_s,
+        )
+
+        return init_worker_with_retry(
+            proxy.stub(),
+            slice_cfg,
+            address=f"{proxy.name} ({proxy.address})",
+            policy=policy,
+            logger=_LOG,
+            phase=phase,
+        )
 
     def _stop_heartbeats(self) -> None:
         self._heartbeat_stop.set()
@@ -726,7 +826,7 @@ class DistributedExecutor(BaseExecutor):
                     timeout=10.0,
                 )
             except Exception as e:
-                print(f"[ft-checkpoint] worker {i}: {e}")
+                _LOG.warning("ft checkpoint failed worker=%s address=%s error=%s", i, proxy.address, e)
 
     def _load_all_slices(self, epoch: int) -> "list | None":
         """Load all workers' checkpoint state_dicts and apply them to _stored_layers.
@@ -742,7 +842,7 @@ class DistributedExecutor(BaseExecutor):
                 self._ft_checkpoint_dir, f"worker_{i}_epoch_{epoch}.pt"
             )
             if not os.path.exists(path):
-                print(f"[recovery] checkpoint missing: {path}")
+                _LOG.warning("recovery checkpoint missing path=%s", path)
                 return None
             try:
                 ckpt = torch.load(path, map_location="cpu", weights_only=False)
@@ -752,7 +852,7 @@ class DistributedExecutor(BaseExecutor):
                 tmp_sl.load_state_dict(sd, strict=False)
                 # Weights updated in-place on the shared module objects in all_layers
             except Exception as e:
-                print(f"[recovery] failed to load {path}: {e}")
+                _LOG.warning("recovery checkpoint load failed path=%s error=%s", path, e)
                 return None
         return all_layers
 
@@ -765,6 +865,32 @@ class DistributedExecutor(BaseExecutor):
             groups.append(layers[start : start + size])
             start += size
         return groups
+
+    def _build_recovery_partitions(self, n_alive: int) -> list[Partition]:
+        """Rebuild partitions for recovery at the same abstraction level as setup().
+
+        If setup used an explicit pack(model) stage list, those packed stages
+        remain the atomic units here. Recovery only supports the same partition
+        semantics as normal execution: multi-input nodes must remain within a
+        single partition.
+        """
+        if self._stored_model_graph is None:
+            raise RuntimeError("[recovery] missing stored model graph")
+
+        layer_groups = self._uniform_split(list(range(len(self._stored_model_graph))), n_alive)
+        partitions = []
+        for i, layer_indices in enumerate(layer_groups):
+            predecessors = UniformSplitter._intra_predecessors(
+                self._stored_model_graph, layer_indices
+            )
+            partitions.append(Partition(
+                index=i,
+                layer_indices=layer_indices,
+                predecessors=predecessors,
+            ))
+
+        UniformSplitter().validate(self._stored_model_graph, partitions)
+        return partitions
 
     def recover(self, last_good_epoch: int) -> None:
         """Re-slice the model across surviving workers and reinit from last checkpoint.
@@ -783,9 +909,12 @@ class DistributedExecutor(BaseExecutor):
         if n_alive == 0:
             raise RuntimeError("[recovery] all workers failed — cannot continue")
 
-        print(f"[recovery] workers {sorted(self._failed_workers)} lost; "
-              f"re-slicing across {n_alive} survivor(s): "
-              f"{[p.address for _, p in alive]}")
+        _LOG.warning(
+            "recovery reslicing failed_workers=%s survivors=%s addresses=%s",
+            sorted(self._failed_workers),
+            n_alive,
+            [p.address for _, p in alive],
+        )
 
         # Load trained weights from last epoch's FT checkpoints
         all_layers = (
@@ -794,11 +923,11 @@ class DistributedExecutor(BaseExecutor):
             else None
         )
         if all_layers is None:
-            print("[recovery] using initial layer weights (no checkpoint available)")
+            _LOG.warning("recovery using initial layer weights because no checkpoint was available")
             all_layers = list(self._stored_layers)
 
-        # Uniform re-partition across survivors
-        layer_groups = self._uniform_split(all_layers, n_alive)
+        # Rebuild partitions at the same abstraction level as setup().
+        partitions = self._build_recovery_partitions(n_alive)
 
         # Rebuild proxy + node lists with new sequential indices
         self._nodes   = [self._nodes[old_i]   for old_i, _ in alive]
@@ -808,18 +937,18 @@ class DistributedExecutor(BaseExecutor):
 
         # Update stored partition state so subsequent _load_all_slices is consistent
         self._stored_layers = all_layers
-        start = 0
-        new_part_indices = []
-        for group in layer_groups:
-            new_part_indices.append(list(range(start, start + len(group))))
-            start += len(group)
-        self._stored_partition_indices = new_part_indices
+        self._stored_partition_indices = [list(p.layer_indices) for p in partitions]
 
         # Send new SliceConfig to each survivor (reinit wires up new prev/next stubs)
-        for new_i, (proxy, layers) in enumerate(zip(self._proxies, layer_groups)):
+        for new_i, (proxy, partition) in enumerate(zip(self._proxies, partitions)):
             is_last  = (new_i == n_alive - 1)
+            partition_layers = [all_layers[j] for j in partition.layer_indices]
+            pred_proto = [
+                worker_service_pb2.PredecessorList(indices=list(p))
+                for p in partition.predecessors
+            ]
             slice_cfg = worker_service_pb2.SliceConfig(
-                layers            = _build_layer_configs(layers),
+                layers            = _build_layer_configs(partition_layers),
                 optimizer         = self._stored_opt_cfg,
                 criterion         = self._stored_crit_cfg if is_last else None,
                 is_last           = is_last,
@@ -832,13 +961,10 @@ class DistributedExecutor(BaseExecutor):
                 worker_index      = new_i,
                 profile_verbosity = cfg.profile.verbosity,
                 profile_memory    = cfg.profile.memory,
-                predecessors      = [],  # sequential only; DAG reconstruction requires full graph
+                predecessors      = pred_proto,
             )
-            try:
-                res = proxy.stub().init(slice_cfg)
-                print(f"[recovery] worker {new_i} ({proxy.address}): {res.message}")
-            except grpc.RpcError as e:
-                print(f"[recovery] worker {new_i} ({proxy.address}): ERROR — {e}")
+            res = self._init_worker(proxy, slice_cfg, phase="recovery")
+            _LOG.info("recovery reinit complete worker=%s address=%s message=%s", new_i, proxy.address, res.message)
 
         # Reset failure state
         self._failed_workers.clear()
@@ -851,7 +977,7 @@ class DistributedExecutor(BaseExecutor):
         if ft.enabled:
             self._start_heartbeats(ft.heartbeat_interval_s, ft.ping_timeout_s)
 
-        print(f"[recovery] complete — {n_alive} worker(s) active")
+        _LOG.info("recovery complete active_workers=%s", n_alive)
 
     # ── internal ───────────────────────────────────────────────────────────────
 
@@ -866,8 +992,7 @@ class DistributedExecutor(BaseExecutor):
         idle = self._discovery.idle_nodes()
         if not idle:
             return
-        print(f"[coordinator] shutting down {len(idle)} idle worker(s): "
-              f"{[nd.address for nd in idle]}")
+        _LOG.info("shutting down idle workers count=%s addresses=%s", len(idle), [nd.address for nd in idle])
         for nd in idle:
             try:
                 stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(nd.address))
@@ -878,9 +1003,9 @@ class DistributedExecutor(BaseExecutor):
                     epoch=0,
                     worker_index=0,
                 ), timeout=5.0)
-                print(f"[coordinator] idle worker {nd.node_id} ({nd.address}) shut down")
+                _LOG.info("idle worker shutdown complete node_id=%s address=%s", nd.node_id, nd.address)
             except Exception as e:
-                print(f"[coordinator] idle worker {nd.address}: shutdown failed — {e}")
+                _LOG.warning("idle worker shutdown failed address=%s error=%s", nd.address, e)
 
     def _collect_worker_stats(self, epoch: int) -> list:
         """Pull profiling stats from all workers after an epoch."""
@@ -914,7 +1039,7 @@ class DistributedExecutor(BaseExecutor):
                             "phase":        "worker_batch",
                         })
             except Exception as e:
-                print(f"[get_stats] {proxy.name}: {e}")
+                _LOG.warning("get_stats failed worker=%s address=%s error=%s", proxy.name, proxy.address, e)
         return results
 
     def _worker_stats_to_dict(self, resp, epoch: int) -> dict:
@@ -970,7 +1095,7 @@ class DistributedExecutor(BaseExecutor):
                     paths[i] = p
             return paths
         except Exception as e:
-            print(f"[resume] could not load run_state from {resume}: {e}")
+            _LOG.warning("resume run_state load failed path=%s error=%s", resume, e)
             return {}
 
     def _save_run_state(self, run_dir: str) -> None:
@@ -985,7 +1110,7 @@ class DistributedExecutor(BaseExecutor):
         path = os.path.join(run_dir, "run_state.json")
         with open(path, "w") as f:
             json.dump(state, f, indent=2)
-        print(f"[checkpoint] run_state saved → {path}")
+        _LOG.info("run_state saved path=%s", path)
 
     def _send_batch(self, batch_id: int, inputs, labels: torch.Tensor):
         main, aux = _unpack_inputs(inputs)

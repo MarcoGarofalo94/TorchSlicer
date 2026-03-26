@@ -6,6 +6,7 @@ service CoordinatorService {
     rpc batch_done     (BatchDoneRequest)  returns (Empty);
     rpc report_metrics (MetricsMessage)    returns (Empty);
     rpc register       (RegisterRequest)   returns (RegisterResponse);
+    rpc report_worker_error (WorkerError)  returns (Empty);
 }
 
 message Empty {}
@@ -25,10 +26,11 @@ message MetricsMessage {
 // ── discovery ─────────────────────────────────────────────────────────────────
 
 message NodeInfo {
-    string node_id   = 1;  // unique ID (hostname or UUID)
-    string address   = 2;  // host:port of the worker's gRPC server
-    string device    = 3;  // "cpu", "cuda:0", etc.
-    uint64 memory_mb = 4;  // available memory in MB
+    string          node_id   = 1;  // unique ID (hostname or UUID)
+    string          address   = 2;  // host:port of the worker's gRPC server
+    string          device    = 3;  // "cpu", "cuda:0", etc.
+    uint64          memory_mb = 4;  // available memory in MB
+    repeated string tags      = 5;  // user-defined labels, e.g. ["gpu", "high-memory"]
 }
 
 message RegisterRequest {
@@ -41,4 +43,15 @@ message RegisterResponse {
     string run_id       = 2;  // coordinator-assigned run ID
     uint32 worker_index = 3;  // 0-based; determines slice assignment order
     string message      = 4;
+}
+
+message WorkerError {
+    uint32 worker_index = 1;
+    uint32 batch_id     = 2;
+    string run_id       = 3;
+    string worker       = 4;
+    string phase        = 5;
+    string message      = 6;
+    string traceback    = 7;
+    bool   fatal        = 8;
 }

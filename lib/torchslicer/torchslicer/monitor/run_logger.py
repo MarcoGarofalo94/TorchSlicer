@@ -90,9 +90,24 @@ class RunLogger:
                 "n_micro":   cfg.pipeline.n_micro,
             },
             "discovery": {
-                "backend":   cfg.discovery.backend,
+                "backend": cfg.discovery.backend,
                 "n_workers": cfg.discovery.n_workers,
-                "timeout":   cfg.discovery.timeout,
+                "timeout": cfg.discovery.timeout,
+                "tag_filter": cfg.discovery.tag_filter,
+                "registration_max_attempts": cfg.discovery.registration_max_attempts,
+                "registration_delay_s": cfg.discovery.registration_delay_s,
+                "registration_rpc_timeout_s": cfg.discovery.registration_rpc_timeout_s,
+                "watchdog_interval_s": cfg.discovery.watchdog_interval_s,
+            },
+            "startup": {
+                "worker_init_max_attempts": cfg.startup.worker_init_max_attempts,
+                "worker_init_delay_s": cfg.startup.worker_init_delay_s,
+                "worker_init_rpc_timeout_s": cfg.startup.worker_init_rpc_timeout_s,
+            },
+            "logging": {
+                "enabled": cfg.logging.enabled,
+                "dir": cfg.logging.dir,
+                "level": cfg.logging.level,
             },
             "profile": {
                 "verbosity": cfg.profile.verbosity,
@@ -206,7 +221,6 @@ class RunLogger:
         path = os.path.join(self.run_dir, "run_manifest.json")
         with open(path, "w") as f:
             json.dump(self._manifest, f, indent=2)
-        print(f"[run_logger] manifest → {path}")
         return path
 
     # ── reader API ──────────────────────────────────────────────────────────

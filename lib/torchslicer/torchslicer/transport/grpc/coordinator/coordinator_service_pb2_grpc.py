@@ -54,6 +54,11 @@ class CoordinatorServiceStub(object):
                 request_serializer=torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.RegisterRequest.SerializeToString,
                 response_deserializer=torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.RegisterResponse.FromString,
                 _registered_method=True)
+        self.report_worker_error = channel.unary_unary(
+                '/torchslicer.coordinator.CoordinatorService/report_worker_error',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.WorkerError.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.Empty.FromString,
+                _registered_method=True)
 
 
 class CoordinatorServiceServicer(object):
@@ -77,6 +82,12 @@ class CoordinatorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def report_worker_error(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_CoordinatorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -94,6 +105,11 @@ def add_CoordinatorServiceServicer_to_server(servicer, server):
                     servicer.register,
                     request_deserializer=torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.RegisterRequest.FromString,
                     response_serializer=torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.RegisterResponse.SerializeToString,
+            ),
+            'report_worker_error': grpc.unary_unary_rpc_method_handler(
+                    servicer.report_worker_error,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.WorkerError.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.Empty.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -177,6 +193,33 @@ class CoordinatorService(object):
             '/torchslicer.coordinator.CoordinatorService/register',
             torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.RegisterRequest.SerializeToString,
             torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.RegisterResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def report_worker_error(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.coordinator.CoordinatorService/report_worker_error',
+            torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.WorkerError.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_coordinator_dot_coordinator__service__pb2.Empty.FromString,
             options,
             channel_credentials,
             insecure,

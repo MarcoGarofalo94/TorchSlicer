@@ -3,6 +3,8 @@ PROJECT_NAME    = torchslicer
 
 CPU_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME):cpu
 GPU_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME):gpu
+PLATFORM ?=
+PLATFORMS ?= linux/amd64,linux/arm64
 
 # Write UID/GID into .env so docker compose picks them up for `user:` fields.
 # This ensures run artifacts in ./runs/ are owned by the host user, not root.
@@ -18,14 +20,22 @@ help: ## Show available commands
 
 .PHONY: build-cpu
 build-cpu: ## Build CPU image
-	docker build -f docker-images/Dockerfile.cpu -t $(CPU_IMAGE) .
+	docker build $(if $(PLATFORM),--platform $(PLATFORM),) -f docker-images/Dockerfile.cpu -t $(CPU_IMAGE) .
 
 .PHONY: build-gpu
 build-gpu: ## Build GPU image (requires NVIDIA Container Toolkit)
-	docker build -f docker-images/Dockerfile.gpu -t $(GPU_IMAGE) .
+	docker build $(if $(PLATFORM),--platform $(PLATFORM),) -f docker-images/Dockerfile.gpu -t $(GPU_IMAGE) .
 
 .PHONY: build
 build: build-cpu build-gpu ## Build both CPU and GPU images
+
+.PHONY: buildx-cpu
+buildx-cpu: ## Build multi-arch CPU image (defaults: linux/amd64,linux/arm64) and load locally
+	docker buildx build --platform $(PLATFORMS) -f docker-images/Dockerfile.cpu -t $(CPU_IMAGE) --load .
+
+.PHONY: push-cpu-multiarch
+push-cpu-multiarch: ## Build and push multi-arch CPU image manifest list
+	docker buildx build --platform $(PLATFORMS) -f docker-images/Dockerfile.cpu -t $(CPU_IMAGE) --push .
 
 # ── run (centralized topology) ─────────────────────────────────────────────────
 #
@@ -43,10 +53,14 @@ _IMAGE_TAG                 = $(if $(filter gpu,$(DEVICE)),gpu,cpu)
 # COORDINATOR_CMD overrides the coordinator script, e.g.:
 #   make run-centralized DEVICE=gpu CONFIG=experiments/hf_gpt2_4gpu_baseline.yaml \
 #        COORDINATOR_CMD="python3 examples/train/hf/coordinator/main.py"
+# WORKER_CMD overrides the worker script, e.g.:
+#   make run-centralized DEVICE=gpu CONFIG=experiments/resnet18_3worker_ft.yaml \
+#        WORKER_CMD="python3 examples/train/centralized/GRPC/worker/main_ft_test.py"
 .PHONY: run-centralized
 run-centralized: _env ## Run centralized stack. DEVICE=cpu|gpu  CONFIG=path  [COORDINATOR_CMD=...]
 	IMAGE_TAG=$(_IMAGE_TAG) EXPERIMENT_CONFIG=$(CONFIG) DEVICE=$(if $(filter gpu,$(DEVICE)),cuda,auto) \
 		COORDINATOR_CMD='$(COORDINATOR_CMD)' \
+		WORKER_CMD='$(WORKER_CMD)' \
 		docker compose -f docker-compose.yml $(_GPU_OVERRIDE_CENTRALIZED) up
 
 .PHONY: down-centralized

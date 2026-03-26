@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, List
 
 
@@ -9,6 +9,7 @@ class NodeInfo:
     address:   str        # host:port of the node's gRPC server
     device:    str = "cpu"
     memory_mb: int = 0
+    tags:      list = field(default_factory=list)  # user-defined labels, e.g. ["gpu", "high-memory"]
 
 
 @dataclass

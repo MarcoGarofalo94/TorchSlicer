@@ -10,7 +10,7 @@ from .strategies.registry import register as register_strategy, get as _get_stra
 from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
 from .executors.distributed import DistributedExecutor, WorkerFailureError
-from .executors.worker import resolve_device
+from .executors.worker import resolve_device, run_worker, WorkerServicer
 from .transport.base import BaseTransport
 from .discovery import BaseDiscovery, NodeInfo, AnnounceResult
 from .discovery import CoordinatorDiscovery, announce_to_coordinator, StaticDiscovery
@@ -60,10 +60,7 @@ def peft_unwrap(model) -> "nn.Module":
     try:
         from peft import PeftModel
     except ImportError:
-        raise ImportError(
-            "peft is required for peft_unwrap(). "
-            "Install it with: pip install peft"
-        )
+        return model
     if isinstance(model, PeftModel):
         return model.base_model.model
     return model
@@ -135,7 +132,8 @@ def slice(model, strategy="uniform", n=2, executor=None, pack=None) -> SlicedMod
                   list of stages; torch.fx tracing is skipped entirely.
                   Use this for models with cross-partition residuals, MoE
                   blocks, or any architecture the default tracer cannot
-                  handle.  Example::
+                  handle. Packed stages are treated as authoritative units for
+                  splitting and fault-tolerance recovery. Example::
 
                       def pack_qwen(model):
                           return [

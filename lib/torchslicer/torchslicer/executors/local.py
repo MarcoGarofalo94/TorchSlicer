@@ -9,9 +9,11 @@ from .base import BaseExecutor
 from ..core.split_layer import SplitLayer
 from ..monitor import tracer
 from ..monitor.profiler import WorkerProfiler
+from ..monitor.process_logger import get_logger, configure as configure_process_logging
 from ..monitor.run_logger import RunLogger
 from ..monitor.callback import TrainingCallback
 
+_LOG = get_logger("torchslicer.local")
 
 def _unpack_inputs(inputs):
     """Unpack batch inputs into ``(main_tensor, aux_dict)``.
@@ -84,6 +86,8 @@ class LocalExecutor(BaseExecutor):
 
         # Initialise profilers (one per partition) and RunLogger
         cfg = run_config
+        if cfg:
+            configure_process_logging(cfg.logging.level)
         verbosity = cfg.profile.verbosity if cfg else 0
         memory    = cfg.profile.memory    if cfg else False
 
@@ -113,7 +117,7 @@ class LocalExecutor(BaseExecutor):
                     config={},
                 )
             except Exception as e:
-                print(f"[callback] on_train_begin error: {e}")
+                _LOG.warning("callback on_train_begin failed: %s", e)
 
     def train_epoch(self, data_loader, epoch: int = 0, verbose: bool = False,
                     total_epochs: int = 0) -> dict:
@@ -125,7 +129,7 @@ class LocalExecutor(BaseExecutor):
             try:
                 cb.on_epoch_begin(epoch)
             except Exception as e:
-                print(f"[callback] on_epoch_begin error: {e}")
+                _LOG.warning("callback on_epoch_begin failed: %s", e)
 
         epoch_t0 = time.perf_counter()
 
@@ -167,13 +171,20 @@ class LocalExecutor(BaseExecutor):
 
                 if verbose:
                     ep_suffix = f"/{total_epochs}" if total_epochs else ""
-                    print(f"  [epoch {epoch}{ep_suffix} | batch {n_batches}/{n_total}] loss={loss_val:.4f}")
+                    _LOG.info(
+                        "epoch progress epoch=%s%s batch=%s/%s loss=%.4f",
+                        epoch,
+                        ep_suffix,
+                        n_batches,
+                        n_total,
+                        loss_val,
+                    )
 
         epoch_duration_s = time.perf_counter() - epoch_t0
         avg = total_loss / n_batches if n_batches > 0 else 0.0
         if verbose:
             suffix = f"/{total_epochs}" if total_epochs else ""
-            print(f"[epoch {epoch}{suffix}] avg_loss={avg:.4f}")
+            _LOG.info("epoch complete epoch=%s%s avg_loss=%.4f", epoch, suffix, avg)
 
         # Build epoch metrics, let callbacks augment
         epoch_metrics = {
@@ -189,7 +200,7 @@ class LocalExecutor(BaseExecutor):
                 if isinstance(result, dict):
                     epoch_metrics = result
             except Exception as e:
-                print(f"[callback] on_epoch_end error: {e}")
+                _LOG.warning("callback on_epoch_end failed: %s", e)
 
         if self._run_logger:
             self._run_logger.log(**epoch_metrics)
@@ -369,7 +380,7 @@ class LocalExecutor(BaseExecutor):
             try:
                 cb.on_train_end(log_history)
             except Exception as e:
-                print(f"[callback] on_train_end error: {e}")
+                _LOG.warning("callback on_train_end failed: %s", e)
 
         if self._run_logger:
             self._run_logger.flush()

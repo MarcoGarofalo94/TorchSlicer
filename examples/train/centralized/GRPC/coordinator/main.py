@@ -13,6 +13,7 @@ from torchslicer.executors.distributed import DistributedExecutor
 from torchslicer.discovery import CoordinatorDiscovery, StaticDiscovery
 from torchslicer.config import RunConfig
 from torchslicer.monitor import tracer
+from torchslicer.testing_faults import CoordinatorCrashCallback
 
 
 def get_dataset(data_dir='/workspace/data', batch_size=None, n_train=None):
@@ -58,7 +59,10 @@ def serve():
           f"epochs={cfg.training.epochs}  gpipe={cfg.pipeline.use_gpipe}  "
           f"n_micro={cfg.pipeline.n_micro}  checkpoint={cfg.checkpoint.enabled}")
 
-    coordinator_addr = f"coordinator:{args.port}"
+    coordinator_addr = os.environ.get("COORDINATOR_ADDRESS", f"coordinator:{args.port}")
+    coordinator_bind_addr = os.environ.get(
+        "COORDINATOR_BIND_ADDRESS", f"0.0.0.0:{args.port}"
+    )
     n = cfg.discovery.n_workers
 
     # Select discovery backend from config
@@ -76,8 +80,13 @@ def serve():
     executor = DistributedExecutor(
         discovery=discovery,
         coordinator_addr=coordinator_addr,
+        coordinator_bind_addr=coordinator_bind_addr,
         run_config=cfg,
     )
+    callbacks = []
+    crash_callback = CoordinatorCrashCallback()
+    if crash_callback.enabled:
+        callbacks.append(crash_callback)
 
     sliced = ts.slice(build_model(), strategy="uniform", n=n, executor=executor)
     sliced.train(
@@ -89,6 +98,7 @@ def serve():
         mixed_precision = cfg.training.mixed_precision,
         use_gpipe       = cfg.pipeline.use_gpipe,
         n_micro_batches = cfg.pipeline.n_micro,
+        callbacks       = callbacks,
         run_config      = cfg,
     )
 

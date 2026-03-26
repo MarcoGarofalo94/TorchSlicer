@@ -59,10 +59,15 @@ from torchslicer.transport.grpc.coordinator import (
 )
 from torchslicer.core.split_layer import SplitLayer
 from torchslicer.monitor import tracer, WorkerProfiler
+from torchslicer.monitor.process_logger import get_logger, configure as configure_process_logging
 from torchslicer.monitor.run_logger import RunLogger
 from torchslicer.monitor.callback import TrainingCallback
 from torchslicer.discovery.base import NodeInfo
 from torchslicer.config import RunConfig
+from torchslicer.retry import RetryPolicy
+from torchslicer.executors.startup import init_worker_with_retry
+
+_LOG = get_logger("torchslicer.p2p")
 
 
 # ── dataset / model (customize per experiment) ─────────────────────────────────
@@ -181,8 +186,7 @@ class P2PDriverServicer(WorkerServicer):
 
             self._profiler.mark_idle_start("bwd")
         except Exception as e:
-            print(f"[p2p-driver forward] ERROR batch_id={batch_id}: {e}")
-            import traceback; traceback.print_exc()
+            _LOG.exception("driver forward failed batch_id=%s error=%s", batch_id, e)
 
     def _send_backward(self, batch_id: int, grad: torch.Tensor, is_last_micro: bool = True):
         """Override: driver has no prev_worker — signal batch done directly."""
@@ -320,8 +324,12 @@ def _configure_driver_slice(
     )
 
     layer_names = [type(l).__name__ for l in driver.layer.layers]
-    print(f"[p2p-driver] own slice configured: layers={layer_names}  "
-          f"next={driver.next_worker}  device={driver.device}")
+    _LOG.info(
+        "driver slice configured layers=%s next=%s device=%s",
+        layer_names,
+        driver.next_worker,
+        driver.device,
+    )
 
 
 # ── training loop (driver only) ────────────────────────────────────────────────
@@ -346,7 +354,7 @@ def run_training(
         try:
             cb.on_train_begin(run_id=cfg.run_id, config={})
         except Exception as e:
-            print(f"[callback] on_train_begin error: {e}")
+            _LOG.warning("callback on_train_begin failed: %s", e)
 
     for epoch in range(cfg.training.epochs):
         total_loss         = 0.0
@@ -360,7 +368,7 @@ def run_training(
             try:
                 cb.on_epoch_begin(epoch)
             except Exception as e:
-                print(f"[callback] on_epoch_begin error: {e}")
+                _LOG.warning("callback on_epoch_begin failed: %s", e)
 
         iter_t0 = time.perf_counter()
         for inputs, labels in data_loader:
@@ -403,13 +411,13 @@ def run_training(
                 )
 
             if verbose:
-                print(f"  [epoch {epoch} | batch {n_batches}/{n_total}] loss={loss:.4f}")
+                _LOG.info("epoch progress epoch=%s batch=%s/%s loss=%.4f", epoch, n_batches, n_total, loss)
 
             iter_t0 = time.perf_counter()
 
         avg      = total_loss / n_batches if n_batches else 0.0
         duration = time.perf_counter() - epoch_t0
-        print(f"[epoch {epoch}] avg_loss={avg:.4f}  duration={duration:.1f}s")
+        _LOG.info("epoch complete epoch=%s avg_loss=%.4f duration_s=%.1f", epoch, avg, duration)
 
         epoch_metrics = {
             "step":       epoch,
@@ -424,7 +432,7 @@ def run_training(
                 if isinstance(result, dict):
                     epoch_metrics = result
             except Exception as e:
-                print(f"[callback] on_epoch_end error: {e}")
+                _LOG.warning("callback on_epoch_end failed: %s", e)
 
         if run_logger:
             run_logger.log(**epoch_metrics)
@@ -478,36 +486,14 @@ def run_training(
                                     phase="worker_batch",
                                 )
                     except Exception as e:
-                        print(f"[get_stats] follower {fi + 1} ({peer_addr}): {e}")
+                        _LOG.warning("get_stats failed follower=%s address=%s error=%s", fi + 1, peer_addr, e)
 
     log_history = run_logger.log_history if run_logger else []
     for cb in callbacks:
         try:
             cb.on_train_end(log_history)
         except Exception as e:
-            print(f"[callback] on_train_end error: {e}")
-
-
-# ── helpers ────────────────────────────────────────────────────────────────────
-
-def _init_with_retry(stub, slice_cfg, peer_addr: str, timeout: float = 60.0):
-    """Send init() to a follower, retrying until it accepts or timeout elapses."""
-    deadline = time.monotonic() + timeout
-    attempt  = 0
-    while time.monotonic() < deadline:
-        try:
-            return stub.init(slice_cfg)
-        except grpc.RpcError as e:
-            if e.code() == grpc.StatusCode.UNAVAILABLE:
-                if attempt == 0:
-                    print(f"[p2p-driver] waiting for follower {peer_addr} ...")
-                time.sleep(1.0)
-                attempt += 1
-            else:
-                print(f"[p2p-driver] init → {peer_addr}: FAILED — {e}")
-                return None
-    print(f"[p2p-driver] init → {peer_addr}: timeout after {timeout:.0f}s")
-    return None
+            _LOG.warning("callback on_train_end failed: %s", e)
 
 
 # ── entry point ────────────────────────────────────────────────────────────────
@@ -523,6 +509,7 @@ def serve():
     node_address = os.environ.get("WORKER_ADDRESS", f"{hostname}:{port}")
 
     cfg   = RunConfig.load(os.environ.get("EXPERIMENT_CONFIG"))
+    configure_process_logging(cfg.logging.level)
     peers = (
         [p.strip() for p in peers_env.split(",") if p.strip()]
         if peers_env else cfg.discovery.peers
@@ -530,27 +517,19 @@ def serve():
 
     # ── Follower (workers 1..N-1) ───────────────────────────────────────────────
     if not is_driver:
-        servicer = WorkerServicer()
-        server   = grpc.server(futures.ThreadPoolExecutor(max_workers=10),
-                               options=_GRPC_OPTS)
-        worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(servicer, server)
-        server.add_insecure_port(f"[::]:{port}")
-        server.start()
-        servicer.set_server(server)
-        print(f"[p2p-follower] worker_{worker_index} started on {node_address}")
-        server.wait_for_termination()
-        print(f"[p2p-follower] {hostname} terminated cleanly")
+        # No coordinator registration — driver sends init() directly.
+        ts.run_worker(port=int(port), coordinator_addr=None, worker_address=node_address)
         return
 
     # ── Driver (worker 0) ───────────────────────────────────────────────────────
     if not peers:
-        print("[p2p-driver] ERROR: WORKER_PEERS env var or discovery.peers in config must be set")
+        _LOG.error("WORKER_PEERS env var or discovery.peers in config must be set")
         sys.exit(1)
 
     n = len(peers)
 
     if n < 2:
-        print("[p2p-driver] ERROR: P2P topology requires at least 2 workers")
+        _LOG.error("P2P topology requires at least 2 workers")
         sys.exit(1)
 
     coordinator_svc = _P2PCoordinatorServicer()
@@ -563,7 +542,7 @@ def serve():
     server.add_insecure_port(f"[::]:{port}")
     server.start()
     driver_svc.set_server(server)
-    print(f"[p2p-driver] started on {node_address}  (n_workers={n})")
+    _LOG.info("p2p driver started address=%s n_workers=%s", node_address, n)
 
     # Build model graph + partitions
     model        = build_model()
@@ -581,7 +560,7 @@ def serve():
         follower_stubs.append((peer_addr, stub))
 
     # Send SliceConfig to each follower
-    print(f"[p2p-driver] distributing slices to {len(follower_stubs)} follower(s) ...")
+    _LOG.info("distributing slices follower_count=%s", len(follower_stubs))
     for fi, (peer_addr, stub) in enumerate(follower_stubs):
         wi      = fi + 1
         is_last = (wi == n - 1)
@@ -606,10 +585,19 @@ def serve():
             profile_memory    = cfg.profile.memory,
             predecessors      = pred_proto,
         )
-        res = _init_with_retry(stub, slice_cfg, peer_addr)
-        if res is None:
-            sys.exit(1)
-        print(f"[p2p-driver] init → {peer_addr}  ok={res.ok}  {res.message}")
+        res = init_worker_with_retry(
+            stub,
+            slice_cfg,
+            address=peer_addr,
+            policy=RetryPolicy(
+                max_attempts=cfg.startup.worker_init_max_attempts,
+                delay_s=cfg.startup.worker_init_delay_s,
+                rpc_timeout_s=cfg.startup.worker_init_rpc_timeout_s,
+            ),
+            logger=_LOG,
+            phase="p2p-init",
+        )
+        _LOG.info("follower init complete address=%s message=%s", peer_addr, res.message)
 
     # Configure driver's own slice (partition 0)
     _configure_driver_slice(driver_svc, partitions[0], all_layers,
@@ -638,8 +626,13 @@ def serve():
 
     # Run training
     data_loader = get_dataset()
-    print(f"[p2p-driver] training start  run_id={run_id}  epochs={cfg.training.epochs}  "
-          f"gpipe={cfg.pipeline.use_gpipe}  n_micro={cfg.pipeline.n_micro}")
+    _LOG.info(
+        "training start run_id=%s epochs=%s gpipe=%s n_micro=%s",
+        run_id,
+        cfg.training.epochs,
+        cfg.pipeline.use_gpipe,
+        cfg.pipeline.n_micro,
+    )
     run_training(
         driver_svc, coordinator_svc, last_stub, data_loader, cfg,
         follower_stubs = follower_stubs,
@@ -659,9 +652,9 @@ def serve():
                 epoch           = cfg.training.epochs - 1,
                 worker_index    = fi + 1,
             ))
-            print(f"[p2p-driver] shutdown → {peer_addr}")
+            _LOG.info("follower shutdown sent address=%s", peer_addr)
         except Exception as e:
-            print(f"[p2p-driver] shutdown failed → {peer_addr}: {e}")
+            _LOG.warning("follower shutdown failed address=%s error=%s", peer_addr, e)
 
     server.stop(grace=2)
 
@@ -673,7 +666,7 @@ def serve():
     if run_logger:
         run_logger.flush()
 
-    print(f"[p2p-driver] done  run_id={run_id}")
+    _LOG.info("p2p driver complete run_id=%s", run_id)
 
 
 if __name__ == '__main__':

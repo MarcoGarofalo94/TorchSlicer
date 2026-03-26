@@ -28,10 +28,16 @@ x-worker: &worker
     - PYTHONUNBUFFERED=1
     - COORDINATOR_ADDRESS=coordinator:50054
     - DEVICE=${DEVICE:-auto}
+    - FAULT_KILL_EPOCH
+    - FAULT_KILL_DELAY_S
+    - FAULT_KILL_EXIT_CODE
+    - FAULT_RAISE_PHASE
+    - FAULT_RAISE_BATCH_ID
+    - FAULT_TARGET_WORKER_INDEX
   volumes:
     - .:/workspace
     - ./lib/torchslicer:/usr/local/lib/torchslicer
-  command: python3 examples/train/centralized/GRPC/worker/main.py
+  command: ${WORKER_CMD:-python3 examples/train/centralized/GRPC/worker/main.py}
   networks:
     - torchslicer-net
 
@@ -69,6 +75,9 @@ services:
       - HEARTBEAT_INTERVAL
       - HEARTBEAT_TIMEOUT
       - FAULT_MAX_RETRIES
+      - FAULT_COORDINATOR_EXIT_EPOCH
+      - FAULT_COORDINATOR_EXIT_DELAY_S
+      - FAULT_COORDINATOR_EXIT_CODE
     volumes:
       - .:/workspace
       - ./lib/torchslicer:/usr/local/lib/torchslicer
