@@ -26,8 +26,11 @@ x-worker: &worker
   user: "${UID}:${GID}"
   environment:
     - PYTHONUNBUFFERED=1
+    - EXPERIMENT_CONFIG
     - COORDINATOR_ADDRESS=coordinator:50054
     - DEVICE=${DEVICE:-auto}
+    - TENSOR_TRANSPORT
+    - TENSOR_PORT_OFFSET
     - FAULT_KILL_EPOCH
     - FAULT_KILL_DELAY_S
     - FAULT_KILL_EXIT_CODE
