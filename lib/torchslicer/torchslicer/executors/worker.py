@@ -1109,13 +1109,6 @@ class WorkerServicer(
                 daemon=True,
                 name="worker-fatal-stop",
             ).start()
-        elif is_last_micro:
-            self._coord_stub.batch_done(coordinator_service_pb2.BatchDoneRequest(
-                batch_id=batch_id,
-                run_id=self._run_id,
-            ))
-            self._profiler.mark_idle_start("fwd")
-            self._profiler.end_batch()
 
     # ── checkpoint ─────────────────────────────────────────────────────────────
 

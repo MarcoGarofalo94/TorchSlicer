@@ -215,7 +215,6 @@ def announce_to_coordinator(
     )
 
     def _register():
-        channel = grpc.insecure_channel(coordinator_addr, options=_OPTS)
         try:
             channel = grpc.insecure_channel(coordinator_addr, options=_OPTS)
             stub = coordinator_service_pb2_grpc.CoordinatorServiceStub(channel)
