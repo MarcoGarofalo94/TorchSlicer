@@ -1,0 +1,42 @@
+run_id: bench_resnet_synth_split
+
+training:
+  epochs: 2
+  optimizer:
+    name: SGD
+    params:
+      lr: 0.05
+      momentum: 0.9
+      weight_decay: 0.0005
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: false
+  n_micro: 1
+
+discovery:
+  backend: coordinator
+  n_workers: 2
+  timeout: 60
+
+logging:
+  enabled: true
+  dir: ./runs
+  level: INFO
+
+profile:
+  verbosity: 3
+  memory: true
+
+transport:
+  tensor: tcp
+  tensor_port_offset: 1
+
+checkpoint:
+  enabled: false
+  dir: ./checkpoints
+  save_every: epoch
+  resume: null
