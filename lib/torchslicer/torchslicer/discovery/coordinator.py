@@ -44,6 +44,8 @@ class CoordinatorDiscovery(BaseDiscovery):
         self._cond = threading.Condition(threading.Lock())
         self._on_join:  Optional[Callable[[NodeInfo], None]] = None
         self._on_leave: Optional[Callable[[NodeInfo], None]] = None
+        self._last_expected:   int  = 0
+        self._last_tag_filter: list = []
 
     @property
     def run_id(self) -> str:
@@ -155,8 +157,8 @@ class CoordinatorDiscovery(BaseDiscovery):
     def idle_nodes(self) -> list:
         """Return nodes that registered but were not selected (index >= expected)."""
         with self._cond:
-            selected = self._matching(getattr(self, "_last_tag_filter", []))
-            selected_ids = {n.node_id for n in selected[:getattr(self, "_last_expected", 0)]}
+            selected = self._matching(self._last_tag_filter)
+            selected_ids = {n.node_id for n in selected[:self._last_expected]}
             return [n for n in self._nodes if n.node_id not in selected_ids]
 
     def watch(
