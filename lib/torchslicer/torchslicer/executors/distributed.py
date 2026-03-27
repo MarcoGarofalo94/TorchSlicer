@@ -333,7 +333,7 @@ class DistributedExecutor(BaseExecutor):
         # Start embedded coordinator gRPC server FIRST so the Register endpoint
         # is available before discover() blocks waiting for registrations.
         self._grpc_server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=4), options=_GRPC_OPTS
+            futures.ThreadPoolExecutor(max_workers=max(4, n)), options=_GRPC_OPTS
         )
         coordinator_service_pb2_grpc.add_CoordinatorServiceServicer_to_server(
             _CoordinatorServicer(self), self._grpc_server
