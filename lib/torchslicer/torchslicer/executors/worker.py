@@ -189,7 +189,7 @@ def _unpack_tensor_frame(sock: socket.socket) -> tuple[str, int, torch.Tensor]:
     payload = bytearray(payload_len)
     payload_view = _recv_into(sock, payload)
     dtype = _code_to_dtype(dtype_code)
-    tensor = torch.frombuffer(payload_view, dtype=dtype).reshape(shape).clone()
+    tensor = torch.frombuffer(payload_view, dtype=dtype).reshape(shape)
     return kind.decode("ascii"), batch_id, tensor
 
 
