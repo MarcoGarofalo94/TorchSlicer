@@ -4,6 +4,7 @@ RunLogger — per-run artifact writer and reader.
 Writes into {run_dir}/:
   run_manifest.json    — static metadata written once at flush()
   metrics.jsonl        — epoch-level loss / duration
+  batch_metrics.jsonl  — per-batch loss (one row per batch, no duration_s)
   coordinator.jsonl    — coordinator overhead (data_load, send, wait)
   worker_epoch.jsonl   — per-worker epoch aggregates (forward/backward/idle/mem)
   worker_batch.jsonl   — per-worker per-batch detail  (verbosity=3 only)
@@ -46,7 +47,7 @@ from typing import Dict, List, Optional
 # Maps phase name → jsonl filename (relative to run_dir)
 _PHASE_FILES: Dict[str, str] = {
     "epoch":             "metrics.jsonl",
-    "batch":             "metrics.jsonl",
+    "batch":             "batch_metrics.jsonl",
     "coordinator_epoch": "coordinator.jsonl",
     "worker_epoch":      "worker_epoch.jsonl",
     "worker_batch":      "worker_batch.jsonl",
@@ -175,6 +176,7 @@ class RunLogger:
 
         The ``phase`` key determines which file receives the entry:
           "epoch"              → metrics.jsonl
+          "batch"              → batch_metrics.jsonl
           "coordinator_epoch"  → coordinator.jsonl
           "worker_epoch"       → worker_epoch.jsonl
           "worker_batch"       → worker_batch.jsonl
@@ -241,7 +243,7 @@ class RunLogger:
         instance.run_id = instance._manifest.get("run_id", "")
 
         instance._log_history = []
-        for fname in _PHASE_FILES.values():
+        for fname in dict.fromkeys(_PHASE_FILES.values()):
             path = os.path.join(run_dir, fname)
             if os.path.exists(path):
                 with open(path) as f:
