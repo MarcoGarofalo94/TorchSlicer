@@ -22,6 +22,7 @@ Example usage in a pack function::
 """
 
 from __future__ import annotations
+from abc import ABC, abstractmethod
 from typing import Optional
 import torch
 import torch.nn as nn
@@ -56,7 +57,7 @@ class GPT2EmbedStage(nn.Module):
         return self.drop(self.wte(input_ids) + self.wpe(pos))
 
 
-class AuxInputStage(nn.Module):
+class AuxInputStage(ABC, nn.Module):
     """Base class for pipeline stages that need extra named tensors.
 
     Subclass this for any model where stage 0 requires more than the main
@@ -96,8 +97,8 @@ class AuxInputStage(nn.Module):
 
     accepts_aux_inputs: bool = True
 
-    def forward(self, main: torch.Tensor, **aux: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+    @abstractmethod
+    def forward(self, main: torch.Tensor, **aux: torch.Tensor) -> torch.Tensor: ...
 
 
 class SimpleEmbedStage(nn.Module):
