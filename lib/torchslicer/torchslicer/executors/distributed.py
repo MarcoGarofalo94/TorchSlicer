@@ -89,8 +89,16 @@ def _tensor_to_bytes(t: torch.Tensor) -> bytes:
 
 
 def _serialize_tensor(t: torch.Tensor):
+    with tracer.span(
+        "torchslicer.tensor.serialize",
+        device=str(t.device),
+        dtype=str(t.dtype),
+        shape=str(tuple(t.shape)),
+        role="coordinator",
+    ):
+        data = _tensor_to_bytes(t)
     return worker_service_pb2.Tensor(
-        data=_tensor_to_bytes(t),
+        data=data,
         shape=list(t.shape),
         dtype=_TORCH_TO_DTYPE.get(t.dtype, worker_service_pb2.FLOAT32),
     )
@@ -1154,22 +1162,26 @@ class DistributedExecutor(BaseExecutor):
             ]
             for m in range(M):
                 mbid = batch_id * M + m
-                self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
-                    batch_id=mbid,
-                    label=_serialize_tensor(micro_labels[m]),
-                ))
-                self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
-                    batch_id=mbid,
-                    input=_serialize_tensor(micro_mains[m]),
-                    aux_inputs={k: _serialize_tensor(v) for k, v in micro_aux[m].items()},
-                ))
+                with tracer.span("torchslicer.rpc.forward_send", batch_id=mbid, target="last_worker_label"):
+                    self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
+                        batch_id=mbid,
+                        label=_serialize_tensor(micro_labels[m]),
+                    ))
+                with tracer.span("torchslicer.rpc.forward_send", batch_id=mbid, target="first_worker_input"):
+                    self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
+                        batch_id=mbid,
+                        input=_serialize_tensor(micro_mains[m]),
+                        aux_inputs={k: _serialize_tensor(v) for k, v in micro_aux[m].items()},
+                    ))
         else:
-            self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
-                batch_id=batch_id,
-                label=_serialize_tensor(labels),
-            ))
-            self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
-                batch_id=batch_id,
-                input=_serialize_tensor(main),
-                aux_inputs={k: _serialize_tensor(v) for k, v in aux.items()},
-            ))
+            with tracer.span("torchslicer.rpc.forward_send", batch_id=batch_id, target="last_worker_label"):
+                self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
+                    batch_id=batch_id,
+                    label=_serialize_tensor(labels),
+                ))
+            with tracer.span("torchslicer.rpc.forward_send", batch_id=batch_id, target="first_worker_input"):
+                self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
+                    batch_id=batch_id,
+                    input=_serialize_tensor(main),
+                    aux_inputs={k: _serialize_tensor(v) for k, v in aux.items()},
+                ))

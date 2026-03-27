@@ -94,6 +94,12 @@ class ProfileConfig:
 
 
 @dataclass
+class TransportConfig:
+    tensor: str = "grpc"   # "grpc" | "tcp" (worker-to-worker tensor payload transport)
+    tensor_port_offset: int = 1
+
+
+@dataclass
 class FaultToleranceConfig:
     enabled:              bool  = False  # enable heartbeat monitoring and auto-recovery
     heartbeat_interval_s: float = 5.0   # seconds between pings
@@ -111,6 +117,7 @@ class RunConfig:
     checkpoint:       CheckpointConfig     = field(default_factory=CheckpointConfig)
     logging:          LoggingConfig        = field(default_factory=LoggingConfig)
     profile:          ProfileConfig        = field(default_factory=ProfileConfig)
+    transport:        TransportConfig      = field(default_factory=TransportConfig)
     fault_tolerance:  FaultToleranceConfig = field(default_factory=FaultToleranceConfig)
 
     # ── loaders ───────────────────────────────────────────────────────────────
@@ -220,6 +227,12 @@ class RunConfig:
                 memory    = pr.get("memory",    cfg.profile.memory),
             )
 
+        if tr := data.get("transport"):
+            cfg.transport = TransportConfig(
+                tensor = tr.get("tensor", cfg.transport.tensor),
+                tensor_port_offset = tr.get("tensor_port_offset", cfg.transport.tensor_port_offset),
+            )
+
         if ft := data.get("fault_tolerance"):
             cfg.fault_tolerance = FaultToleranceConfig(
                 enabled              = ft.get("enabled",              cfg.fault_tolerance.enabled),
@@ -286,6 +299,8 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("LOG_LEVEL", lambda cfg, value: setattr(cfg.logging, "level", value)),
     ("PROFILE_VERBOSITY", lambda cfg, value: setattr(cfg.profile, "verbosity", int(value))),
     ("PROFILE_MEMORY", lambda cfg, value: setattr(cfg.profile, "memory", _parse_bool(value))),
+    ("TENSOR_TRANSPORT", lambda cfg, value: setattr(cfg.transport, "tensor", value.strip().lower())),
+    ("TENSOR_PORT_OFFSET", lambda cfg, value: setattr(cfg.transport, "tensor_port_offset", int(value))),
     (
         "FAULT_TOLERANCE_ENABLED",
         lambda cfg, value: setattr(cfg.fault_tolerance, "enabled", _parse_bool(value)),

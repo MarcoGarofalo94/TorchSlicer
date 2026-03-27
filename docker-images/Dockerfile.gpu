@@ -1,6 +1,11 @@
 # Requires NVIDIA Container Toolkit on the host.
 # CUDA 12.1 wheels; change cu121 to match your driver if needed.
 FROM python:3.12-slim
+ARG TARGETARCH
+
+# This image targets CUDA on x86_64 hosts.
+# ARM64 GPU support (e.g., Jetson/L4T) requires a dedicated base image path.
+RUN test "${TARGETARCH}" = "amd64" || (echo "Dockerfile.gpu currently supports amd64 only." && exit 1)
 
 # ── Layer 1: PyTorch (heavy — cached as long as this line doesn't change) ──────
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu121

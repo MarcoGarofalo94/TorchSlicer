@@ -6,7 +6,9 @@ with a coordinator; P2P workers wait for init() from the driver node.
 """
 
 import io
+import os
 import socket
+import struct
 import threading
 import traceback
 from concurrent import futures
@@ -14,6 +16,7 @@ from concurrent import futures
 import torch
 from torch import nn, optim
 
+from ..config import RunConfig
 from ..core.split_layer import SplitLayer
 from ..monitor import tracer as _tracer
 from ..monitor import WorkerProfiler
@@ -38,6 +41,9 @@ _GRPC_OPTS = [
 ]
 
 _LOG = get_logger("torchslicer.worker")
+_FRAME_HEADER = struct.Struct("!cIBH")
+_SHAPE_ITEM = struct.Struct("!q")
+_PAYLOAD_LEN = struct.Struct("!Q")
 
 
 def _channel(addr):
@@ -50,6 +56,14 @@ class _StaleWorkError(RuntimeError):
 
 class _PeerUnavailableError(RuntimeError):
     """Raised when a neighboring worker becomes unreachable mid-batch."""
+
+
+class _TensorStreamError(RuntimeError):
+    """Raised when the raw tensor transport fails."""
+
+
+class _TensorStreamClosed(_TensorStreamError):
+    """Raised when the raw tensor stream is closed cleanly by the peer."""
 
 
 # ── dtype maps ─────────────────────────────────────────────────────────────────
@@ -84,17 +98,141 @@ def _tensor_to_bytes(t: torch.Tensor) -> bytes:
     return arr.numpy().tobytes()
 
 
+def _tensor_payload_view(arr: torch.Tensor):
+    if arr.dtype == torch.bfloat16:
+        return memoryview(arr.view(torch.uint8).numpy()).cast("B")
+    return memoryview(arr.numpy()).cast("B")
+
+
 def deserialize_tensor(msg) -> torch.Tensor:
     dtype = _DTYPE_MAP.get(msg.dtype, torch.float32)
     return torch.frombuffer(bytearray(msg.data), dtype=dtype).reshape(list(msg.shape)).clone()
 
 
 def serialize_tensor(t: torch.Tensor):
+    with _tracer.span(
+        "torchslicer.tensor.serialize",
+        device=str(t.device),
+        dtype=str(t.dtype),
+        shape=str(tuple(t.shape)),
+    ):
+        data = _tensor_to_bytes(t)
     return worker_service_pb2.Tensor(
-        data=_tensor_to_bytes(t),
+        data=data,
         shape=list(t.shape),
         dtype=_TORCH_TO_DTYPE.get(t.dtype, worker_service_pb2.FLOAT32),
     )
+
+
+def _dtype_to_code(dtype: torch.dtype) -> int:
+    return int(_TORCH_TO_DTYPE.get(dtype, worker_service_pb2.FLOAT32))
+
+
+def _code_to_dtype(code: int) -> torch.dtype:
+    return _DTYPE_MAP.get(code, torch.float32)
+
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < n:
+        data = sock.recv(n - len(chunks))
+        if not data:
+            if not chunks:
+                raise _TensorStreamClosed("peer closed tensor stream")
+            raise _TensorStreamError("unexpected EOF while reading tensor frame")
+        chunks.extend(data)
+    return bytes(chunks)
+
+
+def _recv_into(sock: socket.socket, buf: bytearray) -> memoryview:
+    view = memoryview(buf)
+    offset = 0
+    while offset < len(view):
+        n_recv = sock.recv_into(view[offset:])
+        if n_recv == 0:
+            if offset == 0:
+                raise _TensorStreamClosed("peer closed tensor stream")
+            raise _TensorStreamError("unexpected EOF while reading tensor frame")
+        offset += n_recv
+    return view
+
+
+def _load_transport_settings() -> tuple[str, int]:
+    cfg = RunConfig.load(os.environ.get("EXPERIMENT_CONFIG"))
+    tensor_transport = cfg.transport.tensor.strip().lower()
+    if tensor_transport not in {"grpc", "tcp"}:
+        raise ValueError(f"unsupported tensor transport: {tensor_transport!r}")
+    return tensor_transport, int(cfg.transport.tensor_port_offset)
+
+
+def _pack_tensor_frame(kind: bytes, batch_id: int, tensor: torch.Tensor):
+    arr = tensor.detach().cpu().contiguous()
+    payload = _tensor_payload_view(arr)
+    shape = list(arr.shape)
+    header = _FRAME_HEADER.pack(kind, int(batch_id), _dtype_to_code(arr.dtype), len(shape))
+    shape_bytes = b"".join(_SHAPE_ITEM.pack(int(dim)) for dim in shape)
+    payload_len = _PAYLOAD_LEN.pack(payload.nbytes)
+    return header, shape_bytes, payload_len, payload
+
+
+def _unpack_tensor_frame(sock: socket.socket) -> tuple[str, int, torch.Tensor]:
+    header_buf = bytearray(_FRAME_HEADER.size)
+    kind, batch_id, dtype_code, ndim = _FRAME_HEADER.unpack(_recv_into(sock, header_buf))
+    shape_buf = bytearray(_SHAPE_ITEM.size * ndim)
+    shape_view = _recv_into(sock, shape_buf)
+    shape = [
+        _SHAPE_ITEM.unpack_from(shape_view, i * _SHAPE_ITEM.size)[0]
+        for i in range(ndim)
+    ]
+    payload_len_buf = bytearray(_PAYLOAD_LEN.size)
+    payload_len = _PAYLOAD_LEN.unpack(_recv_into(sock, payload_len_buf))[0]
+    payload = bytearray(payload_len)
+    payload_view = _recv_into(sock, payload)
+    dtype = _code_to_dtype(dtype_code)
+    tensor = torch.frombuffer(payload_view, dtype=dtype).reshape(shape)
+    return kind.decode("ascii"), batch_id, tensor
+
+
+def _tensor_addr(addr: str, offset: int) -> str:
+    host, port = addr.rsplit(":", 1)
+    return f"{host}:{int(port) + offset}"
+
+
+class _TensorPeerClient:
+    def __init__(self, address: str):
+        self.address = address
+        self._sock: socket.socket | None = None
+        self._lock = threading.Lock()
+
+    def send_tensor(self, kind: bytes, batch_id: int, tensor: torch.Tensor) -> None:
+        header, shape_bytes, payload_len, payload = _pack_tensor_frame(kind, batch_id, tensor)
+        with self._lock:
+            self._ensure_connected()
+            try:
+                self._sock.sendall(header)
+                if shape_bytes:
+                    self._sock.sendall(shape_bytes)
+                self._sock.sendall(payload_len)
+                self._sock.sendall(payload)
+            except Exception as exc:
+                self.close()
+                raise _TensorStreamError(f"tensor send failed peer={self.address}") from exc
+
+    def _ensure_connected(self) -> None:
+        if self._sock is not None:
+            return
+        host, port = self.address.rsplit(":", 1)
+        sock = socket.create_connection((host, int(port)), timeout=10.0)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._sock = sock
+
+    def close(self) -> None:
+        if self._sock is None:
+            return
+        try:
+            self._sock.close()
+        finally:
+            self._sock = None
 
 
 def resolve_device() -> str:
@@ -192,6 +330,11 @@ class WorkerServicer(
         self.device = torch.device(resolve_device())
         self._server = None
         self._generation = 0
+        self._tensor_transport = "grpc"
+        self._tensor_port_offset = 1
+        self._tensor_server = None
+        self._tensor_stop = threading.Event()
+        self._tensor_threads: list[threading.Thread] = []
 
         self._reset_state()
 
@@ -202,6 +345,70 @@ class WorkerServicer(
 
     def set_server(self, server):
         self._server = server
+
+    def start_tensor_server(self, port: int):
+        if self._tensor_transport != "tcp":
+            return
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("0.0.0.0", int(port)))
+        server.listen()
+        self._tensor_server = server
+        thread = threading.Thread(
+            target=self._accept_tensor_loop,
+            daemon=True,
+            name=f"tensor-accept-{port}",
+        )
+        thread.start()
+        self._tensor_threads.append(thread)
+        _LOG.info("tensor transport listener started port=%s mode=tcp", port)
+
+    def stop_tensor_server(self):
+        self._tensor_stop.set()
+        if self._tensor_server is not None:
+            try:
+                self._tensor_server.close()
+            except Exception:
+                pass
+            self._tensor_server = None
+        for peer in (self._next_tensor, self._prev_tensor):
+            if peer is not None:
+                peer.close()
+
+    def _accept_tensor_loop(self):
+        while not self._tensor_stop.is_set():
+            try:
+                conn, addr = self._tensor_server.accept()
+            except OSError:
+                break
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            thread = threading.Thread(
+                target=self._handle_tensor_conn,
+                args=(conn, addr),
+                daemon=True,
+            )
+            thread.start()
+            self._tensor_threads.append(thread)
+
+    def _handle_tensor_conn(self, conn: socket.socket, addr):
+        try:
+            while not self._tensor_stop.is_set():
+                kind, batch_id, tensor = _unpack_tensor_frame(conn)
+                generation = self._generation
+                if kind == "F":
+                    self._pool.submit(self._forward_tensor, batch_id, tensor, generation)
+                elif kind == "B":
+                    self._pool.submit(self._backward_tensor, batch_id, tensor, generation)
+                else:
+                    raise _TensorStreamError(f"unknown tensor frame kind={kind!r}")
+        except Exception as exc:
+            if not self._tensor_stop.is_set() and not isinstance(exc, _TensorStreamClosed):
+                _LOG.warning("tensor transport connection closed addr=%s error=%s", addr, exc)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _reset_state(self):
         self.layer:       SplitLayer = None
@@ -216,6 +423,8 @@ class WorkerServicer(
 
         self._next_stub = None
         self._prev_stub = None
+        self._next_tensor = None
+        self._prev_tensor = None
         self._coord_stub = None
         self._fatal_error = None
 
@@ -266,11 +475,21 @@ class WorkerServicer(
             self._n_micro    = max(1, request.n_micro) if request.n_micro else 1
 
             if self.next_worker:
-                self._next_stub = worker_service_pb2_grpc.WorkerServiceStub(
-                    _channel(self.next_worker))
+                if self._tensor_transport == "tcp":
+                    self._next_tensor = _TensorPeerClient(
+                        _tensor_addr(self.next_worker, self._tensor_port_offset)
+                    )
+                else:
+                    self._next_stub = worker_service_pb2_grpc.WorkerServiceStub(
+                        _channel(self.next_worker))
             if self.prev_worker:
-                self._prev_stub = worker_service_pb2_grpc.WorkerServiceStub(
-                    _channel(self.prev_worker))
+                if self._tensor_transport == "tcp":
+                    self._prev_tensor = _TensorPeerClient(
+                        _tensor_addr(self.prev_worker, self._tensor_port_offset)
+                    )
+                else:
+                    self._prev_stub = worker_service_pb2_grpc.WorkerServiceStub(
+                        _channel(self.prev_worker))
             if self.coordinator:
                 self._coord_stub = coordinator_service_pb2_grpc.CoordinatorServiceStub(
                     _channel(self.coordinator))
@@ -297,7 +516,7 @@ class WorkerServicer(
             ) if self.device.type == 'cuda' else 0.0
 
             _LOG.info(
-                "worker init run_id=%s index=%s layers=%s is_last=%s device=%s prev=%s next=%s param_mb=%.2f cuda_alloc_mb=%.2f n_micro=%s profile_verbosity=%s profile_memory=%s",
+                "worker init run_id=%s index=%s layers=%s is_last=%s device=%s prev=%s next=%s transport=%s param_mb=%.2f cuda_alloc_mb=%.2f n_micro=%s profile_verbosity=%s profile_memory=%s",
                 self._run_id,
                 self._worker_index,
                 layer_names,
@@ -305,6 +524,7 @@ class WorkerServicer(
                 self.device,
                 self.prev_worker,
                 self.next_worker,
+                self._tensor_transport,
                 param_mb,
                 cuda_alloc_mb,
                 self._n_micro,
@@ -348,6 +568,7 @@ class WorkerServicer(
                     _LOG.exception("shutdown checkpoint save failed: %s", e)
 
             _LOG.info("worker stopping hostname=%s", socket.gethostname())
+            self.stop_tensor_server()
             if self._server:
                 self._server.stop(grace=1)
 
@@ -465,43 +686,41 @@ class WorkerServicer(
                 self._forward_last(batch_id, request, generation)
                 return
 
-            tensor = deserialize_tensor(request.input).to(self.device)
+            with _tracer.span(
+                "torchslicer.tensor.deserialize",
+                batch_id=batch_id,
+                worker=socket.gethostname(),
+                source="input",
+            ):
+                tensor_cpu = deserialize_tensor(request.input)
+            with _tracer.span(
+                "torchslicer.tensor.h2d",
+                batch_id=batch_id,
+                worker=socket.gethostname(),
+                source="input",
+                device=str(self.device),
+            ):
+                tensor = tensor_cpu.to(self.device)
             # Unpack aux inputs (multimodal models — sent to first worker only)
             aux = {}
             if request.aux_inputs:
-                aux = {k: deserialize_tensor(v).to(self.device)
-                       for k, v in request.aux_inputs.items()}
-            with _tracer.span(
-                "torchslicer.worker.forward",
-                batch_id=batch_id,
-                worker=socket.gethostname(),
-                input_shape=str(tuple(tensor.shape)),
-            ) as s:
-                with self._profiler.phase("forward"):
-                    out   = self.layer(tensor, **aux)
-                    x_ref = self.layer.x
-                if s:
-                    s.set_attribute("output_shape", str(tuple(out.shape)))
-
-            with self._lock:
-                self._ensure_generation(generation, "forward", batch_id)
-                self._outputs[batch_id] = (out, x_ref)
-
-            self._ensure_generation(generation, "forward", batch_id)
-            with self._profiler.phase("send_fwd"):
-                try:
-                    self._next_stub.forward(worker_service_pb2.ForwardRequest(
+                for k, v in request.aux_inputs.items():
+                    with _tracer.span(
+                        "torchslicer.tensor.deserialize",
                         batch_id=batch_id,
-                        input=serialize_tensor(out),
-                    ))
-                except Exception as exc:
-                    if self._is_unavailable_rpc(exc):
-                        raise _PeerUnavailableError(
-                            f"peer unavailable phase=forward batch_id={batch_id} peer={self.next_worker}"
-                        ) from exc
-                    raise
-
-            self._profiler.mark_idle_start("bwd")
+                        worker=socket.gethostname(),
+                        source=f"aux:{k}",
+                    ):
+                        aux_cpu = deserialize_tensor(v)
+                    with _tracer.span(
+                        "torchslicer.tensor.h2d",
+                        batch_id=batch_id,
+                        worker=socket.gethostname(),
+                        source=f"aux:{k}",
+                        device=str(self.device),
+                    ):
+                        aux[k] = aux_cpu.to(self.device)
+            self._run_forward_stage(batch_id, tensor, generation, aux=aux)
 
         except _StaleWorkError as e:
             _LOG.info("%s", e)
@@ -510,6 +729,90 @@ class WorkerServicer(
         except Exception as e:
             self._report_fatal_error("forward", request.batch_id, e)
 
+    def _forward_tensor(self, batch_id: int, tensor_cpu: torch.Tensor, generation: int):
+        try:
+            self._ensure_generation(generation, "forward_tensor", batch_id)
+            self._before_runtime_phase("forward_tensor", batch_id)
+            self._profiler.begin_batch(batch_id)
+            self._profiler.mark_idle_end("fwd")
+            with _tracer.span(
+                "torchslicer.tensor.h2d",
+                batch_id=batch_id,
+                worker=socket.gethostname(),
+                source="input_tcp",
+                device=str(self.device),
+            ):
+                tensor = tensor_cpu.to(self.device)
+            self._run_forward_stage(batch_id, tensor, generation, aux={})
+        except _StaleWorkError as e:
+            _LOG.info("%s", e)
+        except _PeerUnavailableError as e:
+            _LOG.warning("%s", e)
+        except Exception as e:
+            self._report_fatal_error("forward_tcp", batch_id, e)
+
+    def _run_forward_stage(self, batch_id: int, tensor: torch.Tensor, generation: int, aux: dict):
+        with _tracer.span(
+            "torchslicer.worker.forward",
+            batch_id=batch_id,
+            worker=socket.gethostname(),
+            is_last=self.is_last,
+            input_shape=str(tuple(tensor.shape)),
+        ) as s:
+            with self._profiler.phase("forward"):
+                out = self.layer(tensor, **aux) if aux else self.layer(tensor)
+                x_ref = self.layer.x
+            if s:
+                s.set_attribute("output_shape", str(tuple(out.shape)))
+
+        with self._lock:
+            self._ensure_generation(generation, "forward", batch_id)
+            if self.is_last:
+                label = self._labels.pop(batch_id, None)
+                if label is None:
+                    self._outputs[batch_id] = (out, x_ref)
+            else:
+                self._outputs[batch_id] = (out, x_ref)
+
+        if self.is_last:
+            if label is not None:
+                self._run_backward_last(batch_id, out, x_ref, label, generation)
+            return
+
+        self._ensure_generation(generation, "forward", batch_id)
+        with self._profiler.phase("send_fwd"):
+            self._send_forward_peer(batch_id, out)
+
+        self._profiler.mark_idle_start("bwd")
+
+    def _send_forward_peer(self, batch_id: int, out: torch.Tensor) -> None:
+        try:
+            if self._tensor_transport == "tcp" and self._next_tensor is not None:
+                with _tracer.span(
+                    "torchslicer.tcp.forward_send",
+                    batch_id=batch_id,
+                    worker=socket.gethostname(),
+                    peer=self.next_worker,
+                ):
+                    self._next_tensor.send_tensor(b"F", batch_id, out)
+                return
+            with _tracer.span(
+                "torchslicer.rpc.forward_send",
+                batch_id=batch_id,
+                worker=socket.gethostname(),
+                peer=self.next_worker,
+            ):
+                self._next_stub.forward(worker_service_pb2.ForwardRequest(
+                    batch_id=batch_id,
+                    input=serialize_tensor(out),
+                ))
+        except Exception as exc:
+            if isinstance(exc, _TensorStreamError) or self._is_unavailable_rpc(exc):
+                raise _PeerUnavailableError(
+                    f"peer unavailable phase=forward batch_id={batch_id} peer={self.next_worker}"
+                ) from exc
+            raise
+
     def _forward_last(self, batch_id: int, request, generation: int):
         try:
             self._ensure_generation(generation, "forward_last", batch_id)
@@ -517,7 +820,21 @@ class WorkerServicer(
             is_label = bool(request.label.data)
 
             if is_label:
-                label = deserialize_tensor(request.label).to(self.device)
+                with _tracer.span(
+                    "torchslicer.tensor.deserialize",
+                    batch_id=batch_id,
+                    worker=socket.gethostname(),
+                    source="label",
+                ):
+                    label_cpu = deserialize_tensor(request.label)
+                with _tracer.span(
+                    "torchslicer.tensor.h2d",
+                    batch_id=batch_id,
+                    worker=socket.gethostname(),
+                    source="label",
+                    device=str(self.device),
+                ):
+                    label = label_cpu.to(self.device)
                 with self._lock:
                     self._ensure_generation(generation, "forward_last", batch_id)
                     self._labels[batch_id] = label
@@ -526,7 +843,21 @@ class WorkerServicer(
                     out, x_ref = cached
                     self._run_backward_last(batch_id, out, x_ref, label, generation)
             else:
-                tensor = deserialize_tensor(request.input).to(self.device)
+                with _tracer.span(
+                    "torchslicer.tensor.deserialize",
+                    batch_id=batch_id,
+                    worker=socket.gethostname(),
+                    source="input_last",
+                ):
+                    tensor_cpu = deserialize_tensor(request.input)
+                with _tracer.span(
+                    "torchslicer.tensor.h2d",
+                    batch_id=batch_id,
+                    worker=socket.gethostname(),
+                    source="input_last",
+                    device=str(self.device),
+                ):
+                    tensor = tensor_cpu.to(self.device)
                 with _tracer.span(
                     "torchslicer.worker.forward",
                     batch_id=batch_id,
@@ -563,48 +894,85 @@ class WorkerServicer(
 
             self._profiler.mark_idle_end("bwd")
 
-            grad_in = deserialize_tensor(request.gradient).to(self.device)
-
-            with self._lock:
-                self._ensure_generation(generation, "backward", batch_id)
-                cached = self._outputs.pop(batch_id, None)
-
-            if cached is None:
-                _LOG.warning("backward skipped because cached output is missing for batch_id=%s", batch_id)
-                return
-
-            out, x_ref = cached
-
             with _tracer.span(
-                "torchslicer.worker.backward",
+                "torchslicer.tensor.deserialize",
                 batch_id=batch_id,
                 worker=socket.gethostname(),
-                is_last=False,
+                source="gradient",
             ):
-                with self._profiler.phase("backward"):
-                    # Pop MoE aux loss BEFORE backward — same graph nodes, would
-                    # fail if popped after loss.backward() frees saved tensors.
-                    moe = self.layer.pop_moe_aux_loss() if is_last_micro else None
-                    if moe is not None:
-                        out.backward(grad_in, retain_graph=True)
-                        moe.backward()
-                    else:
-                        out.backward(grad_in)
-                    grad = x_ref.grad if x_ref is not None else None
-                if is_last_micro:
-                    with self._profiler.phase("optimizer"):
-                        self.layer.optimize()
-
-            del out
-            if is_last_micro and self.device.type == "cuda":
-                torch.cuda.empty_cache()
-            self._send_backward(batch_id, grad, is_last_micro, generation)
+                grad_cpu = deserialize_tensor(request.gradient)
+            with _tracer.span(
+                "torchslicer.tensor.h2d",
+                batch_id=batch_id,
+                worker=socket.gethostname(),
+                source="gradient",
+                device=str(self.device),
+            ):
+                grad_in = grad_cpu.to(self.device)
+            self._run_backward_stage(batch_id, grad_in, is_last_micro, generation)
         except _StaleWorkError as e:
             _LOG.info("%s", e)
         except _PeerUnavailableError as e:
             _LOG.warning("%s", e)
         except Exception as e:
             self._report_fatal_error("backward", request.batch_id, e)
+
+    def _backward_tensor(self, batch_id: int, grad_cpu: torch.Tensor, generation: int):
+        try:
+            self._ensure_generation(generation, "backward_tensor", batch_id)
+            self._before_runtime_phase("backward_tensor", batch_id)
+            n_micro       = self._n_micro
+            is_last_micro = (n_micro <= 1) or (batch_id % n_micro == n_micro - 1)
+            self._profiler.mark_idle_end("bwd")
+            with _tracer.span(
+                "torchslicer.tensor.h2d",
+                batch_id=batch_id,
+                worker=socket.gethostname(),
+                source="gradient_tcp",
+                device=str(self.device),
+            ):
+                grad_in = grad_cpu.to(self.device)
+            self._run_backward_stage(batch_id, grad_in, is_last_micro, generation)
+        except _StaleWorkError as e:
+            _LOG.info("%s", e)
+        except _PeerUnavailableError as e:
+            _LOG.warning("%s", e)
+        except Exception as e:
+            self._report_fatal_error("backward_tcp", batch_id, e)
+
+    def _run_backward_stage(self, batch_id: int, grad_in: torch.Tensor, is_last_micro: bool, generation: int):
+        with self._lock:
+            self._ensure_generation(generation, "backward", batch_id)
+            cached = self._outputs.pop(batch_id, None)
+
+        if cached is None:
+            _LOG.warning("backward skipped because cached output is missing for batch_id=%s", batch_id)
+            return
+
+        out, x_ref = cached
+
+        with _tracer.span(
+            "torchslicer.worker.backward",
+            batch_id=batch_id,
+            worker=socket.gethostname(),
+            is_last=False,
+        ):
+            with self._profiler.phase("backward"):
+                moe = self.layer.pop_moe_aux_loss() if is_last_micro else None
+                if moe is not None:
+                    out.backward(grad_in, retain_graph=True)
+                    moe.backward()
+                else:
+                    out.backward(grad_in)
+                grad = x_ref.grad if x_ref is not None else None
+            if is_last_micro:
+                with self._profiler.phase("optimizer"):
+                    self.layer.optimize()
+
+        del out
+        if is_last_micro and self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        self._send_backward(batch_id, grad, is_last_micro, generation)
 
     def _run_backward_last(self, batch_id: int, out: torch.Tensor,
                            x_ref: torch.Tensor, label: torch.Tensor, generation: int):
@@ -666,15 +1034,30 @@ class WorkerServicer(
                        generation: int | None = None):
         if generation is not None:
             self._ensure_generation(generation, "send_backward", batch_id)
-        if self._prev_stub:
+        if self._prev_stub or self._prev_tensor:
             with self._profiler.phase("send_bwd"):
                 try:
-                    self._prev_stub.backward(worker_service_pb2.BackwardRequest(
-                        batch_id=batch_id,
-                        gradient=serialize_tensor(grad),
-                    ))
+                    if self._tensor_transport == "tcp" and self._prev_tensor is not None:
+                        with _tracer.span(
+                            "torchslicer.tcp.backward_send",
+                            batch_id=batch_id,
+                            worker=socket.gethostname(),
+                            peer=self.prev_worker,
+                        ):
+                            self._prev_tensor.send_tensor(b"B", batch_id, grad)
+                    else:
+                        with _tracer.span(
+                            "torchslicer.rpc.backward_send",
+                            batch_id=batch_id,
+                            worker=socket.gethostname(),
+                            peer=self.prev_worker,
+                        ):
+                            self._prev_stub.backward(worker_service_pb2.BackwardRequest(
+                                batch_id=batch_id,
+                                gradient=serialize_tensor(grad),
+                            ))
                 except Exception as exc:
-                    if self._is_unavailable_rpc(exc):
+                    if isinstance(exc, _TensorStreamError) or self._is_unavailable_rpc(exc):
                         raise _PeerUnavailableError(
                             f"peer unavailable phase=backward batch_id={batch_id} peer={self.prev_worker}"
                         ) from exc
@@ -847,9 +1230,13 @@ def run_worker(
     tags = [t.strip() for t in raw_tags.split(",") if t.strip()] if raw_tags else []
 
     # ── build servicer + gRPC server ────────────────────────────────────────
+    tensor_transport, tensor_port_offset = _load_transport_settings()
+
     if servicer_class is None:
         servicer_class = WorkerServicer
     servicer = servicer_class()
+    servicer._tensor_transport = tensor_transport
+    servicer._tensor_port_offset = tensor_port_offset
 
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=grpc_workers),
@@ -859,6 +1246,7 @@ def run_worker(
     server.add_insecure_port(f"[::]:{port}")
     server.start()
     servicer.set_server(server)
+    servicer.start_tensor_server(port + servicer._tensor_port_offset)
     tag_str = f"  tags=[{', '.join(tags)}]" if tags else ""
     _LOG.info("worker started port=%s hostname=%s device=%s%s", port, hostname, resolved_device, tag_str)
 
