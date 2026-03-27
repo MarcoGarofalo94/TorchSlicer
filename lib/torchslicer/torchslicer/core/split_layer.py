@@ -94,7 +94,7 @@ class SplitLayer(nn.Module):
                 local_preds = preds[i]
                 if not local_preds:
                     inp = x_in
-                    if i == 0 and aux and getattr(layer, 'accepts_aux_inputs', False):
+                    if aux and getattr(layer, 'accepts_aux_inputs', False):
                         outputs[i] = layer(inp, **aux)
                         continue
                 elif len(local_preds) == 1:
