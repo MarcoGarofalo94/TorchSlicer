@@ -63,6 +63,14 @@ run-centralized: _env ## Run centralized stack. DEVICE=cpu|gpu  CONFIG=path  [CO
 		WORKER_CMD='$(WORKER_CMD)' \
 		docker compose -f docker-compose.yml $(_GPU_OVERRIDE_CENTRALIZED) up
 
+.PHONY: run-centralized-auto
+run-centralized-auto: _env ## Run centralized stack and remove containers on terminal completion. Preserves current run-centralized behavior.
+	IMAGE_TAG=$(_IMAGE_TAG) EXPERIMENT_CONFIG=$(CONFIG) DEVICE=$(if $(filter gpu,$(DEVICE)),cuda,auto) \
+		KEEP_ALIVE=0 \
+		COORDINATOR_CMD='$(COORDINATOR_CMD)' \
+		WORKER_CMD='$(WORKER_CMD)' \
+		bash -lc 'status=0; docker compose -f docker-compose.yml $(_GPU_OVERRIDE_CENTRALIZED) up || status=$$?; docker compose -f docker-compose.yml $(_GPU_OVERRIDE_CENTRALIZED) down --remove-orphans; exit $$status'
+
 .PHONY: down-centralized
 down-centralized: _env ## Stop and remove centralized stack
 	docker compose -f docker-compose.yml down
@@ -83,6 +91,11 @@ _GPU_OVERRIDE_P2P = $(if $(filter gpu,$(DEVICE)),-f docker-compose.p2p.gpu.yml)
 run-p2p: _env ## Run P2P stack. DEVICE=cpu|gpu  CONFIG=path/to/experiment.yaml
 	IMAGE_TAG=$(_IMAGE_TAG) EXPERIMENT_CONFIG=$(CONFIG) DEVICE=$(if $(filter gpu,$(DEVICE)),cuda,auto) \
 		docker compose -f docker-compose.p2p.yml $(_GPU_OVERRIDE_P2P) up --abort-on-container-exit
+
+.PHONY: run-p2p-auto
+run-p2p-auto: _env ## Run P2P stack and remove containers on terminal completion. Preserves current run-p2p behavior.
+	IMAGE_TAG=$(_IMAGE_TAG) EXPERIMENT_CONFIG=$(CONFIG) DEVICE=$(if $(filter gpu,$(DEVICE)),cuda,auto) \
+		bash -lc 'status=0; docker compose -f docker-compose.p2p.yml $(_GPU_OVERRIDE_P2P) up --abort-on-container-exit || status=$$?; docker compose -f docker-compose.p2p.yml $(_GPU_OVERRIDE_P2P) down --remove-orphans; exit $$status'
 
 .PHONY: down-p2p
 down-p2p: _env ## Stop and remove P2P stack

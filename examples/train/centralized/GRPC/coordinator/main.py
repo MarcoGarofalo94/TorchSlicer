@@ -103,6 +103,14 @@ def serve():
     )
 
     run_dir = os.path.join(cfg.logging.dir, cfg.run_id) if cfg.logging.enabled else ""
+    keep_alive = os.environ.get("KEEP_ALIVE", "1").strip().lower() not in {"0", "false", "no"}
+    if not keep_alive:
+        print("[coordinator] run complete — exiting immediately (KEEP_ALIVE disabled)")
+        if run_dir:
+            print(f"[coordinator] logs → {run_dir}/run_manifest.json")
+            print(f"[coordinator] metrics → {run_dir}/metrics.jsonl")
+        return
+
     print(f"[coordinator] run complete — waiting for shutdown signal (SIGTERM/SIGINT)")
     if run_dir:
         print(f"[coordinator] logs → {run_dir}/run_manifest.json")

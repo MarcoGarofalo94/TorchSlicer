@@ -27,6 +27,7 @@ from .core.stages import (
     MoEBlockStage,
     SimpleEmbedStage,
 )
+from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
 
 
 def peft_unwrap(model) -> "nn.Module":

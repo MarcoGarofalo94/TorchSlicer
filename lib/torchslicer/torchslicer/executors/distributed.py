@@ -669,6 +669,8 @@ class DistributedExecutor(BaseExecutor):
             else os.path.join(cfg.checkpoint.dir, self._run_id)
         )
         ckpt = cfg.checkpoint
+        if ckpt.enabled:
+            self._save_checkpoint_layout(self._last_epoch, run_dir)
 
         # Signal every worker to shut down, optionally saving a checkpoint first.
         for i, proxy in enumerate(self._proxies):
@@ -813,6 +815,7 @@ class DistributedExecutor(BaseExecutor):
         )
         os.makedirs(run_dir, exist_ok=True)
         self._ft_checkpoint_dir = run_dir
+        self._save_checkpoint_layout(epoch, run_dir)
         for i, proxy in enumerate(self._proxies):
             try:
                 proxy.stub().save_checkpoint(
@@ -1111,6 +1114,30 @@ class DistributedExecutor(BaseExecutor):
         with open(path, "w") as f:
             json.dump(state, f, indent=2)
         _LOG.info("run_state saved path=%s", path)
+
+    def _save_checkpoint_layout(self, epoch: int, run_dir: str) -> None:
+        path = os.path.join(run_dir, "checkpoint_layouts.json")
+        payload = {"epochs": {}}
+        if os.path.exists(path):
+            try:
+                with open(path) as handle:
+                    payload = json.load(handle)
+            except Exception as e:
+                _LOG.warning("checkpoint layout load failed path=%s error=%s", path, e)
+                payload = {"epochs": {}}
+
+        payload.setdefault("epochs", {})
+        payload["epochs"][str(epoch)] = [
+            {
+                "worker_index": i,
+                "layer_indices": list(indices),
+            }
+            for i, indices in enumerate(self._stored_partition_indices)
+        ]
+
+        with open(path, "w") as handle:
+            json.dump(payload, handle, indent=2)
+        _LOG.info("checkpoint layout saved path=%s epoch=%s", path, epoch)
 
     def _send_batch(self, batch_id: int, inputs, labels: torch.Tensor):
         main, aux = _unpack_inputs(inputs)

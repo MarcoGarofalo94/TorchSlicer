@@ -52,6 +52,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - EXPERIMENT_CONFIG
+      - KEEP_ALIVE
       - RUN_ID
       - N_WORKERS
       - HF_HOME=${HF_HOME:-/workspace/.cache/huggingface}
