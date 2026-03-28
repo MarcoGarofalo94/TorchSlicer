@@ -30,7 +30,7 @@ from contextlib import contextmanager
 _OTEL_AVAILABLE = False
 try:
     from opentelemetry import trace as _otel_trace
-    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace import TracerProvider, SpanProcessor
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource, SERVICE_NAME
@@ -56,6 +56,28 @@ except ImportError:
 # ── module state ──────────────────────────────────────────────────────────────
 
 _tracer = None  # None → all spans are no-ops
+
+
+# ── internal helpers ──────────────────────────────────────────────────────────
+
+class _GrpcKindProcessor(SpanProcessor if _OTEL_AVAILABLE else object):
+    """Stamp openinference.span.kind=TOOL on auto-instrumented gRPC spans.
+
+    GrpcInstrumentorClient/Server creates spans whose names start with '/'
+    (e.g. '/torchslicer.worker.WorkerService/forward').  These have no
+    openinference.span.kind, so Phoenix labels them "unknown".  We set TOOL
+    here at on_start time before the span is exported.
+    """
+
+    def on_start(self, span, parent_context=None):
+        try:
+            if span.name.startswith("/"):
+                span.set_attribute("openinference.span.kind", "TOOL")
+        except Exception:
+            pass
+
+    def on_end(self, span):
+        pass
 
 
 # ── public API ────────────────────────────────────────────────────────────────
@@ -93,6 +115,9 @@ def configure(
         )
         resource = Resource.create({SERVICE_NAME: service_name})
         provider = TracerProvider(resource=resource)
+        # Stamp openinference.span.kind on auto-instrumented gRPC spans so
+        # Phoenix shows them as TOOL instead of "unknown".
+        provider.add_span_processor(_GrpcKindProcessor())
         exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
         provider.add_span_processor(BatchSpanProcessor(exporter))
         _otel_trace.set_tracer_provider(provider)
