@@ -59,6 +59,7 @@ services:
       - IS_DRIVER=false
       - WORKER_INDEX=1
       - WORKER_ADDRESS=worker1:50051
+      - EXPERIMENT_CONFIG
       - DEVICE=${DEVICE:-auto}
     volumes:
       - .:/workspace

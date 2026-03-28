@@ -176,12 +176,13 @@ class P2PDriverServicer(WorkerServicer):
         except Exception as e:
             _LOG.exception("driver forward failed batch_id=%s error=%s", batch_id, e)
 
-    def _send_backward(self, batch_id: int, grad: torch.Tensor, is_last_micro: bool = True):
+    def _send_backward(self, batch_id: int, grad: torch.Tensor, is_last_micro: bool = True,
+                       generation: int | None = None):
         """Override: driver has no prev_worker — signal batch done directly."""
         if self._prev_stub:
             # Should not happen for driver (worker 0 has no predecessor), but
             # kept for safety if topology changes.
-            super()._send_backward(batch_id, grad, is_last_micro)
+            super()._send_backward(batch_id, grad, is_last_micro, generation)
         else:
             # Driver is the first worker — no upstream gradient to send.
             if is_last_micro:
@@ -597,6 +598,9 @@ def serve():
     _configure_driver_slice(driver_svc, partitions[0], all_layers,
                             peers, opt_cfg, run_id, cfg)
 
+    # Start TCP tensor server on driver if transport=tcp (followers connect back for backward)
+    driver_svc.start_tensor_server(int(port) + cfg.transport.tensor_port_offset)
+
     # Stubs used during training
     last_stub = follower_stubs[-1][1]   # last worker receives labels
     driver_svc.set_last_stub(last_stub)
@@ -650,6 +654,7 @@ def serve():
         except Exception as e:
             _LOG.warning("follower shutdown failed address=%s error=%s", peer_addr, e)
 
+    driver_svc.stop_tensor_server()
     server.stop(grace=2)
 
     if cfg.checkpoint.enabled and run_logger:

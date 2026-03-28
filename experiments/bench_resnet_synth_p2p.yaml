@@ -1,0 +1,44 @@
+run_id: bench_resnet_synth_p2p
+
+training:
+  epochs: 2
+  optimizer:
+    name: SGD
+    params:
+      lr: 0.05
+      momentum: 0.9
+      weight_decay: 0.0005
+  criterion:
+    name: CrossEntropyLoss
+    params: {}
+  mixed_precision: false
+
+pipeline:
+  use_gpipe: false
+  n_micro: 1
+
+discovery:
+  backend: static
+  n_workers: 2
+  peers:
+    - worker0:50051
+    - worker1:50051
+
+logging:
+  enabled: true
+  dir: ./runs
+  level: INFO
+
+profile:
+  verbosity: 1
+  memory: false
+
+transport:
+  tensor: tcp
+  tensor_port_offset: 1
+
+checkpoint:
+  enabled: false
+  dir: ./checkpoints
+  save_every: epoch
+  resume: null
