@@ -672,12 +672,12 @@ class WorkerServicer(
 
     def forward(self, request, context):
         generation = self._generation
-        self._pool.submit(self._forward, request, generation)
+        self._pool.submit(_tracer.propagate_to_thread(self._forward), request, generation)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
 
     def backward(self, request, context):
         generation = self._generation
-        self._pool.submit(self._backward, request, generation)
+        self._pool.submit(_tracer.propagate_to_thread(self._backward), request, generation)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
 
     # ── internal forward ───────────────────────────────────────────────────────
