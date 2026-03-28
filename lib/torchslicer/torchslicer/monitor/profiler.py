@@ -143,6 +143,13 @@ class WorkerProfiler:
                 if field_name:
                     setattr(self._current_batch, field_name, elapsed_ms)
 
+    def batch_active(self, batch_id: int) -> bool:
+        """Return True if begin_batch has been called for batch_id and not yet ended."""
+        if self.verbosity < 3:
+            return False
+        with self._lock:
+            return self._current_batch is not None and self._current_batch.batch_id == batch_id
+
     def begin_batch(self, batch_id: int) -> None:
         """Start a per-batch record (only used at verbosity=3)."""
         if self.verbosity < 3:

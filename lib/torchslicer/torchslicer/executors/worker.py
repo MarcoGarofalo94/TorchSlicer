@@ -382,18 +382,23 @@ class WorkerServicer(
             except OSError:
                 break
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            conn.settimeout(1.0)  # allows _tensor_stop to be checked on shutdown
             thread = threading.Thread(
                 target=self._handle_tensor_conn,
                 args=(conn, addr),
                 daemon=True,
             )
             thread.start()
-            self._tensor_threads.append(thread)
+            # Per-connection threads are daemon threads; do not track to avoid
+            # unbounded list growth across reconnections.
 
     def _handle_tensor_conn(self, conn: socket.socket, addr):
         try:
             while not self._tensor_stop.is_set():
-                kind, batch_id, tensor = _unpack_tensor_frame(conn)
+                try:
+                    kind, batch_id, tensor = _unpack_tensor_frame(conn)
+                except socket.timeout:
+                    continue  # check _tensor_stop, then retry read
                 generation = self._generation
                 if kind == "F":
                     self._pool.submit(self._forward_tensor, batch_id, tensor, generation)
@@ -733,7 +738,8 @@ class WorkerServicer(
         try:
             self._ensure_generation(generation, "forward_tensor", batch_id)
             self._before_runtime_phase("forward_tensor", batch_id)
-            self._profiler.begin_batch(batch_id)
+            if not self._profiler.batch_active(batch_id):
+                self._profiler.begin_batch(batch_id)
             self._profiler.mark_idle_end("fwd")
             with _tracer.span(
                 "torchslicer.tensor.h2d",
