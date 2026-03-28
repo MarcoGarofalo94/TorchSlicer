@@ -27,7 +27,7 @@ x-worker: &worker
   environment:
     - PYTHONUNBUFFERED=1
     - EXPERIMENT_CONFIG
-    - COORDINATOR_ADDRESS=coordinator:50054
+    - COORDINATOR_ADDRESS=${COORDINATOR_ADDRESS:-coordinator:50054}
     - DEVICE=${DEVICE:-auto}
     - PORT
     - WORKER_ADDRESS

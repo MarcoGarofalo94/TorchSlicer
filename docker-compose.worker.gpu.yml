@@ -1,0 +1,26 @@
+# GPU override for worker-only deployment.
+# Adds NVIDIA device reservations to each worker.
+#
+# Usage:
+#   docker compose -f docker-compose.worker.yml -f docker-compose.worker.gpu.yml up
+# Or via Makefile:
+#   make run-workers DEVICE=gpu COORDINATOR_ADDRESS=<host>:50054
+
+services:
+  worker1:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  worker2:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

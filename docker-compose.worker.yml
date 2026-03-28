@@ -1,0 +1,94 @@
+# Worker-only deployment — coordinator runs on the host or a remote machine.
+#
+# Pulls the pre-built image from ghcr.io; no local build or volume mounts.
+# All configuration is via environment variables (RunConfig env overrides).
+#
+# ── Typical usage ──────────────────────────────────────────────────────────────
+#
+#   One machine, multiple workers (testing):
+#     make run-workers COORDINATOR_ADDRESS=host.docker.internal:50054
+#
+#   One worker per remote machine (production):
+#     COORDINATOR_ADDRESS=<coordinator_ip>:50054 \
+#     WORKER_ADDRESS=<this_machine_ip>:50051 \
+#     DEVICE=cuda \
+#     docker compose -f docker-compose.worker.yml -f docker-compose.worker.gpu.yml up
+#
+#   Single docker run (no compose needed for one worker):
+#     docker run -d --name worker \
+#       -p 50051:50051 -p 50052:50052 \
+#       -e COORDINATOR_ADDRESS=<host>:50054 \
+#       -e WORKER_ADDRESS=<this_machine_ip>:50051 \
+#       -e DEVICE=cuda \
+#       ghcr.io/marcogarofalo94/torchslicer:gpu
+#
+# ── Configuration ──────────────────────────────────────────────────────────────
+#
+#   Required:
+#     COORDINATOR_ADDRESS  host:port where the coordinator is reachable
+#
+#   Optional (all map to RunConfig via env overrides):
+#     WORKER_ADDRESS       <ip>:50051 — how the coordinator reaches THIS worker
+#                          (auto-derived from container hostname if not set;
+#                          set explicitly when hostname isn't routable)
+#     DEVICE               auto | cuda | cpu | mps  (default: auto)
+#     TENSOR_TRANSPORT     grpc | tcp                (default: grpc)
+#     TENSOR_PORT_OFFSET   offset added to worker port for TCP tensor server (default: 1)
+#     WORKER_TAGS          comma-separated capability tags  e.g. gpu,high-memory
+#     EXPERIMENT_CONFIG    path to YAML config (mount it via -v if needed)
+#
+# ── Ports ──────────────────────────────────────────────────────────────────────
+#
+#   50051 — worker gRPC server (coordinator → worker RPCs)
+#   50052 — TCP tensor server  (port 50051 + TENSOR_PORT_OFFSET=1)
+#
+#   When running multiple workers on the same machine, offset with WORKER_PORT / TENSOR_PORT:
+#     WORKER_PORT=50053 TENSOR_PORT=50054 docker compose ... --profile worker2 up
+#   (See worker2 service below.)
+
+services:
+  worker1:
+    image: ghcr.io/marcogarofalo94/torchslicer:${IMAGE_TAG:-cpu}
+    container_name: ts-worker1
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS           # required: <host>:50054
+      - WORKER_ADDRESS                # optional: <this_machine_ip>:50051
+      - DEVICE=${DEVICE:-auto}
+      - TENSOR_TRANSPORT
+      - TENSOR_PORT_OFFSET
+      - WORKER_TAGS
+      - EXPERIMENT_CONFIG
+    ports:
+      - "50051:50051"   # gRPC
+      - "50052:50052"   # TCP tensor transport
+    # No volume mounts — code and library are baked into the image.
+    # Config via EXPERIMENT_CONFIG env var or individual env vars above.
+    networks:
+      - torchslicer-workers
+
+  # Second worker for same-machine testing. Uses offset ports so worker1's
+  # ports aren't blocked. Coordinator must know this worker's address as
+  # WORKER_ADDRESS=<host>:50053.
+  worker2:
+    image: ghcr.io/marcogarofalo94/torchslicer:${IMAGE_TAG:-cpu}
+    container_name: ts-worker2
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_ADDRESS
+      - WORKER_ADDRESS=${WORKER2_ADDRESS:-}   # set to <host>:50053 if auto-derive fails
+      - PORT=50053                            # tells run_worker() to bind 50053
+      - DEVICE=${DEVICE:-auto}
+      - TENSOR_TRANSPORT
+      - TENSOR_PORT_OFFSET
+      - WORKER_TAGS
+      - EXPERIMENT_CONFIG
+    ports:
+      - "50053:50053"   # gRPC (offset)
+      - "50054:50054"   # TCP tensor transport (50053 + 1)
+    networks:
+      - torchslicer-workers
+
+networks:
+  torchslicer-workers:
+    driver: bridge

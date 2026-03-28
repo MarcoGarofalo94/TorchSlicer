@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir \
         grpcio==1.64.0 \
         grpcio-tools==1.64.0 \
         protobuf \
+        pyyaml \
         fastapi==0.104.1 \
         "uvicorn[standard]==0.24.0" \
         requests==2.31.0 \
@@ -22,6 +23,17 @@ RUN pip install --no-cache-dir \
 # ── Layer 3: torchslicer library (invalidated when lib/ changes) ───────────────
 COPY lib/torchslicer /usr/local/lib/torchslicer
 RUN pip install --no-cache-dir -e /usr/local/lib/torchslicer
+
+# ── Layer 4: compile proto files at build time ─────────────────────────────────
+# The entrypoint also recompiles on startup, which is needed for dev (volume
+# mount overwrites this layer). For production images with no volume mount,
+# this layer is used directly — no startup overhead.
+RUN python3 -m grpc_tools.protoc \
+        -I /usr/local/lib/torchslicer \
+        --python_out=/usr/local/lib/torchslicer \
+        --grpc_python_out=/usr/local/lib/torchslicer \
+        torchslicer/transport/grpc/coordinator/coordinator_service.proto \
+        torchslicer/transport/grpc/worker/worker_service.proto
 
 COPY docker-images/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

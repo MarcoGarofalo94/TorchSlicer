@@ -1,8 +1,13 @@
 #!/bin/bash
 set -e
 
-# Recompile proto files from the library root so gencode/runtime versions always match.
-# The library is installed at /usr/local/lib/torchslicer (editable install via volume mount).
+# Recompile proto files so gencode/runtime versions always match.
+#
+# Why here AND in the Dockerfile:
+#   Production images (no volume mount) use the protos compiled at build time.
+#   Dev images mount ./lib/torchslicer over /usr/local/lib/torchslicer, which
+#   replaces the Dockerfile-compiled files with the local source tree.
+#   This compile step regenerates them against the installed grpcio version.
 python3 -m grpc_tools.protoc \
     -I /usr/local/lib/torchslicer \
     --python_out=/usr/local/lib/torchslicer \
