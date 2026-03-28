@@ -34,6 +34,10 @@ try:
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+    from opentelemetry.propagate import set_global_textmap
+    from opentelemetry.propagators.composite import CompositePropagator
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+    from opentelemetry.baggage.propagation import W3CBaggagePropagator
     _OTEL_AVAILABLE = True
 except ImportError:
     pass
@@ -93,6 +97,13 @@ def configure(
         provider.add_span_processor(BatchSpanProcessor(exporter))
         _otel_trace.set_tracer_provider(provider)
         _tracer = _otel_trace.get_tracer("torchslicer")
+        # W3C TraceContext propagator — required for inject()/extract() to write/read
+        # the 'traceparent' header in gRPC metadata.  Without this, inject() is a no-op
+        # and every span appears as an orphaned root in Phoenix.
+        set_global_textmap(CompositePropagator([
+            TraceContextTextMapPropagator(),
+            W3CBaggagePropagator(),
+        ]))
         # Flush all pending spans on process exit so short-lived processes
         # (e.g. coordinator with keep_alive=false) don't drop spans.
         atexit.register(provider.shutdown)
@@ -117,13 +128,24 @@ def is_enabled() -> bool:
 
 
 @contextmanager
-def span(name: str, **attrs):
+def span(name: str, *, kind: str | None = None, **attrs):
     """
     Context manager for a traced span.
 
+    Parameters
+    ----------
+    name:
+        Span name.
+    kind:
+        Optional OpenInference span kind (e.g. ``"CHAIN"``, ``"TOOL"``).
+        Sets the ``openinference.span.kind`` attribute, which controls how
+        Phoenix labels the span in its chain view.
+    **attrs:
+        Additional span attributes (coerced to OTEL-supported types).
+
     Usage::
 
-        with tracer.span("worker.forward", batch_id=42, shape="(32,64)") as s:
+        with tracer.span("worker.forward", kind="TOOL", batch_id=42) as s:
             output = layer(input)
             if s:
                 s.set_attribute("output_shape", str(output.shape))
@@ -140,6 +162,9 @@ def span(name: str, **attrs):
 
     try:
         with _tracer.start_as_current_span(name) as s:
+            # Set OpenInference span kind (for Phoenix chain view)
+            if kind is not None:
+                _safe_set(s, "openinference.span.kind", kind.upper())
             # Set initial attributes
             for k, v in attrs.items():
                 _safe_set(s, k, v)

@@ -781,6 +781,7 @@ class WorkerServicer(
     def _run_forward_stage(self, batch_id: int, tensor: torch.Tensor, generation: int, aux: dict):
         with _tracer.span(
             "torchslicer.worker.forward",
+            kind="TOOL",
             batch_id=batch_id,
             worker=_HOSTNAME,
             is_last=self.is_last,
@@ -980,6 +981,7 @@ class WorkerServicer(
 
         with _tracer.span(
             "torchslicer.worker.backward",
+            kind="TOOL",
             batch_id=batch_id,
             worker=_HOSTNAME,
             is_last=False,

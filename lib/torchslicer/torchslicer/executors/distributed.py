@@ -477,7 +477,7 @@ class DistributedExecutor(BaseExecutor):
 
         epoch_t0 = time.perf_counter()
 
-        with tracer.span("torchslicer.epoch", epoch=epoch, n_workers=len(self._proxies)):
+        with tracer.span("torchslicer.epoch", kind="CHAIN", epoch=epoch, n_workers=len(self._proxies)):
             iter_t0 = time.perf_counter()
             for inputs, labels in data_loader:
                 data_load_total_ms += (time.perf_counter() - iter_t0) * 1000.0
@@ -491,6 +491,7 @@ class DistributedExecutor(BaseExecutor):
                           else "multimodal")
                 with tracer.span(
                     "torchslicer.batch",
+                    kind="CHAIN",
                     epoch=epoch,
                     batch_id=batch_id,
                     batch_index=n_batches,
