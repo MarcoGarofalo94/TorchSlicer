@@ -44,6 +44,7 @@ _LOG = get_logger("torchslicer.worker")
 _FRAME_HEADER = struct.Struct("!cIBH")
 _SHAPE_ITEM = struct.Struct("!q")
 _PAYLOAD_LEN = struct.Struct("!Q")
+_HOSTNAME = socket.gethostname()
 
 
 def _channel(addr):
@@ -206,13 +207,13 @@ class _TensorPeerClient:
 
     def send_tensor(self, kind: bytes, batch_id: int, tensor: torch.Tensor) -> None:
         header, shape_bytes, payload_len, payload = _pack_tensor_frame(kind, batch_id, tensor)
+        # Coalesce the small fixed-size fields into one syscall; payload is sent separately
+        # because it can be hundreds of KB and is already a memoryview (zero-copy).
+        meta = header + shape_bytes + payload_len
         with self._lock:
             self._ensure_connected()
             try:
-                self._sock.sendall(header)
-                if shape_bytes:
-                    self._sock.sendall(shape_bytes)
-                self._sock.sendall(payload_len)
+                self._sock.sendall(meta)
                 self._sock.sendall(payload)
             except Exception as exc:
                 self.close()
@@ -539,7 +540,7 @@ class WorkerServicer(
 
             with _tracer.span(
                 "torchslicer.worker.init",
-                worker=socket.gethostname(),
+                worker=_HOSTNAME,
                 layers=", ".join(layer_names),
                 n_layers=len(layer_names),
                 is_last=self.is_last,
@@ -551,11 +552,11 @@ class WorkerServicer(
                 pass
 
             return worker_service_pb2.StatusMessage(
-                ok=True, message="Initialized", hostname=socket.gethostname())
+                ok=True, message="Initialized", hostname=_HOSTNAME)
         except Exception as e:
             _LOG.exception("worker init failed: %s", e)
             return worker_service_pb2.StatusMessage(
-                ok=False, message=str(e), hostname=socket.gethostname())
+                ok=False, message=str(e), hostname=_HOSTNAME)
 
     # ── shutdown ───────────────────────────────────────────────────────────────
 
@@ -572,7 +573,7 @@ class WorkerServicer(
                 except Exception as e:
                     _LOG.exception("shutdown checkpoint save failed: %s", e)
 
-            _LOG.info("worker stopping hostname=%s", socket.gethostname())
+            _LOG.info("worker stopping hostname=%s", _HOSTNAME)
             self.stop_tensor_server()
             if self._server:
                 self._server.stop(grace=1)
@@ -694,14 +695,14 @@ class WorkerServicer(
             with _tracer.span(
                 "torchslicer.tensor.deserialize",
                 batch_id=batch_id,
-                worker=socket.gethostname(),
+                worker=_HOSTNAME,
                 source="input",
             ):
                 tensor_cpu = deserialize_tensor(request.input)
             with _tracer.span(
                 "torchslicer.tensor.h2d",
                 batch_id=batch_id,
-                worker=socket.gethostname(),
+                worker=_HOSTNAME,
                 source="input",
                 device=str(self.device),
             ):
@@ -713,14 +714,14 @@ class WorkerServicer(
                     with _tracer.span(
                         "torchslicer.tensor.deserialize",
                         batch_id=batch_id,
-                        worker=socket.gethostname(),
+                        worker=_HOSTNAME,
                         source=f"aux:{k}",
                     ):
                         aux_cpu = deserialize_tensor(v)
                     with _tracer.span(
                         "torchslicer.tensor.h2d",
                         batch_id=batch_id,
-                        worker=socket.gethostname(),
+                        worker=_HOSTNAME,
                         source=f"aux:{k}",
                         device=str(self.device),
                     ):
@@ -744,7 +745,7 @@ class WorkerServicer(
             with _tracer.span(
                 "torchslicer.tensor.h2d",
                 batch_id=batch_id,
-                worker=socket.gethostname(),
+                worker=_HOSTNAME,
                 source="input_tcp",
                 device=str(self.device),
             ):
@@ -761,7 +762,7 @@ class WorkerServicer(
         with _tracer.span(
             "torchslicer.worker.forward",
             batch_id=batch_id,
-            worker=socket.gethostname(),
+            worker=_HOSTNAME,
             is_last=self.is_last,
             input_shape=str(tuple(tensor.shape)),
         ) as s:
@@ -797,7 +798,7 @@ class WorkerServicer(
                 with _tracer.span(
                     "torchslicer.tcp.forward_send",
                     batch_id=batch_id,
-                    worker=socket.gethostname(),
+                    worker=_HOSTNAME,
                     peer=self.next_worker,
                 ):
                     self._next_tensor.send_tensor(b"F", batch_id, out)
@@ -805,7 +806,7 @@ class WorkerServicer(
             with _tracer.span(
                 "torchslicer.rpc.forward_send",
                 batch_id=batch_id,
-                worker=socket.gethostname(),
+                worker=_HOSTNAME,
                 peer=self.next_worker,
             ):
                 self._next_stub.forward(worker_service_pb2.ForwardRequest(
@@ -829,14 +830,14 @@ class WorkerServicer(
                 with _tracer.span(
                     "torchslicer.tensor.deserialize",
                     batch_id=batch_id,
-                    worker=socket.gethostname(),
+                    worker=_HOSTNAME,
                     source="label",
                 ):
                     label_cpu = deserialize_tensor(request.label)
                 with _tracer.span(
                     "torchslicer.tensor.h2d",
                     batch_id=batch_id,
-                    worker=socket.gethostname(),
+                    worker=_HOSTNAME,
                     source="label",
                     device=str(self.device),
                 ):
@@ -852,14 +853,14 @@ class WorkerServicer(
                 with _tracer.span(
                     "torchslicer.tensor.deserialize",
                     batch_id=batch_id,
-                    worker=socket.gethostname(),
+                    worker=_HOSTNAME,
                     source="input_last",
                 ):
                     tensor_cpu = deserialize_tensor(request.input)
                 with _tracer.span(
                     "torchslicer.tensor.h2d",
                     batch_id=batch_id,
-                    worker=socket.gethostname(),
+                    worker=_HOSTNAME,
                     source="input_last",
                     device=str(self.device),
                 ):
@@ -867,7 +868,7 @@ class WorkerServicer(
                 with _tracer.span(
                     "torchslicer.worker.forward",
                     batch_id=batch_id,
-                    worker=socket.gethostname(),
+                    worker=_HOSTNAME,
                     is_last=True,
                     input_shape=str(tuple(tensor.shape)),
                 ):
@@ -903,14 +904,14 @@ class WorkerServicer(
             with _tracer.span(
                 "torchslicer.tensor.deserialize",
                 batch_id=batch_id,
-                worker=socket.gethostname(),
+                worker=_HOSTNAME,
                 source="gradient",
             ):
                 grad_cpu = deserialize_tensor(request.gradient)
             with _tracer.span(
                 "torchslicer.tensor.h2d",
                 batch_id=batch_id,
-                worker=socket.gethostname(),
+                worker=_HOSTNAME,
                 source="gradient",
                 device=str(self.device),
             ):
@@ -933,7 +934,7 @@ class WorkerServicer(
             with _tracer.span(
                 "torchslicer.tensor.h2d",
                 batch_id=batch_id,
-                worker=socket.gethostname(),
+                worker=_HOSTNAME,
                 source="gradient_tcp",
                 device=str(self.device),
             ):
@@ -960,7 +961,7 @@ class WorkerServicer(
         with _tracer.span(
             "torchslicer.worker.backward",
             batch_id=batch_id,
-            worker=socket.gethostname(),
+            worker=_HOSTNAME,
             is_last=False,
         ):
             with self._profiler.phase("backward"):
@@ -976,8 +977,6 @@ class WorkerServicer(
                     self.layer.optimize()
 
         del out
-        if is_last_micro and self.device.type == "cuda":
-            torch.cuda.empty_cache()
         self._send_backward(batch_id, grad, is_last_micro, generation)
 
     def _run_backward_last(self, batch_id: int, out: torch.Tensor,
@@ -1000,17 +999,22 @@ class WorkerServicer(
             if is_last_micro:
                 avg_loss = self._micro_losses.pop(full_batch_id) / n_micro
                 self._ensure_generation(generation, "backward_last", batch_id)
-                self._coord_stub.report_metrics(coordinator_service_pb2.MetricsMessage(
-                    batch_id=batch_id,
-                    loss=avg_loss,
-                    worker=socket.gethostname(),
-                    run_id=self._run_id,
-                ))
+                _stub, _run_id = self._coord_stub, self._run_id
+                threading.Thread(
+                    target=_stub.report_metrics,
+                    args=(coordinator_service_pb2.MetricsMessage(
+                        batch_id=batch_id,
+                        loss=avg_loss,
+                        worker=_HOSTNAME,
+                        run_id=_run_id,
+                    ),),
+                    daemon=True,
+                ).start()
 
             with _tracer.span(
                 "torchslicer.worker.backward",
                 batch_id=batch_id,
-                worker=socket.gethostname(),
+                worker=_HOSTNAME,
                 is_last=True,
                 loss=loss_unscaled.item(),
             ):
@@ -1026,8 +1030,6 @@ class WorkerServicer(
                         self.layer.optimize()
 
             del out, label, loss, loss_unscaled
-            if is_last_micro and self.device.type == "cuda":
-                torch.cuda.empty_cache()
             self._send_backward(batch_id, grad, is_last_micro, generation)
         except _StaleWorkError as e:
             _LOG.info("%s", e)
@@ -1047,7 +1049,7 @@ class WorkerServicer(
                         with _tracer.span(
                             "torchslicer.tcp.backward_send",
                             batch_id=batch_id,
-                            worker=socket.gethostname(),
+                            worker=_HOSTNAME,
                             peer=self.prev_worker,
                         ):
                             self._prev_tensor.send_tensor(b"B", batch_id, grad)
@@ -1055,7 +1057,7 @@ class WorkerServicer(
                         with _tracer.span(
                             "torchslicer.rpc.backward_send",
                             batch_id=batch_id,
-                            worker=socket.gethostname(),
+                            worker=_HOSTNAME,
                             peer=self.prev_worker,
                         ):
                             self._prev_stub.backward(worker_service_pb2.BackwardRequest(
@@ -1098,7 +1100,7 @@ class WorkerServicer(
                         worker_index=self._worker_index,
                         batch_id=batch_id,
                         run_id=self._run_id,
-                        worker=socket.gethostname(),
+                        worker=_HOSTNAME,
                         phase=phase,
                         message=str(exc),
                         traceback=tb,
@@ -1215,9 +1217,8 @@ def run_worker(
     if coordinator_addr is None:
         coordinator_addr = os.environ.get("COORDINATOR_ADDRESS") or None
 
-    hostname = socket.gethostname()
     if worker_address is None:
-        worker_address = resolve_worker_address(port, hostname=hostname)
+        worker_address = resolve_worker_address(port, hostname=_HOSTNAME)
 
     if device is not None:
         os.environ["DEVICE"] = device
@@ -1247,13 +1248,13 @@ def run_worker(
     servicer.set_server(server)
     servicer.start_tensor_server(port + servicer._tensor_port_offset)
     tag_str = f"  tags=[{', '.join(tags)}]" if tags else ""
-    _LOG.info("worker started port=%s hostname=%s device=%s%s", port, hostname, resolved_device, tag_str)
+    _LOG.info("worker started port=%s hostname=%s device=%s%s", port, _HOSTNAME, resolved_device, tag_str)
 
     # ── announce to coordinator (centralized topology only) ─────────────────
     if coordinator_addr:
         from ..discovery import NodeInfo, announce_to_coordinator
         node_info = NodeInfo(
-            node_id=hostname,
+            node_id=_HOSTNAME,
             address=worker_address,
             device=resolved_device,
             memory_mb=memory_mb,
@@ -1304,4 +1305,4 @@ def run_worker(
     else:
         server.wait_for_termination()
 
-    _LOG.info("worker terminated cleanly hostname=%s", hostname)
+    _LOG.info("worker terminated cleanly hostname=%s", _HOSTNAME)
