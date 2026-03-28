@@ -180,6 +180,93 @@ def _safe_set(s, key: str, value) -> None:
         pass
 
 
+def inject_context_bytes() -> bytes:
+    """Serialize the current span context to a W3C traceparent ASCII string.
+
+    Used to propagate trace context over transports that don't support gRPC
+    metadata (e.g. the raw TCP tensor channel).  Returns ``b''`` immediately
+    when tracing is disabled — the caller pays no overhead beyond the check.
+    """
+    if _tracer is None:
+        return b""
+    try:
+        from opentelemetry import propagate as _prop
+        carrier: dict = {}
+        _prop.inject(carrier)
+        tp = carrier.get("traceparent", "")
+        return tp.encode("ascii") if tp else b""
+    except Exception:
+        return b""
+
+
+class _ExtractContextCM:
+    """Attach a propagated trace context for the lifetime of a ``with`` block.
+
+    Instantiated by :func:`extract_context`.  When tracing is disabled or
+    ``ctx_bytes`` is empty this is a zero-overhead no-op object.
+    """
+    __slots__ = ("_ctx_bytes", "_token")
+
+    def __init__(self, ctx_bytes: bytes):
+        self._ctx_bytes = ctx_bytes
+        self._token = None
+
+    def __enter__(self):
+        if not self._ctx_bytes or _tracer is None:
+            return self
+        try:
+            from opentelemetry import propagate as _prop, context as _ctx
+            carrier = {"traceparent": self._ctx_bytes.decode("ascii")}
+            self._token = _ctx.attach(_prop.extract(carrier))
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, *_):
+        if self._token is not None:
+            try:
+                from opentelemetry import context as _ctx
+                _ctx.detach(self._token)
+            except Exception:
+                pass
+        return False
+
+
+def extract_context(ctx_bytes: bytes) -> _ExtractContextCM:
+    """Return a context manager that restores a propagated trace context.
+
+    Designed for the TCP tensor transport: the receiver calls this with the
+    bytes returned by the sender's :func:`inject_context_bytes` call, making
+    any spans created inside the block children of the original coordinator
+    batch span.  Zero-overhead no-op when tracing is disabled.
+    """
+    return _ExtractContextCM(ctx_bytes)
+
+
+def propagate_to_thread(fn):
+    """Wrap *fn* so it inherits the current OTEL context when run in a new thread.
+
+    Python's ``threading.Thread`` does not propagate ``contextvars``, so
+    gRPC callbacks fired from worker threads lose their parent span.  Wrap the
+    target with this before passing it to ``threading.Thread(target=...)``.
+    Returns *fn* unchanged when tracing is disabled.
+    """
+    if _tracer is None:
+        return fn
+    try:
+        from opentelemetry import context as _ctx
+        _current = _ctx.get_current()
+        def _wrapped(*args, **kwargs):
+            token = _ctx.attach(_current)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _ctx.detach(token)
+        return _wrapped
+    except Exception:
+        return fn
+
+
 def auto_configure_if_env() -> None:
     """
     Call this at worker startup: configures tracing only if
