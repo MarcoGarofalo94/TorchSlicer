@@ -1162,10 +1162,10 @@ class DistributedExecutor(BaseExecutor):
         """Send the forward input tensor to worker0, using TCP when available and no aux inputs."""
         tcp_client = self._proxies[0]._tensor_client
         if tcp_client is not None and not aux:
-            with tracer.span("torchslicer.tcp.forward_send", batch_id=batch_id, target="first_worker_input"):
+            with tracer.span("torchslicer.coordinator.input_send", batch_id=batch_id, transport="tcp"):
                 tcp_client.send_tensor(b"F", batch_id, tensor)
         else:
-            with tracer.span("torchslicer.rpc.forward_send", batch_id=batch_id, target="first_worker_input"):
+            with tracer.span("torchslicer.coordinator.input_send", batch_id=batch_id, transport="grpc"):
                 self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
                     batch_id=batch_id,
                     input=_serialize_tensor(tensor),
@@ -1187,14 +1187,14 @@ class DistributedExecutor(BaseExecutor):
             ]
             for m in range(M):
                 mbid = batch_id * M + m
-                with tracer.span("torchslicer.rpc.forward_send", batch_id=mbid, target="last_worker_label"):
+                with tracer.span("torchslicer.coordinator.label_send", batch_id=mbid, transport="grpc"):
                     self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
                         batch_id=mbid,
                         label=_serialize_tensor(micro_labels[m]),
                     ))
                 self._send_input_to_first_worker(mbid, micro_mains[m], micro_aux[m])
         else:
-            with tracer.span("torchslicer.rpc.forward_send", batch_id=batch_id, target="last_worker_label"):
+            with tracer.span("torchslicer.coordinator.label_send", batch_id=batch_id, transport="grpc"):
                 self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
                     batch_id=batch_id,
                     label=_serialize_tensor(labels),

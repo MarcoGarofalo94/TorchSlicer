@@ -817,18 +817,20 @@ class WorkerServicer(
         try:
             if self._tensor_transport == "tcp" and self._next_tensor is not None:
                 with _tracer.span(
-                    "torchslicer.tcp.forward_send",
+                    "torchslicer.worker.activation_send",
                     batch_id=batch_id,
                     worker=_HOSTNAME,
                     peer=self.next_worker,
+                    transport="tcp",
                 ):
                     self._next_tensor.send_tensor(b"F", batch_id, out)
                 return
             with _tracer.span(
-                "torchslicer.rpc.forward_send",
+                "torchslicer.worker.activation_send",
                 batch_id=batch_id,
                 worker=_HOSTNAME,
                 peer=self.next_worker,
+                transport="grpc",
             ):
                 self._next_stub.forward(worker_service_pb2.ForwardRequest(
                     batch_id=batch_id,
@@ -1069,18 +1071,20 @@ class WorkerServicer(
                 try:
                     if self._tensor_transport == "tcp" and self._prev_tensor is not None:
                         with _tracer.span(
-                            "torchslicer.tcp.backward_send",
+                            "torchslicer.worker.gradient_send",
                             batch_id=batch_id,
                             worker=_HOSTNAME,
                             peer=self.prev_worker,
+                            transport="tcp",
                         ):
                             self._prev_tensor.send_tensor(b"B", batch_id, grad)
                     else:
                         with _tracer.span(
-                            "torchslicer.rpc.backward_send",
+                            "torchslicer.worker.gradient_send",
                             batch_id=batch_id,
                             worker=_HOSTNAME,
                             peer=self.prev_worker,
+                            transport="grpc",
                         ):
                             self._prev_stub.backward(worker_service_pb2.BackwardRequest(
                                 batch_id=batch_id,
