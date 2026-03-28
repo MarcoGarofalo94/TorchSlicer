@@ -59,10 +59,8 @@ def serve():
           f"epochs={cfg.training.epochs}  gpipe={cfg.pipeline.use_gpipe}  "
           f"n_micro={cfg.pipeline.n_micro}  checkpoint={cfg.checkpoint.enabled}")
 
-    coordinator_addr = os.environ.get("COORDINATOR_ADDRESS", f"coordinator:{args.port}")
-    coordinator_bind_addr = os.environ.get(
-        "COORDINATOR_BIND_ADDRESS", f"0.0.0.0:{args.port}"
-    )
+    coordinator_addr = cfg.network.coordinator_address or f"coordinator:{args.port}"
+    coordinator_bind_addr = cfg.network.coordinator_bind_address
     n = cfg.discovery.n_workers
 
     # Select discovery backend from config
@@ -89,21 +87,10 @@ def serve():
         callbacks.append(crash_callback)
 
     sliced = ts.slice(build_model(), strategy="uniform", n=n, executor=executor)
-    sliced.train(
-        get_dataset(),
-        cfg.training.optimizer,
-        cfg.training.criterion,
-        epochs          = cfg.training.epochs,
-        verbose         = True,
-        mixed_precision = cfg.training.mixed_precision,
-        use_gpipe       = cfg.pipeline.use_gpipe,
-        n_micro_batches = cfg.pipeline.n_micro,
-        callbacks       = callbacks,
-        run_config      = cfg,
-    )
+    sliced.train(get_dataset(), callbacks=callbacks, run_config=cfg)
 
     run_dir = os.path.join(cfg.logging.dir, cfg.run_id) if cfg.logging.enabled else ""
-    keep_alive = os.environ.get("KEEP_ALIVE", "1").strip().lower() not in {"0", "false", "no"}
+    keep_alive = cfg.network.keep_alive
     if not keep_alive:
         print("[coordinator] run complete — exiting immediately (KEEP_ALIVE disabled)")
         if run_dir:

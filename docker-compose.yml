@@ -29,6 +29,9 @@ x-worker: &worker
     - EXPERIMENT_CONFIG
     - COORDINATOR_ADDRESS=coordinator:50054
     - DEVICE=${DEVICE:-auto}
+    - PORT
+    - WORKER_ADDRESS
+    - WORKER_TAGS
     - TENSOR_TRANSPORT
     - TENSOR_PORT_OFFSET
     - FAULT_KILL_EPOCH
@@ -56,6 +59,8 @@ services:
       - PYTHONUNBUFFERED=1
       - EXPERIMENT_CONFIG
       - KEEP_ALIVE
+      - COORDINATOR_ADDRESS
+      - COORDINATOR_BIND_ADDRESS
       - RUN_ID
       - N_WORKERS
       - HF_HOME=${HF_HOME:-/workspace/.cache/huggingface}

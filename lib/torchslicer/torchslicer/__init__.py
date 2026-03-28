@@ -17,6 +17,7 @@ from .discovery import CoordinatorDiscovery, announce_to_coordinator, StaticDisc
 from .config import (
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
+    NetworkConfig,
 )
 from .monitor import TrainingCallback, RunLogger
 from .core.stages import (
@@ -79,24 +80,51 @@ class SlicedModel:
     def train(
         self,
         data_loader,
-        optimizer,
-        criterion,
-        epochs: int = 1,
-        devices=None,
+        optimizer=None,
+        criterion=None,
+        *,
+        epochs: int = None,
         verbose: bool = False,
-        mixed_precision: bool = False,
-        use_gpipe: bool = False,
-        n_micro_batches: int = 4,
+        mixed_precision: bool = None,
+        use_gpipe: bool = None,
+        n_micro_batches: int = None,
         callbacks: list = None,
         run_config=None,
     ) -> list:
-        n_micro = n_micro_batches if use_gpipe else 1
+        """Train the sliced model.
+
+        When ``run_config`` is supplied all training parameters default to the
+        values in the config; explicit kwargs override individual fields::
+
+            # Everything from config
+            sliced.train(loader, run_config=cfg)
+
+            # Override just epochs
+            sliced.train(loader, epochs=5, run_config=cfg)
+
+            # Pure Python API (no config file)
+            sliced.train(loader, optimizer_cfg, criterion_cfg, epochs=10)
+        """
+        cfg = run_config
+        resolved_optimizer  = optimizer  or (cfg.training.optimizer  if cfg else None)
+        resolved_criterion  = criterion  or (cfg.training.criterion  if cfg else None)
+        resolved_epochs          = epochs          if epochs          is not None else (cfg.training.epochs          if cfg else 1)
+        resolved_mixed_precision = mixed_precision if mixed_precision is not None else (cfg.training.mixed_precision if cfg else False)
+        resolved_use_gpipe       = use_gpipe       if use_gpipe       is not None else (cfg.pipeline.use_gpipe       if cfg else False)
+        resolved_n_micro         = n_micro_batches if n_micro_batches is not None else (cfg.pipeline.n_micro         if cfg else 4)
+
+        if resolved_optimizer is None:
+            raise ValueError("optimizer must be provided directly or via run_config.training.optimizer")
+        if resolved_criterion is None:
+            raise ValueError("criterion must be provided directly or via run_config.training.criterion")
+
+        n_micro = resolved_n_micro if resolved_use_gpipe else 1
         self.executor.setup(
             self.graph,
             self.partitions,
-            optimizer,
-            criterion,
-            mixed_precision=mixed_precision,
+            resolved_optimizer,
+            resolved_criterion,
+            mixed_precision=resolved_mixed_precision,
             n_micro_batches=n_micro,
             callbacks=callbacks,
             model_name=self._model_name,
@@ -105,7 +133,7 @@ class SlicedModel:
         )
         history = []
         max_retries = getattr(self.executor, '_max_fault_retries', 0)
-        for epoch in range(1, epochs + 1):
+        for epoch in range(1, resolved_epochs + 1):
             for attempt in range(max_retries + 1):
                 try:
                     history.append(self.executor.train_epoch(

@@ -18,6 +18,8 @@ from torch import nn, optim
 
 from ..config import RunConfig
 from ..core.split_layer import SplitLayer
+
+_UNSET = object()  # sentinel: distinguish "not provided" from explicit None
 from ..monitor import tracer as _tracer
 from ..monitor import WorkerProfiler
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
@@ -1155,7 +1157,7 @@ class WorkerServicer(
 
 def run_worker(
     port=None,
-    coordinator_addr=None,
+    coordinator_addr=_UNSET,
     worker_address=None,
     device=None,
     servicer_class=None,
@@ -1168,10 +1170,11 @@ def run_worker(
     Args:
         port:             Listening port. Env: ``PORT`` (default 50051).
         coordinator_addr: Coordinator gRPC address for worker registration.
-                          Env: ``COORDINATOR_ADDRESS``. Pass ``None`` (or leave
-                          ``COORDINATOR_ADDRESS`` unset) to skip registration —
-                          required for P2P followers that wait for ``init()``
-                          from the driver instead of self-registering.
+                          Defaults to ``RunConfig.network.coordinator_address``
+                          (env: ``COORDINATOR_ADDRESS``). Pass ``None`` explicitly
+                          to skip registration — required for P2P followers that
+                          wait for ``init()`` from the driver instead of
+                          self-registering.
         worker_address:   Address advertised to the coordinator / peers.
                           Env: ``WORKER_ADDRESS`` (default ``hostname:port``).
         device:           ``"auto"``, ``"cuda"``, ``"mps"``, or ``"cpu"``.
@@ -1206,31 +1209,40 @@ def run_worker(
     from ..monitor import tracer as _tracer
 
     _tracer.auto_configure_if_env()
-    configure_process_logging(os.environ.get("LOG_LEVEL"))
 
-    # ── resolve args / env vars ─────────────────────────────────────────────
+    # ── load config (YAML + env overrides) ─────────────────────────────────
+    cfg = RunConfig.load()
+    configure_process_logging(cfg.logging.level)
+
+    # ── resolve port ────────────────────────────────────────────────────────
     if port is None:
-        port = int(os.environ.get("PORT", 50051))
+        port = cfg.network.worker_port
     port = int(port)
 
-    # coordinator_addr=None → skip registration (P2P followers, static-discovery)
-    if coordinator_addr is None:
-        coordinator_addr = os.environ.get("COORDINATOR_ADDRESS") or None
+    # ── resolve coordinator address ─────────────────────────────────────────
+    # Explicit coordinator_addr=None → always skip registration (P2P followers).
+    # Default (_UNSET) → use config value; None config value → skip registration.
+    if coordinator_addr is _UNSET:
+        coordinator_addr = cfg.network.coordinator_address or None
 
+    # ── resolve worker address ──────────────────────────────────────────────
     if worker_address is None:
-        worker_address = resolve_worker_address(port, hostname=_HOSTNAME)
+        worker_address = cfg.network.worker_address or resolve_worker_address(port, hostname=_HOSTNAME)
 
+    # ── resolve device ──────────────────────────────────────────────────────
     if device is not None:
         os.environ["DEVICE"] = device
+    elif cfg.network.device and cfg.network.device != "auto":
+        os.environ["DEVICE"] = cfg.network.device
     resolved_device = resolve_device()
     memory_mb       = get_available_memory_mb(resolved_device)
 
-    # WORKER_TAGS=gpu,high-memory  →  ["gpu", "high-memory"]
-    raw_tags = os.environ.get("WORKER_TAGS", "").strip()
-    tags = [t.strip() for t in raw_tags.split(",") if t.strip()] if raw_tags else []
+    # ── resolve worker tags ─────────────────────────────────────────────────
+    tags = list(cfg.network.worker_tags)
 
     # ── build servicer + gRPC server ────────────────────────────────────────
-    tensor_transport, tensor_port_offset = _load_transport_settings()
+    tensor_transport    = cfg.transport.tensor.strip().lower()
+    tensor_port_offset  = int(cfg.transport.tensor_port_offset)
 
     if servicer_class is None:
         servicer_class = WorkerServicer
@@ -1266,12 +1278,9 @@ def run_worker(
                 coordinator_addr,
                 node_info,
                 retry_policy=RetryPolicy(
-                    max_attempts=int(os.environ.get(
-                        "DISCOVERY_REGISTRATION_MAX_ATTEMPTS", "30")),
-                    delay_s=float(os.environ.get(
-                        "DISCOVERY_REGISTRATION_DELAY", "3.0")),
-                    rpc_timeout_s=float(os.environ.get(
-                        "DISCOVERY_REGISTRATION_RPC_TIMEOUT", "5.0")),
+                    max_attempts=cfg.discovery.registration_max_attempts,
+                    delay_s=cfg.discovery.registration_delay_s,
+                    rpc_timeout_s=cfg.discovery.registration_rpc_timeout_s,
                 ),
             )
             _LOG.info("registration complete run_id=%s worker_index=%s", result.run_id, result.worker_index)
@@ -1284,7 +1293,7 @@ def run_worker(
         # Re-registers periodically so that:
         #   (a) a restarted coordinator finds this worker without container restart
         #   (b) workers are reusable across training jobs without manual intervention
-        watchdog_interval = float(os.environ.get("DISCOVERY_WATCHDOG_INTERVAL", "15"))
+        watchdog_interval = cfg.discovery.watchdog_interval_s
         _shutdown_watchdog = threading.Event()
 
         def _watchdog():
