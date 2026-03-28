@@ -492,6 +492,7 @@ class DistributedExecutor(BaseExecutor):
                 with tracer.span(
                     "torchslicer.batch",
                     kind="CHAIN",
+                    new_trace=True,
                     epoch=epoch,
                     batch_id=batch_id,
                     batch_index=n_batches,

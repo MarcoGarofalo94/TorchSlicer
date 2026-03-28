@@ -128,7 +128,7 @@ def is_enabled() -> bool:
 
 
 @contextmanager
-def span(name: str, *, kind: str | None = None, **attrs):
+def span(name: str, *, kind: str | None = None, new_trace: bool = False, **attrs):
     """
     Context manager for a traced span.
 
@@ -140,6 +140,10 @@ def span(name: str, *, kind: str | None = None, **attrs):
         Optional OpenInference span kind (e.g. ``"CHAIN"``, ``"TOOL"``).
         Sets the ``openinference.span.kind`` attribute, which controls how
         Phoenix labels the span in its chain view.
+    new_trace:
+        If True, start this span as a new root trace (ignoring any current
+        span context).  Use this for logical units that should appear as
+        separate traces in Phoenix — e.g. one trace per training batch.
     **attrs:
         Additional span attributes (coerced to OTEL-supported types).
 
@@ -160,8 +164,15 @@ def span(name: str, *, kind: str | None = None, **attrs):
     t0 = time.perf_counter()
     _training_exc = None
 
+    # new_trace=True → detached context so this span starts a fresh trace root
     try:
-        with _tracer.start_as_current_span(name) as s:
+        from opentelemetry import context as _otel_ctx
+        _ctx = _otel_ctx.Context() if new_trace else None
+    except Exception:
+        _ctx = None
+
+    try:
+        with _tracer.start_as_current_span(name, context=_ctx) as s:
             # Set OpenInference span kind (for Phoenix chain view)
             if kind is not None:
                 _safe_set(s, "openinference.span.kind", kind.upper())
