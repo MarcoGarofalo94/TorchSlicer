@@ -20,6 +20,7 @@ If OTEL_EXPORTER_OTLP_ENDPOINT is not set and configure() is not called,
 every span() call is a zero-overhead no-op.
 """
 
+import atexit
 import os
 import time
 from contextlib import contextmanager
@@ -92,6 +93,9 @@ def configure(
         provider.add_span_processor(BatchSpanProcessor(exporter))
         _otel_trace.set_tracer_provider(provider)
         _tracer = _otel_trace.get_tracer("torchslicer")
+        # Flush all pending spans on process exit so short-lived processes
+        # (e.g. coordinator with keep_alive=false) don't drop spans.
+        atexit.register(provider.shutdown)
     except Exception as exc:
         # Don't let a misconfigured endpoint crash startup
         import warnings

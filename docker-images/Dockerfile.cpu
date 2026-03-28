@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir \
         opentelemetry-api>=1.24.0 \
         opentelemetry-sdk>=1.24.0 \
         opentelemetry-exporter-otlp-proto-grpc>=1.24.0 \
+        opentelemetry-instrumentation-grpc>=0.45b0 \
         peft>=0.10 \
         transformers>=4.40.0 \
         datasets>=2.18.0

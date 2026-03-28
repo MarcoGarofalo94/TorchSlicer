@@ -305,7 +305,9 @@ def resolve_worker_address(port: int, hostname: str | None = None) -> str:
 
     host = hostname or socket.gethostname()
     advertised = os.environ.get("WORKER_ADDRESS", "").strip()
-    return advertised or f"{host}:{port}"
+    if advertised:
+        return advertised if ":" in advertised else f"{advertised}:{port}"
+    return f"{host}:{port}"
 
 
 def get_available_memory_mb(device: str) -> int:
@@ -1243,7 +1245,11 @@ def run_worker(
 
     # ── resolve worker address ──────────────────────────────────────────────
     if worker_address is None:
-        worker_address = cfg.network.worker_address or resolve_worker_address(port, hostname=_HOSTNAME)
+        _raw = cfg.network.worker_address
+        if _raw:
+            worker_address = _raw if ":" in _raw else f"{_raw}:{port}"
+        else:
+            worker_address = resolve_worker_address(port, hostname=_HOSTNAME)
 
     # ── resolve device ──────────────────────────────────────────────────────
     if device is not None:
