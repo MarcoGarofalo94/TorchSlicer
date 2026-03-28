@@ -13,6 +13,7 @@ from ..core.split_layer import SplitLayer
 
 from .base import BaseExecutor
 from .startup import init_worker_with_retry
+from .worker import _TensorPeerClient, _tensor_addr
 from ..monitor import tracer
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
 from ..monitor.run_logger import RunLogger
@@ -212,10 +213,15 @@ class _WorkerProxy:
     name:         str
     address:      str
     worker_index: int
-    _stub: object = field(default=None, repr=False)
+    _stub:          object = field(default=None, repr=False)
+    _tensor_client: object = field(default=None, repr=False)
 
-    def connect(self):
+    def connect(self, tensor_transport: str = "grpc", tensor_port_offset: int = 1):
         self._stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.address))
+        if tensor_transport == "tcp":
+            self._tensor_client = _TensorPeerClient(
+                _tensor_addr(self.address, tensor_port_offset)
+            )
 
     def stub(self):
         return self._stub
@@ -368,7 +374,10 @@ class DistributedExecutor(BaseExecutor):
             for i, nd in enumerate(self._nodes)
         ]
         for proxy in self._proxies:
-            proxy.connect()
+            proxy.connect(
+                tensor_transport=cfg.transport.tensor,
+                tensor_port_offset=cfg.transport.tensor_port_offset,
+            )
 
         # Initialise RunLogger now that we have run_id and worker info
         if cfg.logging.enabled:
@@ -1147,6 +1156,20 @@ class DistributedExecutor(BaseExecutor):
             json.dump(payload, handle, indent=2)
         _LOG.info("checkpoint layout saved path=%s epoch=%s", path, epoch)
 
+    def _send_input_to_first_worker(self, batch_id: int, tensor: torch.Tensor, aux: dict) -> None:
+        """Send the forward input tensor to worker0, using TCP when available and no aux inputs."""
+        tcp_client = self._proxies[0]._tensor_client
+        if tcp_client is not None and not aux:
+            with tracer.span("torchslicer.tcp.forward_send", batch_id=batch_id, target="first_worker_input"):
+                tcp_client.send_tensor(b"F", batch_id, tensor)
+        else:
+            with tracer.span("torchslicer.rpc.forward_send", batch_id=batch_id, target="first_worker_input"):
+                self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
+                    batch_id=batch_id,
+                    input=_serialize_tensor(tensor),
+                    aux_inputs={k: _serialize_tensor(v) for k, v in aux.items()},
+                ))
+
     def _send_batch(self, batch_id: int, inputs, labels: torch.Tensor):
         main, aux = _unpack_inputs(inputs)
         M = self._n_micro
@@ -1167,21 +1190,11 @@ class DistributedExecutor(BaseExecutor):
                         batch_id=mbid,
                         label=_serialize_tensor(micro_labels[m]),
                     ))
-                with tracer.span("torchslicer.rpc.forward_send", batch_id=mbid, target="first_worker_input"):
-                    self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
-                        batch_id=mbid,
-                        input=_serialize_tensor(micro_mains[m]),
-                        aux_inputs={k: _serialize_tensor(v) for k, v in micro_aux[m].items()},
-                    ))
+                self._send_input_to_first_worker(mbid, micro_mains[m], micro_aux[m])
         else:
             with tracer.span("torchslicer.rpc.forward_send", batch_id=batch_id, target="last_worker_label"):
                 self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
                     batch_id=batch_id,
                     label=_serialize_tensor(labels),
                 ))
-            with tracer.span("torchslicer.rpc.forward_send", batch_id=batch_id, target="first_worker_input"):
-                self._proxies[0].stub().forward(worker_service_pb2.ForwardRequest(
-                    batch_id=batch_id,
-                    input=_serialize_tensor(main),
-                    aux_inputs={k: _serialize_tensor(v) for k, v in aux.items()},
-                ))
+            self._send_input_to_first_worker(batch_id, main, aux)
