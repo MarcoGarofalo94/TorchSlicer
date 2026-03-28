@@ -1,0 +1,63 @@
+# Phoenix tracing overlay — add this on top of any TorchSlicer compose stack.
+#
+# Starts Arize Phoenix as an OTLP collector and injects the endpoint into
+# coordinator and all workers.  Phoenix UI is available at http://localhost:6006.
+#
+# Usage:
+#   make run-phoenix CONFIG=experiments/resnet18_4gpu.yaml
+#
+# Or manually:
+#   docker compose -f docker-compose.yml \
+#                  -f examples/monitoring/docker-compose.phoenix.yml up
+#
+# Phoenix stores traces in memory by default (lost on restart).
+# To persist across runs, mount a volume:
+#   docker compose ... -f examples/monitoring/docker-compose.phoenix.persist.yml up
+
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://phoenix:4317
+
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: phoenix
+    ports:
+      - "6006:6006"   # Phoenix UI
+      - "4317:4317"   # OTLP gRPC (traces from coordinator + workers)
+    networks:
+      - torchslicer-net
+
+  coordinator:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: torchslicer-coordinator
+    depends_on:
+      - phoenix
+
+  worker1:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: torchslicer-worker1
+    depends_on:
+      - phoenix
+
+  worker2:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: torchslicer-worker2
+    depends_on:
+      - phoenix
+
+  worker3:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: torchslicer-worker3
+    depends_on:
+      - phoenix
+
+  worker4:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: torchslicer-worker4
+    depends_on:
+      - phoenix

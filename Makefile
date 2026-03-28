@@ -151,6 +151,28 @@ run-p2p-auto: _env ## Run P2P stack; tear down automatically on exit
 down-p2p: _env ## Stop and remove P2P stack
 	docker compose -f docker-compose.p2p.yml down
 
+# ── monitoring (Phoenix tracing) ───────────────────────────────────────────────
+#
+# Layered on top of the centralized stack.  Phoenix UI at http://localhost:6006.
+#
+# Examples:
+#   make run-phoenix CONFIG=experiments/resnet18_4gpu.yaml
+#   make run-phoenix DEVICE=gpu CONFIG=experiments/resnet18_4gpu.yaml
+
+_PHOENIX_OVERLAY = -f examples/monitoring/docker-compose.phoenix.yml
+
+.PHONY: run-phoenix
+run-phoenix: _env ## Run centralized stack + Phoenix tracing UI (http://localhost:6006). CONFIG=path  DEVICE=cpu|gpu
+	IMAGE_TAG=$(_IMAGE_TAG) EXPERIMENT_CONFIG=$(CONFIG) DEVICE=$(if $(filter gpu,$(DEVICE)),cuda,auto) \
+		KEEP_ALIVE=0 \
+		COORDINATOR_CMD='$(COORDINATOR_CMD)' \
+		WORKER_CMD='$(WORKER_CMD)' \
+		bash -lc 'status=0; docker compose -f docker-compose.yml $(_GPU_OVERRIDE_CENTRALIZED) $(_PHOENIX_OVERLAY) up --abort-on-container-exit || status=$$?; docker compose -f docker-compose.yml $(_GPU_OVERRIDE_CENTRALIZED) $(_PHOENIX_OVERLAY) down --remove-orphans; exit $$status'
+
+.PHONY: down-phoenix
+down-phoenix: _env ## Stop Phoenix stack
+	docker compose -f docker-compose.yml $(_PHOENIX_OVERLAY) down
+
 # ── utility ────────────────────────────────────────────────────────────────────
 
 .PHONY: list
