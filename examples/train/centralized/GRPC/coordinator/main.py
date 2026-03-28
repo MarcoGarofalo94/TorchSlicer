@@ -87,7 +87,7 @@ def serve():
         callbacks.append(crash_callback)
 
     sliced = ts.slice(build_model(), strategy="uniform", n=n, executor=executor)
-    sliced.train(get_dataset(), callbacks=callbacks, run_config=cfg)
+    sliced.train(get_dataset(), verbose=True, callbacks=callbacks, run_config=cfg)
 
     run_dir = os.path.join(cfg.logging.dir, cfg.run_id) if cfg.logging.enabled else ""
     keep_alive = cfg.network.keep_alive
