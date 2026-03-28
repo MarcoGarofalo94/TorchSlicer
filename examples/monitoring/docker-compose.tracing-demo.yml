@@ -1,0 +1,100 @@
+# Tracing demo — standalone 2-worker stack with Phoenix.
+#
+# Runs synthetic ResNet-18 training over TCP transport so every batch
+# produces a linked trace (coordinator batch → worker1 forward →
+# worker2 forward → worker2 backward → worker1 backward).
+#
+# Usage:
+#   make demo-tracing          # build image first with: make build-cpu
+#   make demo-tracing-down     # stop Phoenix when done exploring
+
+x-worker: &worker
+  image: torchslicer:cpu
+  user: "${UID}:${GID}"
+  environment:
+    - PYTHONUNBUFFERED=1
+    - EXPERIMENT_CONFIG=experiments/bench_resnet_synth_split.yaml
+    - COORDINATOR_ADDRESS=coordinator:50054
+    - DEVICE=auto
+    - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+  volumes:
+    - ../../:/workspace
+    - ../../lib/torchslicer:/usr/local/lib/torchslicer
+  working_dir: /workspace
+  command: python3 examples/train/centralized/GRPC/worker/main.py
+  depends_on:
+    phoenix:
+      condition: service_healthy
+  networks:
+    - demo-net
+
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: ts-demo-phoenix
+    ports:
+      - "6006:6006"   # Phoenix UI  →  http://localhost:6006
+      - "4317:4317"   # OTLP gRPC   ←  coordinator + workers
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:6006', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    networks:
+      - demo-net
+
+  coordinator:
+    image: torchslicer:cpu
+    container_name: ts-demo-coordinator
+    hostname: coordinator
+    user: "${UID}:${GID}"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - EXPERIMENT_CONFIG=experiments/bench_resnet_synth_split.yaml
+      - KEEP_ALIVE=0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+      - OTEL_SERVICE_NAME=ts-coordinator
+    volumes:
+      - ../../:/workspace
+      - ../../lib/torchslicer:/usr/local/lib/torchslicer
+    working_dir: /workspace
+    command: >
+      python3 examples/benchmarks/centralized_resnet_synth.py
+        --config experiments/bench_resnet_synth_split.yaml
+    depends_on:
+      phoenix:
+        condition: service_healthy
+    networks:
+      - demo-net
+
+  worker1:
+    <<: *worker
+    container_name: ts-demo-worker1
+    hostname: worker1
+    environment:
+      - PYTHONUNBUFFERED=1
+      - EXPERIMENT_CONFIG=experiments/bench_resnet_synth_split.yaml
+      - COORDINATOR_ADDRESS=coordinator:50054
+      - DEVICE=auto
+      - WORKER_ADDRESS=worker1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+      - OTEL_SERVICE_NAME=ts-worker1
+
+  worker2:
+    <<: *worker
+    container_name: ts-demo-worker2
+    hostname: worker2
+    environment:
+      - PYTHONUNBUFFERED=1
+      - EXPERIMENT_CONFIG=experiments/bench_resnet_synth_split.yaml
+      - COORDINATOR_ADDRESS=coordinator:50054
+      - DEVICE=auto
+      - WORKER_ADDRESS=worker2
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+      - OTEL_SERVICE_NAME=ts-worker2
+
+networks:
+  demo-net:
+    driver: bridge
