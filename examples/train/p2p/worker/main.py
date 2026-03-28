@@ -51,6 +51,8 @@ from torchslicer.executors.worker import (
     get_available_memory_mb,
     _channel,
     _GRPC_OPTS,
+    _TensorPeerClient,
+    _tensor_addr,
 )
 from torchslicer.transport.grpc.worker import worker_service_pb2, worker_service_pb2_grpc
 from torchslicer.transport.grpc.coordinator import (
@@ -169,22 +171,8 @@ class P2PDriverServicer(WorkerServicer):
         try:
             self._profiler.begin_batch(batch_id)
             self._profiler.mark_idle_end("fwd")
-
             tensor = inputs.to(self.device)
-            with self._profiler.phase("forward"):
-                out   = self.layer(tensor)
-                x_ref = self.layer.x
-
-            with self._lock:
-                self._outputs[batch_id] = (out, x_ref)
-
-            with self._profiler.phase("send_fwd"):
-                self._next_stub.forward(worker_service_pb2.ForwardRequest(
-                    batch_id=batch_id,
-                    input=serialize_tensor(out),
-                ))
-
-            self._profiler.mark_idle_start("bwd")
+            self._run_forward_stage(batch_id, tensor, self._generation, aux={})
         except Exception as e:
             _LOG.exception("driver forward failed batch_id=%s error=%s", batch_id, e)
 
@@ -300,9 +288,15 @@ def _configure_driver_slice(
     driver.next_worker     = peers[1] if len(peers) > 1 else None
     driver._n_micro        = cfg.pipeline.n_micro if cfg.pipeline.use_gpipe else 1
 
+    driver._tensor_transport   = cfg.transport.tensor
+    driver._tensor_port_offset = cfg.transport.tensor_port_offset
     if driver.next_worker:
         driver._next_stub = worker_service_pb2_grpc.WorkerServiceStub(
             _channel(driver.next_worker))
+        if cfg.transport.tensor == "tcp":
+            driver._next_tensor = _TensorPeerClient(
+                _tensor_addr(driver.next_worker, cfg.transport.tensor_port_offset)
+            )
 
     # No coordinator stub needed: _send_backward is overridden to signal directly.
 
