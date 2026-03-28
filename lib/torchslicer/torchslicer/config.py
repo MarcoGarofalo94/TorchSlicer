@@ -37,7 +37,7 @@ from typing import Optional
 
 
 def _default_run_id() -> str:
-    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
 
 @dataclass

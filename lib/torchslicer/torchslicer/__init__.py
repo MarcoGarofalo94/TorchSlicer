@@ -16,6 +16,7 @@ from .discovery import BaseDiscovery, NodeInfo, AnnounceResult
 from .discovery import CoordinatorDiscovery, announce_to_coordinator, StaticDiscovery
 from .config import (
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
+    StartupConfig, TransportConfig,
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
     NetworkConfig,
 )

@@ -5,14 +5,30 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "torchslicer"
 version = "0.2.0"
-description = "Split learning framework for PyTorch."
+description = "Split learning framework for PyTorch — pipeline-parallel training across heterogeneous devices."
 authors = [{ name = "Marco Garofalo", email = "garofalomarco58@gmail.com" }]
+license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.10"
-dependencies = ["numpy"]
+dependencies = ["numpy", "pyyaml"]
 readme = "README.md"
+keywords = ["deep-learning", "split-learning", "distributed-training", "pytorch", "pipeline-parallelism"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
 
 [project.urls]
 Homepage = "https://github.com/MarcoGarofalo94/TorchSlicer"
+Repository = "https://github.com/MarcoGarofalo94/TorchSlicer"
+"Bug Tracker" = "https://github.com/MarcoGarofalo94/TorchSlicer/issues"
 
 [project.optional-dependencies]
 grpc = [

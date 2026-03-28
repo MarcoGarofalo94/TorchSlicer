@@ -79,9 +79,8 @@ def serve() -> None:
     )
 
     run_dir = os.path.join(cfg.logging.dir, cfg.run_id) if cfg.logging.enabled else ""
-    keep_alive = os.environ.get("KEEP_ALIVE", "1").strip().lower() not in {"0", "false", "no"}
-    if not keep_alive:
-        print("[coordinator] run complete — exiting immediately (KEEP_ALIVE disabled)")
+    if not cfg.network.keep_alive:
+        print("[coordinator] run complete — exiting immediately (keep_alive disabled)")
         if run_dir:
             print(f"[coordinator] metrics -> {run_dir}/metrics.jsonl")
         return
