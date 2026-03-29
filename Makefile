@@ -151,6 +151,36 @@ run-p2p-auto: _env ## Run P2P stack; tear down automatically on exit
 down-p2p: _env ## Stop and remove P2P stack
 	docker compose -f docker-compose.p2p.yml down
 
+# ── tracing demo ──────────────────────────────────────────────────────────────
+#
+# Runs a self-contained 2-worker ResNet-18 training with Phoenix.
+# Requires the CPU image to be built first: make build-cpu
+#
+# Steps:
+#   1. make build-cpu          (once)
+#   2. make demo-tracing       (starts Phoenix + training, follow logs)
+#   3. open http://localhost:6006 after training completes
+#   4. make demo-tracing-down  (stop Phoenix when done)
+
+_DEMO_COMPOSE = examples/monitoring/docker-compose.tracing-demo.yml
+
+.PHONY: demo-tracing
+demo-tracing: _env ## Run 2-worker tracing demo (requires build-cpu). Open http://localhost:6006 after training.
+	docker compose -f $(_DEMO_COMPOSE) up -d phoenix
+	@echo "[demo] Phoenix starting — waiting for it to become healthy..."
+	docker compose -f $(_DEMO_COMPOSE) up -d --wait phoenix
+	@echo "[demo] Phoenix ready at http://localhost:6006"
+	docker compose -f $(_DEMO_COMPOSE) up -d coordinator worker1 worker2
+	@echo "[demo] Training started — following coordinator logs (Ctrl+C to detach):"
+	docker compose -f $(_DEMO_COMPOSE) logs -f coordinator || true
+	@echo ""
+	@echo "[demo] Training complete. Open http://localhost:6006 to explore traces."
+	@echo "[demo] Run 'make demo-tracing-down' when done."
+
+.PHONY: demo-tracing-down
+demo-tracing-down: _env ## Stop all tracing demo services (including Phoenix)
+	docker compose -f $(_DEMO_COMPOSE) down
+
 # ── monitoring (Phoenix tracing) ───────────────────────────────────────────────
 #
 # Layered on top of the centralized stack.  Phoenix UI at http://localhost:6006.

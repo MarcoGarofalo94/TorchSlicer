@@ -43,7 +43,11 @@ _GRPC_OPTS = [
 ]
 
 _LOG = get_logger("torchslicer.worker")
-_FRAME_HEADER = struct.Struct("!cIBH")
+# TCP tensor frame format (big-endian):
+#   kind(1c) | batch_id(4I) | dtype(1B) | ndim(2H) | ctx_len(2H)
+#   followed by: ctx_bytes(ctx_len) | shape(ndim×8q) | payload_len(8Q) | payload
+# ctx_len=0 when tracing is disabled — the two header bytes are the only overhead.
+_FRAME_HEADER = struct.Struct("!cIBHH")
 _SHAPE_ITEM = struct.Struct("!q")
 _PAYLOAD_LEN = struct.Struct("!Q")
 _HOSTNAME = socket.gethostname()
@@ -172,15 +176,17 @@ def _pack_tensor_frame(kind: bytes, batch_id: int, tensor: torch.Tensor):
     arr = tensor.detach().cpu().contiguous()
     payload = _tensor_payload_view(arr)
     shape = list(arr.shape)
-    header = _FRAME_HEADER.pack(kind, int(batch_id), _dtype_to_code(arr.dtype), len(shape))
+    ctx_bytes = _tracer.inject_context_bytes()
+    header = _FRAME_HEADER.pack(kind, int(batch_id), _dtype_to_code(arr.dtype), len(shape), len(ctx_bytes))
     shape_bytes = b"".join(_SHAPE_ITEM.pack(int(dim)) for dim in shape)
     payload_len = _PAYLOAD_LEN.pack(payload.nbytes)
-    return header, shape_bytes, payload_len, payload
+    return header, ctx_bytes, shape_bytes, payload_len, payload
 
 
-def _unpack_tensor_frame(sock: socket.socket) -> tuple[str, int, torch.Tensor]:
+def _unpack_tensor_frame(sock: socket.socket) -> tuple[str, int, torch.Tensor, bytes]:
     header_buf = bytearray(_FRAME_HEADER.size)
-    kind, batch_id, dtype_code, ndim = _FRAME_HEADER.unpack(_recv_into(sock, header_buf))
+    kind, batch_id, dtype_code, ndim, ctx_len = _FRAME_HEADER.unpack(_recv_into(sock, header_buf))
+    ctx_bytes = bytes(_recv_into(sock, bytearray(ctx_len))) if ctx_len else b""
     shape_buf = bytearray(_SHAPE_ITEM.size * ndim)
     shape_view = _recv_into(sock, shape_buf)
     shape = [
@@ -193,7 +199,7 @@ def _unpack_tensor_frame(sock: socket.socket) -> tuple[str, int, torch.Tensor]:
     payload_view = _recv_into(sock, payload)
     dtype = _code_to_dtype(dtype_code)
     tensor = torch.frombuffer(payload_view, dtype=dtype).reshape(shape)
-    return kind.decode("ascii"), batch_id, tensor
+    return kind.decode("ascii"), batch_id, tensor, ctx_bytes
 
 
 def _tensor_addr(addr: str, offset: int) -> str:
@@ -208,10 +214,10 @@ class _TensorPeerClient:
         self._lock = threading.Lock()
 
     def send_tensor(self, kind: bytes, batch_id: int, tensor: torch.Tensor) -> None:
-        header, shape_bytes, payload_len, payload = _pack_tensor_frame(kind, batch_id, tensor)
+        header, ctx_bytes, shape_bytes, payload_len, payload = _pack_tensor_frame(kind, batch_id, tensor)
         # Coalesce the small fixed-size fields into one syscall; payload is sent separately
         # because it can be hundreds of KB and is already a memoryview (zero-copy).
-        meta = header + shape_bytes + payload_len
+        meta = header + ctx_bytes + shape_bytes + payload_len
         with self._lock:
             self._ensure_connected()
             try:
@@ -299,7 +305,9 @@ def resolve_worker_address(port: int, hostname: str | None = None) -> str:
 
     host = hostname or socket.gethostname()
     advertised = os.environ.get("WORKER_ADDRESS", "").strip()
-    return advertised or f"{host}:{port}"
+    if advertised:
+        return advertised if ":" in advertised else f"{advertised}:{port}"
+    return f"{host}:{port}"
 
 
 def get_available_memory_mb(device: str) -> int:
@@ -399,16 +407,26 @@ class WorkerServicer(
         try:
             while not self._tensor_stop.is_set():
                 try:
-                    kind, batch_id, tensor = _unpack_tensor_frame(conn)
+                    kind, batch_id, tensor, ctx_bytes = _unpack_tensor_frame(conn)
                 except socket.timeout:
                     continue  # check _tensor_stop, then retry read
                 generation = self._generation
-                if kind == "F":
-                    self._pool.submit(self._forward_tensor, batch_id, tensor, generation)
-                elif kind == "B":
-                    self._pool.submit(self._backward_tensor, batch_id, tensor, generation)
-                else:
-                    raise _TensorStreamError(f"unknown tensor frame kind={kind!r}")
+                # Attach the sender's trace context so worker spans become
+                # children of the coordinator's batch span (or the previous
+                # worker's forward/backward span).  No-op when tracing is off.
+                with _tracer.extract_context(ctx_bytes):
+                    if kind == "F":
+                        self._pool.submit(
+                            _tracer.propagate_to_thread(self._forward_tensor),
+                            batch_id, tensor, generation,
+                        )
+                    elif kind == "B":
+                        self._pool.submit(
+                            _tracer.propagate_to_thread(self._backward_tensor),
+                            batch_id, tensor, generation,
+                        )
+                    else:
+                        raise _TensorStreamError(f"unknown tensor frame kind={kind!r}")
         except Exception as exc:
             if not self._tensor_stop.is_set() and not isinstance(exc, _TensorStreamClosed):
                 _LOG.warning("tensor transport connection closed addr=%s error=%s", addr, exc)
@@ -654,12 +672,12 @@ class WorkerServicer(
 
     def forward(self, request, context):
         generation = self._generation
-        self._pool.submit(self._forward, request, generation)
+        self._pool.submit(_tracer.propagate_to_thread(self._forward), request, generation)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
 
     def backward(self, request, context):
         generation = self._generation
-        self._pool.submit(self._backward, request, generation)
+        self._pool.submit(_tracer.propagate_to_thread(self._backward), request, generation)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
 
     # ── internal forward ───────────────────────────────────────────────────────
@@ -763,6 +781,7 @@ class WorkerServicer(
     def _run_forward_stage(self, batch_id: int, tensor: torch.Tensor, generation: int, aux: dict):
         with _tracer.span(
             "torchslicer.worker.forward",
+            kind="TOOL",
             batch_id=batch_id,
             worker=_HOSTNAME,
             is_last=self.is_last,
@@ -798,18 +817,20 @@ class WorkerServicer(
         try:
             if self._tensor_transport == "tcp" and self._next_tensor is not None:
                 with _tracer.span(
-                    "torchslicer.tcp.forward_send",
+                    "torchslicer.worker.activation_send",
                     batch_id=batch_id,
                     worker=_HOSTNAME,
                     peer=self.next_worker,
+                    transport="tcp",
                 ):
                     self._next_tensor.send_tensor(b"F", batch_id, out)
                 return
             with _tracer.span(
-                "torchslicer.rpc.forward_send",
+                "torchslicer.worker.activation_send",
                 batch_id=batch_id,
                 worker=_HOSTNAME,
                 peer=self.next_worker,
+                transport="grpc",
             ):
                 self._next_stub.forward(worker_service_pb2.ForwardRequest(
                     batch_id=batch_id,
@@ -962,6 +983,7 @@ class WorkerServicer(
 
         with _tracer.span(
             "torchslicer.worker.backward",
+            kind="TOOL",
             batch_id=batch_id,
             worker=_HOSTNAME,
             is_last=False,
@@ -1002,14 +1024,14 @@ class WorkerServicer(
                 avg_loss = self._micro_losses.pop(full_batch_id) / n_micro
                 self._ensure_generation(generation, "backward_last", batch_id)
                 _stub, _run_id = self._coord_stub, self._run_id
+                _msg = coordinator_service_pb2.MetricsMessage(
+                    batch_id=batch_id,
+                    loss=avg_loss,
+                    worker=_HOSTNAME,
+                    run_id=_run_id,
+                )
                 threading.Thread(
-                    target=_stub.report_metrics,
-                    args=(coordinator_service_pb2.MetricsMessage(
-                        batch_id=batch_id,
-                        loss=avg_loss,
-                        worker=_HOSTNAME,
-                        run_id=_run_id,
-                    ),),
+                    target=_tracer.propagate_to_thread(lambda m=_msg: _stub.report_metrics(m)),
                     daemon=True,
                 ).start()
 
@@ -1049,18 +1071,20 @@ class WorkerServicer(
                 try:
                     if self._tensor_transport == "tcp" and self._prev_tensor is not None:
                         with _tracer.span(
-                            "torchslicer.tcp.backward_send",
+                            "torchslicer.worker.gradient_send",
                             batch_id=batch_id,
                             worker=_HOSTNAME,
                             peer=self.prev_worker,
+                            transport="tcp",
                         ):
                             self._prev_tensor.send_tensor(b"B", batch_id, grad)
                     else:
                         with _tracer.span(
-                            "torchslicer.rpc.backward_send",
+                            "torchslicer.worker.gradient_send",
                             batch_id=batch_id,
                             worker=_HOSTNAME,
                             peer=self.prev_worker,
+                            transport="grpc",
                         ):
                             self._prev_stub.backward(worker_service_pb2.BackwardRequest(
                                 batch_id=batch_id,
@@ -1227,7 +1251,11 @@ def run_worker(
 
     # ── resolve worker address ──────────────────────────────────────────────
     if worker_address is None:
-        worker_address = cfg.network.worker_address or resolve_worker_address(port, hostname=_HOSTNAME)
+        _raw = cfg.network.worker_address
+        if _raw:
+            worker_address = _raw if ":" in _raw else f"{_raw}:{port}"
+        else:
+            worker_address = resolve_worker_address(port, hostname=_HOSTNAME)
 
     # ── resolve device ──────────────────────────────────────────────────────
     if device is not None:
