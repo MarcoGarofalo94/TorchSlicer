@@ -143,16 +143,15 @@ class GPipeSchedule(BasePipelineSchedule):
         # Collect hook aux losses (e.g. NoPeek) — accumulated across micro-batches
         aux_loss = self._collect_aux_losses()
 
-        # Step 2: backward all micro-batches, accumulate gradients
+        # Step 2: backward all micro-batches, accumulate gradients.
+        # aux_loss (e.g. NoPeek) is backward-ed ONCE after the loop to avoid
+        # freeing its graph prematurely.  Partition-0 graphs are retained until
+        # aux_loss.backward() completes.
         total_loss = 0.0
         for m in range(M):
             loss_m = criterion(micro_outs[m][-1], micro_labels[m])
             total_loss += loss_m.item()
             scaled = loss_m / M
-
-            # Distribute aux loss evenly across micro-batches
-            if aux_loss is not None:
-                scaled = scaled + aux_loss / M
 
             moe_last = micro_moe[m][-1]
             if moe_last is not None:
@@ -168,12 +167,21 @@ class GPipeSchedule(BasePipelineSchedule):
                                  partition=i, batch_id=batch_id * M + m):
                     with profilers[i].phase("backward"):
                         moe_i = micro_moe[m][i]
+                        # Retain partition-0 graph so aux_loss.backward() can
+                        # traverse it after the micro-batch loop.
+                        retain = (aux_loss is not None) and (i == 0)
                         if moe_i is not None:
                             micro_outs[m][i].backward(x_refs[m][i + 1].grad,
                                                       retain_graph=True)
-                            (moe_i / M).backward()
+                            (moe_i / M).backward(retain_graph=retain)
                         else:
-                            micro_outs[m][i].backward(x_refs[m][i + 1].grad)
+                            micro_outs[m][i].backward(x_refs[m][i + 1].grad,
+                                                      retain_graph=retain)
+
+        # Backward through hook aux losses — after all micro-batch backwards,
+        # before optimizer steps to avoid in-place param corruption.
+        if aux_loss is not None:
+            aux_loss.backward()
 
         # Step 3: optimizer step
         for i, sl in enumerate(split_layers):
