@@ -12,6 +12,7 @@ from ..monitor.profiler import WorkerProfiler
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
 from ..monitor.run_logger import RunLogger
 from ..monitor.callback import TrainingCallback
+from ..pipeline import BasePipelineSchedule, StandardSchedule, GPipeSchedule
 
 _LOG = get_logger("torchslicer.local")
 
@@ -41,10 +42,11 @@ def _unpack_inputs(inputs):
 
 
 class LocalExecutor(BaseExecutor):
-    def __init__(self):
+    def __init__(self, schedule: BasePipelineSchedule = None):
         self.split_layers: list[SplitLayer] = []
         self.criterion = None
         self._n_micro  = 1
+        self.schedule: BasePipelineSchedule = schedule  # None → resolved in setup()
 
         self._run_logger: RunLogger              = None
         self._callbacks:  list[TrainingCallback] = []
@@ -83,6 +85,11 @@ class LocalExecutor(BaseExecutor):
 
         self.criterion = getattr(nn, criterion_cfg["name"])(**criterion_cfg["params"])
         self._n_micro  = max(1, n_micro_batches)
+
+        # Resolve schedule: injected > GPipe (n_micro>1) > Standard
+        if self.schedule is None:
+            self.schedule = (GPipeSchedule(self._n_micro)
+                             if self._n_micro > 1 else StandardSchedule())
 
         # Initialise profilers (one per partition) and RunLogger
         cfg = run_config
@@ -150,10 +157,16 @@ class LocalExecutor(BaseExecutor):
                     for p in self._profilers:
                         p.begin_batch(batch_id)
 
-                    if self._n_micro > 1:
-                        loss_val = self._gpipe_batch(inputs, labels, batch_id)
-                    else:
-                        loss_val = self._standard_batch(inputs, labels, batch_id)
+                    device = next(self.split_layers[0].parameters()).device
+                    main, aux = _unpack_inputs(inputs)
+                    main   = main.to(device)
+                    labels = labels.to(device)
+                    aux    = {k: v.to(device) for k, v in aux.items()}
+
+                    loss_val = self.schedule.step(
+                        self.split_layers, main, labels, aux,
+                        self.criterion, self._profilers, batch_id,
+                    )
 
                     for p in self._profilers:
                         p.end_batch()
@@ -226,153 +239,6 @@ class LocalExecutor(BaseExecutor):
                 profiler.reset_epoch()
 
         return {"loss": avg}
-
-    # ── standard (non-GPipe) batch ─────────────────────────────────────────────
-
-    def _standard_batch(self, inputs, labels, batch_id: int) -> float:
-        device = next(self.split_layers[0].parameters()).device
-        main, aux = _unpack_inputs(inputs)
-        main   = main.to(device)
-        labels = labels.to(device)
-        aux    = {k: v.to(device) for k, v in aux.items()}
-
-        # forward
-        outputs = []
-        x = main
-        for i, sl in enumerate(self.split_layers):
-            with tracer.span(
-                "torchslicer.partition.forward",
-                partition=i,
-                batch_id=batch_id,
-                input_shape=str(tuple(x.shape)),
-            ) as fwd_span:
-                with self._profilers[i].phase("forward"):
-                    x = sl(x, **aux) if (i == 0 and aux) else sl(x)
-                if fwd_span:
-                    fwd_span.set_attribute("output_shape", str(tuple(x.shape)))
-            outputs.append(x)
-
-        loss = self.criterion(outputs[-1], labels)
-
-        # backward — pop MoE aux loss BEFORE backward (same graph, would fail after)
-        with tracer.span("torchslicer.partition.backward",
-                         partition=len(self.split_layers) - 1, batch_id=batch_id):
-            with self._profilers[-1].phase("backward"):
-                moe = self.split_layers[-1].pop_moe_aux_loss()
-                total_loss = loss + moe if moe is not None else loss
-                grad = self.split_layers[-1].backward(loss=total_loss)
-            with self._profilers[-1].phase("optimizer"):
-                self.split_layers[-1].optimize()
-
-        for i in range(len(self.split_layers) - 2, -1, -1):
-            with tracer.span("torchslicer.partition.backward", partition=i, batch_id=batch_id):
-                with self._profilers[i].phase("backward"):
-                    moe = self.split_layers[i].pop_moe_aux_loss()
-                    if moe is not None:
-                        # retain graph so moe.backward() can reuse the same nodes
-                        outputs[i].backward(gradient=grad, retain_graph=True)
-                        moe.backward()
-                        sl_x = self.split_layers[i].x
-                        grad = sl_x.grad if sl_x is not None else None
-                    else:
-                        grad = self.split_layers[i].backward(prev_g=grad, out=outputs[i])
-                with self._profilers[i].phase("optimizer"):
-                    self.split_layers[i].optimize()
-
-        return loss.item()
-
-    # ── GPipe micro-batch batch ────────────────────────────────────────────────
-
-    def _gpipe_batch(self, inputs, labels, batch_id: int) -> float:
-        """
-        GPipe-style micro-batch pipelining:
-          1. Forward all M micro-batches, saving cut-point tensors (x_refs).
-          2. Backward all M micro-batches, accumulating gradients (no zero_grad between).
-          3. Single optimizer step across all split layers.
-
-        Each micro-batch loss is scaled by 1/M so accumulated gradients match
-        the magnitude of a full-batch gradient.
-        """
-        device = next(self.split_layers[0].parameters()).device
-        main, aux = _unpack_inputs(inputs)
-        main   = main.to(device)
-        labels = labels.to(device)
-        aux    = {k: v.to(device) for k, v in aux.items()}
-
-        M    = self._n_micro
-        n_sl = len(self.split_layers)
-        micro_mains  = main.chunk(M)
-        micro_labels = labels.chunk(M)
-        # Chunk aux tensors that share the batch dimension; broadcast scalars/constants
-        micro_aux = [
-            {k: v.chunk(M)[m] if v.dim() > 0 and v.shape[0] == main.shape[0] else v
-             for k, v in aux.items()}
-            for m in range(M)
-        ]
-
-        # Step 1: forward all micro-batches; collect per-micro MoE aux losses immediately
-        # (must pop before backward — they share the same computation graph nodes)
-        micro_outs: list[list[torch.Tensor]] = []
-        x_refs:     list[list[torch.Tensor]] = []
-        micro_moe:  list[list] = []  # micro_moe[m][i] = Optional[Tensor]
-
-        for m in range(M):
-            outs: list[torch.Tensor] = []
-            refs: list[torch.Tensor] = []
-            x = micro_mains[m]
-            for i, sl in enumerate(self.split_layers):
-                with tracer.span(
-                    "torchslicer.partition.forward",
-                    partition=i,
-                    batch_id=batch_id * M + m,
-                    input_shape=str(tuple(x.shape)),
-                ):
-                    with self._profilers[i].phase("forward"):
-                        x = sl(x, **micro_aux[m]) if (i == 0 and micro_aux[m]) else sl(x)
-                refs.append(sl.x)
-                outs.append(x)
-            micro_outs.append(outs)
-            x_refs.append(refs)
-            # Pop MoE aux per micro-batch right after forward so graph is still alive
-            micro_moe.append([sl.pop_moe_aux_loss() for sl in self.split_layers])
-
-        # Step 2: backward all micro-batches, accumulate gradients
-        total_loss = 0.0
-        for m in range(M):
-            loss_m = self.criterion(micro_outs[m][-1], micro_labels[m])
-            total_loss += loss_m.item()
-            scaled = loss_m / M
-
-            # Last partition: add MoE aux (scaled by 1/M) to activation loss
-            moe_last = micro_moe[m][-1]
-            if moe_last is not None:
-                scaled = scaled + moe_last / M
-
-            with tracer.span("torchslicer.partition.backward",
-                             partition=n_sl - 1, batch_id=batch_id * M + m):
-                with self._profilers[-1].phase("backward"):
-                    scaled.backward()
-
-            for i in range(n_sl - 2, -1, -1):
-                with tracer.span("torchslicer.partition.backward",
-                                 partition=i, batch_id=batch_id * M + m):
-                    with self._profilers[i].phase("backward"):
-                        moe_i = micro_moe[m][i]
-                        if moe_i is not None:
-                            micro_outs[m][i].backward(x_refs[m][i + 1].grad,
-                                                      retain_graph=True)
-                            (moe_i / M).backward()
-                        else:
-                            micro_outs[m][i].backward(x_refs[m][i + 1].grad)
-
-        # Step 3: optimizer
-        for i, sl in enumerate(self.split_layers):
-            with self._profilers[i].phase("optimizer"):
-                sl.optimizer.step()
-                sl.optimizer.zero_grad()
-            sl.x = None
-
-        return total_loss / M
 
     def teardown(self) -> None:
         log_history = self._run_logger.log_history if self._run_logger else []

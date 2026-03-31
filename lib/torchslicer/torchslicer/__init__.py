@@ -33,6 +33,7 @@ from .core.stages import (
 )
 from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
 from ._resolver import resolve_optimizer, resolve_criterion
+from .pipeline import BasePipelineSchedule, StandardSchedule, GPipeSchedule
 from .adapters.hf_packs import (
     hf_pack,
     pack_gpt2,
