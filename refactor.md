@@ -11,7 +11,7 @@ Goal: position TorchSlicer as the canonical split learning framework (analogous 
 |---|---|
 | `ts.run(model, loader, n=2)` one-liner via `LocalExecutor` | ✅ done |
 | String shorthands for optimizer/criterion in `SlicedModel.train()` | ✅ done |
-| `ts.simulate()` — multi-process local simulation without Docker | ⬜ todo |
+| `ts.simulate()` — multi-process local simulation without Docker | ✅ done |
 
 **`ts.simulate()` spec:**
 - Spawn N worker processes via `torch.multiprocessing.spawn`
@@ -25,9 +25,9 @@ Goal: position TorchSlicer as the canonical split learning framework (analogous 
 
 | Task | Status |
 |---|---|
-| `ParameterBalancedSplitter` — split by trainable parameter count | ⬜ todo |
-| `ExplicitSplitter` — user-specified layer boundary indices | ⬜ todo |
-| `@ts.register_strategy` decorator (public, documented) | ⬜ todo |
+| `ParameterBalancedSplitter` — split by trainable parameter count | ✅ done |
+| `ExplicitSplitter` — user-specified layer boundary indices | ✅ done |
+| `@ts.register_strategy` decorator (public, documented) | ✅ done |
 | Pipeline schedule abstraction (`BasePipelineSchedule`) | ⬜ todo |
 | Refactor GPipe into `pipeline/gpipe.py` (extracted from executor) | ⬜ todo |
 | `PipeDreamSchedule` (async 1F1B) | ⬜ todo |
@@ -48,7 +48,7 @@ Goal: position TorchSlicer as the canonical split learning framework (analogous 
 | Pack functions moved into library (`adapters/hf_packs.py`) | ✅ done |
 | `ts.from_pretrained(name_or_model, n, task, ...)` | ✅ done |
 | Auto-detect pack function from `model.config.model_type` | ✅ done |
-| PEFT/LoRA first-class path (documented + tested) | ⬜ todo |
+| PEFT/LoRA first-class path (auto-unwrap in from_pretrained) | ✅ done |
 
 **PEFT spec:**
 - `ts.from_pretrained(peft_model, n=4)` should auto-call `peft_unwrap` internally
