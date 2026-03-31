@@ -30,6 +30,16 @@ from .core.stages import (
     SimpleEmbedStage,
 )
 from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
+from ._resolver import resolve_optimizer, resolve_criterion
+from .adapters.hf_packs import (
+    hf_pack,
+    pack_gpt2,
+    pack_bert_seq_cls,
+    pack_bert_mlm,
+    pack_distilbert_seq_cls,
+    pack_llama,
+    pack_moe,
+)
 
 
 def peft_unwrap(model) -> "nn.Module":
@@ -107,8 +117,8 @@ class SlicedModel:
             sliced.train(loader, optimizer_cfg, criterion_cfg, epochs=10)
         """
         cfg = run_config
-        resolved_optimizer  = optimizer  or (cfg.training.optimizer  if cfg else None)
-        resolved_criterion  = criterion  or (cfg.training.criterion  if cfg else None)
+        resolved_optimizer  = resolve_optimizer(optimizer  or (cfg.training.optimizer  if cfg else None))
+        resolved_criterion  = resolve_criterion(criterion  or (cfg.training.criterion  if cfg else None))
         resolved_epochs          = epochs          if epochs          is not None else (cfg.training.epochs          if cfg else 1)
         resolved_mixed_precision = mixed_precision if mixed_precision is not None else (cfg.training.mixed_precision if cfg else False)
         resolved_use_gpipe       = use_gpipe       if use_gpipe       is not None else (cfg.pipeline.use_gpipe       if cfg else False)
@@ -200,3 +210,165 @@ def slice(model, strategy="uniform", n=2, executor=None, pack=None) -> SlicedMod
         model_name=type(model).__name__,
         strategy_name=strategy_name,
     )
+
+
+def run(
+    model,
+    data_loader,
+    n: int = 2,
+    *,
+    epochs: int = 10,
+    optimizer="adam",
+    criterion="cross_entropy",
+    strategy: str = "uniform",
+    pack=None,
+    verbose: bool = False,
+    mixed_precision: bool = False,
+    use_gpipe: bool = False,
+    n_micro_batches: int = 4,
+    callbacks: list = None,
+) -> list:
+    """Train a model with split learning in a single call.
+
+    The simplest possible entry point — no config files, no Docker, no
+    executor boilerplate.  Everything runs in-process via ``LocalExecutor``.
+
+    Args:
+        model:           Any ``nn.Module``.
+        data_loader:     PyTorch ``DataLoader`` yielding ``(inputs, labels)`` batches.
+        n:               Number of partitions (default 2).
+        epochs:          Training epochs (default 10).
+        optimizer:       String shorthand (``"adam"``, ``"adamw"``, ``"sgd"``,
+                         ``"rmsprop"``) or a full dict
+                         ``{"name": "Adam", "params": {"lr": 3e-4}}``.
+        criterion:       String shorthand (``"cross_entropy"``, ``"mse"``, ``"bce"``,
+                         ``"bce_with_logits"``, ``"nll"``, ``"l1"``) or a full dict.
+        strategy:        Partitioning strategy name (default ``"uniform"``).
+        pack:            Optional ``(model) -> list[nn.Module]`` for models that
+                         torch.fx cannot trace (e.g. HuggingFace LLMs).
+        verbose:         Print per-batch and per-epoch loss.
+        mixed_precision: Enable bfloat16 autocast.
+        use_gpipe:       Enable GPipe micro-batch pipelining.
+        n_micro_batches: Number of GPipe micro-batches (used when ``use_gpipe=True``).
+        callbacks:       List of ``TrainingCallback`` instances.
+
+    Returns:
+        List of per-epoch metric dicts, e.g. ``[{"loss": 0.42}, ...]``.
+
+    Example::
+
+        import torchslicer as ts
+
+        metrics = ts.run(model, train_loader, n=4, epochs=5, optimizer="adamw")
+    """
+    sliced = slice(model, strategy=strategy, n=n, pack=pack)
+    return sliced.train(
+        data_loader,
+        optimizer=optimizer,
+        criterion=criterion,
+        epochs=epochs,
+        verbose=verbose,
+        mixed_precision=mixed_precision,
+        use_gpipe=use_gpipe,
+        n_micro_batches=n_micro_batches,
+        callbacks=callbacks,
+    )
+
+
+def from_pretrained(
+    model_name_or_model,
+    n: int = 2,
+    *,
+    task: str = None,
+    pack=None,
+    strategy: str = "uniform",
+    executor=None,
+    **hf_kwargs,
+) -> "SlicedModel":
+    """Load (or wrap) a HuggingFace model and slice it for split learning.
+
+    Args:
+        model_name_or_model:
+            Either a HuggingFace model-hub name string (e.g.
+            ``"bert-base-uncased"``) **or** an already-loaded ``nn.Module``.
+            When a string is supplied the model is loaded via the
+            ``transformers`` library (must be installed).
+        n:        Number of partitions (default 2).
+        task:     HuggingFace task hint used when loading by name.
+                  Supported values: ``"classification"`` (→
+                  ``AutoModelForSequenceClassification``), ``"generation"``
+                  (→ ``AutoModelForCausalLM``), ``"masked_lm"`` / ``"mlm"``
+                  (→ ``AutoModelForMaskedLM``).  Defaults to ``AutoModel``.
+        pack:     Explicit pack function.  When ``None`` the function is
+                  auto-detected from ``model.config.model_type``.  Pass this
+                  to override or to handle architectures not in the registry.
+        strategy: Partitioning strategy (default ``"uniform"``).
+        executor: Executor to use (default ``LocalExecutor``).
+        **hf_kwargs:
+                  Forwarded to ``from_pretrained()`` when loading by name
+                  (e.g. ``num_labels=2``, ``torch_dtype=torch.float16``).
+
+    Returns:
+        A ``SlicedModel`` ready for ``.train()``.
+
+    Examples::
+
+        # Load from hub and auto-slice
+        sliced = ts.from_pretrained("distilbert-base-uncased", n=4,
+                                    task="classification", num_labels=2)
+        sliced.train(train_loader, optimizer="adamw", criterion="cross_entropy",
+                     epochs=3)
+
+        # Wrap an already-loaded model
+        from transformers import GPT2LMHeadModel
+        model  = GPT2LMHeadModel.from_pretrained("gpt2")
+        sliced = ts.from_pretrained(model, n=4)
+    """
+    import torch.nn as nn
+
+    # ── Load from hub if a string was given ───────────────────────────────────
+    if isinstance(model_name_or_model, str):
+        try:
+            from transformers import (
+                AutoModel,
+                AutoModelForCausalLM,
+                AutoModelForMaskedLM,
+                AutoModelForSequenceClassification,
+            )
+        except ImportError:
+            raise ImportError(
+                "transformers is required for ts.from_pretrained(). "
+                "Install it with: pip install transformers"
+            )
+        _task_map = {
+            "classification": AutoModelForSequenceClassification,
+            "generation":     AutoModelForCausalLM,
+            "causal_lm":      AutoModelForCausalLM,
+            "masked_lm":      AutoModelForMaskedLM,
+            "mlm":            AutoModelForMaskedLM,
+        }
+        auto_cls = _task_map.get(task, AutoModel) if task else AutoModel
+        model = auto_cls.from_pretrained(model_name_or_model, **hf_kwargs)
+    elif isinstance(model_name_or_model, nn.Module):
+        model = model_name_or_model
+        if hf_kwargs:
+            raise ValueError(
+                "hf_kwargs are only used when loading by model name string. "
+                "Pass an already-configured nn.Module without extra kwargs."
+            )
+    else:
+        raise TypeError(
+            f"model_name_or_model must be a str or nn.Module, "
+            f"got {type(model_name_or_model).__name__}"
+        )
+
+    # ── Resolve pack function ─────────────────────────────────────────────────
+    if pack is None:
+        model_type = getattr(getattr(model, 'config', None), 'model_type', None)
+        if model_type is not None:
+            try:
+                pack = hf_pack(model_type)
+            except KeyError:
+                pass  # fall back to FX tracing
+
+    return slice(model, strategy=strategy, n=n, executor=executor, pack=pack)
