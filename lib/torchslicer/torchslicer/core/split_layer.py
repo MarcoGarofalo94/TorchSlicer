@@ -129,11 +129,12 @@ class SplitLayer(nn.Module):
         prev_g: Union[torch.Tensor, None] = None,
         loss: Union[torch.Tensor, None] = None,
         out: Union[torch.Tensor, None] = None,
+        retain_graph: bool = False,
     ) -> torch.Tensor | None:
         if self._is_last:
-            loss.backward()
+            loss.backward(retain_graph=retain_graph)
         else:
-            out.backward(gradient=prev_g)
+            out.backward(gradient=prev_g, retain_graph=retain_graph)
         return self.x.grad if self.x is not None else None
 
     # ── optimize ──────────────────────────────────────────────────────────────

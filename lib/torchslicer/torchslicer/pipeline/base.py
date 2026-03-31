@@ -31,6 +31,41 @@ from abc import ABC, abstractmethod
 class BasePipelineSchedule(ABC):
     """Abstract base for pipeline schedules.
 
+    Subclasses define how one batch is executed across the split layers.
+
+    Hooks
+    -----
+    An optional list of ``ActivationHook`` instances can be attached at
+    construction time.  Hooks are called on the output of every non-final
+    partition (the "smashed data") during the forward pass, and their
+    accumulated ``aux_loss`` terms are added to the main criterion loss
+    before the backward pass::
+
+        schedule = ts.StandardSchedule(hooks=[
+            ts.DPNoiseHook(sigma=0.01),
+            ts.NoPeekHook(lambda_=0.1),
+        ])
+    """
+
+    def __init__(self, hooks: list = None):
+        self.hooks: list = list(hooks or [])
+
+    def _apply_forward_hooks(self, smashed, raw_input, partition_idx):
+        """Run all hooks on a smashed activation tensor. Returns modified tensor."""
+        for hook in self.hooks:
+            smashed = hook.on_forward_smash(smashed, raw_input, partition_idx)
+        return smashed
+
+    def _collect_aux_losses(self):
+        """Collect and sum all pending aux losses from hooks. Returns Tensor or None."""
+        total = None
+        for hook in self.hooks:
+            aux = hook.pop_aux_loss()
+            if aux is not None:
+                total = aux if total is None else total + aux
+        return total
+    """Abstract base for pipeline schedules.
+
     A schedule receives a prepared batch and the list of ``SplitLayer``
     objects (already set up with optimizers) and is responsible for running
     the complete forward + backward + optimizer step.

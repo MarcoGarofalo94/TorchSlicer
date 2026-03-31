@@ -34,6 +34,8 @@ from .core.stages import (
 from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
 from ._resolver import resolve_optimizer, resolve_criterion
 from .pipeline import BasePipelineSchedule, StandardSchedule, GPipeSchedule
+from .topology import BaseSplitTopology, PipelineTopology, UShapedTopology
+from .hooks import ActivationHook, DPNoiseHook, NoPeekHook, distance_correlation
 from .adapters.hf_packs import (
     hf_pack,
     pack_gpt2,
@@ -225,6 +227,7 @@ def run(
     criterion="cross_entropy",
     strategy: str = "uniform",
     pack=None,
+    executor=None,
     verbose: bool = False,
     mixed_precision: bool = False,
     use_gpipe: bool = False,
@@ -264,7 +267,7 @@ def run(
 
         metrics = ts.run(model, train_loader, n=4, epochs=5, optimizer="adamw")
     """
-    sliced = slice(model, strategy=strategy, n=n, pack=pack)
+    sliced = slice(model, strategy=strategy, n=n, executor=executor, pack=pack)
     return sliced.train(
         data_loader,
         optimizer=optimizer,
