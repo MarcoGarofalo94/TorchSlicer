@@ -28,9 +28,9 @@ Goal: position TorchSlicer as the canonical split learning framework (analogous 
 | `ParameterBalancedSplitter` — split by trainable parameter count | ✅ done |
 | `ExplicitSplitter` — user-specified layer boundary indices | ✅ done |
 | `@ts.register_strategy` decorator (public, documented) | ✅ done |
-| Pipeline schedule abstraction (`BasePipelineSchedule`) | ⬜ todo |
-| Refactor GPipe into `pipeline/gpipe.py` (extracted from executor) | ⬜ todo |
-| `PipeDreamSchedule` (async 1F1B) | ⬜ todo |
+| Pipeline schedule abstraction (`BasePipelineSchedule`) | ✅ done |
+| Refactor GPipe into `pipeline/gpipe.py` (extracted from executor) | ✅ done |
+| `PipeDreamSchedule` (async 1F1B) | ⏭ deferred — needs weight stashing, blocked on 4+ GPU benchmark showing bubble is bottleneck |
 
 **Notes on strategies:**
 - `ParameterBalancedSplitter` and `ExplicitSplitter` are straightforward and low-risk.
