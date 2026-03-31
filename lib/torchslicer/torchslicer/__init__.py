@@ -6,6 +6,8 @@ from .core.split_layer import SplitLayer
 from .core.model_graph import ModelGraph, LayerNode, _FlattenWrapper, _AddWrapper
 from .strategies.base import BaseSplitter, Partition
 from .strategies.uniform import UniformSplitter
+from .strategies.param_balanced import ParameterBalancedSplitter
+from .strategies.explicit import ExplicitSplitter
 from .strategies.registry import register as register_strategy, get as _get_strategy
 from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
@@ -362,6 +364,9 @@ def from_pretrained(
             f"got {type(model_name_or_model).__name__}"
         )
 
+    # ── Auto-unwrap PEFT models ───────────────────────────────────────────────
+    model = peft_unwrap(model)
+
     # ── Resolve pack function ─────────────────────────────────────────────────
     if pack is None:
         model_type = getattr(getattr(model, 'config', None), 'model_type', None)
@@ -372,3 +377,123 @@ def from_pretrained(
                 pass  # fall back to FX tracing
 
     return slice(model, strategy=strategy, n=n, executor=executor, pack=pack)
+
+
+def simulate(
+    model,
+    data_loader,
+    n: int = 2,
+    *,
+    epochs: int = 10,
+    optimizer="adam",
+    criterion="cross_entropy",
+    devices: list = None,
+    strategy: str = "uniform",
+    pack=None,
+    verbose: bool = False,
+    mixed_precision: bool = False,
+    use_gpipe: bool = False,
+    n_micro_batches: int = 4,
+    callbacks: list = None,
+) -> list:
+    """Train with split learning across N simulated workers on this machine.
+
+    Spawns N worker subprocesses locally (no Docker, no cluster) using
+    ``DistributedExecutor`` + ``CoordinatorDiscovery``.  Useful for testing
+    distributed code and measuring pipeline overhead without any
+    infrastructure setup.
+
+    Behaves identically to real distributed training — workers register via
+    gRPC, tensors are serialised across process boundaries, fault-tolerance
+    logic is exercised.  The only difference is that all processes share the
+    same physical host.
+
+    Args:
+        model:           Any ``nn.Module``.
+        data_loader:     PyTorch ``DataLoader`` yielding ``(inputs, labels)``.
+        n:               Number of simulated workers / partitions (default 2).
+        epochs:          Training epochs (default 10).
+        optimizer:       String shorthand or dict (same as ``ts.run()``).
+        criterion:       String shorthand or dict (same as ``ts.run()``).
+        devices:         List of device strings, one per worker (e.g.
+                         ``["cuda:0", "cuda:1"]``).  Defaults to ``["auto"] * n``.
+        strategy:        Partitioning strategy (default ``"uniform"``).
+        pack:            Optional pack function for HuggingFace / custom models.
+        verbose:         Print per-batch and per-epoch progress.
+        mixed_precision: Enable bfloat16 autocast.
+        use_gpipe:       Enable GPipe micro-batch pipelining.
+        n_micro_batches: GPipe micro-batch count (used when ``use_gpipe=True``).
+        callbacks:       List of ``TrainingCallback`` instances.
+
+    Returns:
+        List of per-epoch metric dicts, e.g. ``[{"loss": 0.42}, ...]``.
+
+    Example::
+
+        import torchslicer as ts
+
+        # 4-way split, all on CPU — good for unit-testing distributed logic
+        metrics = ts.simulate(model, train_loader, n=4, epochs=3)
+
+        # 2-way split on two GPUs
+        metrics = ts.simulate(model, train_loader, n=2,
+                              devices=["cuda:0", "cuda:1"])
+    """
+    import multiprocessing as mp
+    from ._simulate import _find_free_port, _run_worker_subprocess
+
+    if devices is None:
+        devices = ["auto"] * n
+
+    # ── Allocate ports ────────────────────────────────────────────────────────
+    coordinator_port   = _find_free_port()
+    worker_ports       = [_find_free_port() for _ in range(n)]
+    coordinator_addr   = f"127.0.0.1:{coordinator_port}"
+    coordinator_bind   = f"0.0.0.0:{coordinator_port}"
+
+    # ── Spawn worker subprocesses (they retry registration until coordinator
+    #    is up — controlled by discovery.registration_max_attempts) ──────────
+    ctx   = mp.get_context("spawn")
+    procs = []
+    for i in range(n):
+        device = devices[i] if i < len(devices) else "auto"
+        p = ctx.Process(
+            target=_run_worker_subprocess,
+            args=(worker_ports[i], coordinator_addr, device),
+            daemon=True,
+        )
+        p.start()
+        procs.append(p)
+
+    try:
+        # ── Build RunConfig for coordinator ───────────────────────────────────
+        cfg = RunConfig.create(
+            n_workers=n,
+            coordinator_address=coordinator_addr,
+        )
+        cfg.logging.enabled = False   # suppress run-log files in simulation mode
+
+        discovery = CoordinatorDiscovery(run_id=cfg.run_id)
+        executor  = DistributedExecutor(
+            discovery=discovery,
+            coordinator_addr=coordinator_addr,
+            coordinator_bind_addr=coordinator_bind,
+            run_config=cfg,
+        )
+
+        sliced = slice(model, strategy=strategy, n=n, executor=executor, pack=pack)
+        return sliced.train(
+            data_loader,
+            optimizer=optimizer,
+            criterion=criterion,
+            epochs=epochs,
+            verbose=verbose,
+            mixed_precision=mixed_precision,
+            use_gpipe=use_gpipe,
+            n_micro_batches=n_micro_batches,
+            callbacks=callbacks,
+        )
+    finally:
+        for p in procs:
+            p.terminate()
+            p.join(timeout=5)
