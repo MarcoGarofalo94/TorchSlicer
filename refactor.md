@@ -1,7 +1,7 @@
 # TorchSlicer — Abstractions Roadmap
 
 Tracking branch: `feat/abstractions`
-Goal: position TorchSlicer as the canonical split learning framework (analogous to Flower for FL).
+Goal: position TorchSlicer as the canonical split learning framework (inspired from Flower for FL).
 
 ---
 
