@@ -60,12 +60,12 @@ Goal: position TorchSlicer as the canonical split learning framework (inspired f
 
 | Task | Status |
 |---|---|
-| Topology abstraction (`BaseSplitTopology`) | ⬜ todo |
-| U-shaped split topology | ⬜ todo |
-| Vertical FL split topology | ⬜ todo |
-| Activation hook interface (`on_forward_smash`, `on_backward_smash`) | ⬜ todo |
-| NoPeek privacy hook (distance correlation minimization) | ⬜ todo |
-| Differential privacy noise injection hook | ⬜ todo |
+| Topology abstraction (`BaseSplitTopology`) | ✅ done |
+| U-shaped split topology | ✅ done |
+| Vertical FL split topology | ⏭ deferred — needs cross-feature split support (different input per party), out of scope for now |
+| Activation hook interface (`on_forward_smash`, `on_backward_smash`) | ✅ done |
+| NoPeek privacy hook (distance correlation minimization) | ✅ done |
+| Differential privacy noise injection hook | ✅ done |
 
 ---
 

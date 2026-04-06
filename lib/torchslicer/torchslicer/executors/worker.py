@@ -1184,6 +1184,7 @@ def run_worker(
     coordinator_addr=_UNSET,
     worker_address=None,
     device=None,
+    node_id=None,
     servicer_class=None,
     grpc_workers=10,
 ):
@@ -1294,7 +1295,7 @@ def run_worker(
     if coordinator_addr:
         from ..discovery import NodeInfo, announce_to_coordinator
         node_info = NodeInfo(
-            node_id=_HOSTNAME,
+            node_id=node_id or _HOSTNAME,
             address=worker_address,
             device=resolved_device,
             memory_mb=memory_mb,

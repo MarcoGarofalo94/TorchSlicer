@@ -18,6 +18,8 @@ def _find_free_port() -> int:
 
 
 def _run_worker_subprocess(port: int, coordinator_addr: str, device: str,
+                            worker_index: int = 0,
+                            tensor_transport: str = "grpc",
                             log_level: str = "WARNING") -> None:
     """Worker subprocess entry-point.
 
@@ -28,12 +30,19 @@ def _run_worker_subprocess(port: int, coordinator_addr: str, device: str,
     os.environ["COORDINATOR_ADDRESS"] = coordinator_addr
     os.environ["DEVICE"]              = device
     os.environ["WORKER_ADDRESS"]      = f"127.0.0.1:{port}"
+    os.environ["TENSOR_TRANSPORT"]    = tensor_transport
     os.environ["LOG_LEVEL"]           = log_level
 
     from torchslicer.executors.worker import run_worker
+    import socket
+    # Each subprocess needs a unique node_id so CoordinatorDiscovery treats
+    # them as separate workers (default node_id is the hostname, which is the
+    # same for all subprocesses on the same machine).
+    node_id = f"{socket.gethostname()}-sim-{worker_index}"
     run_worker(
         port=port,
         coordinator_addr=coordinator_addr,
         worker_address=f"127.0.0.1:{port}",
         device=device,
+        node_id=node_id,
     )
