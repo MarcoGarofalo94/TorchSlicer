@@ -153,6 +153,66 @@ print(f"   epoch losses: {[round(h['loss'], 4) for h in history]}")
 assert all(h["loss"] < float("inf") for h in history)
 print("   OK")
 
+from torchslicer.hooks import GradientSparsifyHook
+from torchslicer.straggler import FixedDelayPolicy, RandomDelayPolicy
+
+# ── 12. GradientSparsifyHook ──────────────────────────────────────────────────
+section("12. GradientSparsifyHook (keep_ratio=0.1)")
+schedule = StandardSchedule(hooks=[GradientSparsifyHook(keep_ratio=0.1)])
+executor = LocalExecutor(schedule=schedule)
+history = ts.run(make_model(), loader, n=3, epochs=2, optimizer="adamw",
+                 criterion="cross_entropy", executor=executor)
+print(f"   epoch losses: {[round(h['loss'], 4) for h in history]}")
+assert all(h["loss"] < float("inf") for h in history)
+print("   OK")
+
+# ── 13. GradientSparsifyHook + GPipe ─────────────────────────────────────────
+section("13. GradientSparsifyHook + GPipeSchedule")
+schedule = GPipeSchedule(n_micro=4, hooks=[GradientSparsifyHook(keep_ratio=0.2)])
+executor = LocalExecutor(schedule=schedule)
+history = ts.run(make_model(), loader, n=3, epochs=2, optimizer="adamw",
+                 criterion="cross_entropy", executor=executor)
+print(f"   epoch losses: {[round(h['loss'], 4) for h in history]}")
+assert all(h["loss"] < float("inf") for h in history)
+print("   OK")
+
+# ── 14. FixedDelayPolicy ──────────────────────────────────────────────────────
+section("14. FixedDelayPolicy (partition 1, 5ms forward)")
+schedule = StandardSchedule(straggler_policy=FixedDelayPolicy(forward_delays={1: 0.005}))
+executor = LocalExecutor(schedule=schedule)
+history = ts.run(make_model(), loader, n=3, epochs=2, optimizer="adamw",
+                 criterion="cross_entropy", executor=executor)
+print(f"   epoch losses: {[round(h['loss'], 4) for h in history]}")
+assert all(h["loss"] < float("inf") for h in history)
+print("   OK")
+
+# ── 15. RandomDelayPolicy ─────────────────────────────────────────────────────
+section("15. RandomDelayPolicy (prob=0.3, max=10ms)")
+schedule = StandardSchedule(straggler_policy=RandomDelayPolicy(prob=0.3, max_delay_s=0.01, seed=42))
+executor = LocalExecutor(schedule=schedule)
+history = ts.run(make_model(), loader, n=3, epochs=2, optimizer="adamw",
+                 criterion="cross_entropy", executor=executor)
+print(f"   epoch losses: {[round(h['loss'], 4) for h in history]}")
+assert all(h["loss"] < float("inf") for h in history)
+print("   OK")
+
+# ── 16. All hooks combined ────────────────────────────────────────────────────
+section("16. NoPeek + DPNoise + GradientSparsify + FixedDelay")
+schedule = StandardSchedule(
+    hooks=[
+        DPNoiseHook(sigma=0.02),
+        NoPeekHook(lambda_=0.03),
+        GradientSparsifyHook(keep_ratio=0.2),
+    ],
+    straggler_policy=FixedDelayPolicy(forward_delays={0: 0.002}),
+)
+executor = LocalExecutor(schedule=schedule)
+history = ts.run(make_model(), loader, n=3, epochs=2, optimizer="adamw",
+                 criterion="cross_entropy", executor=executor)
+print(f"   epoch losses: {[round(h['loss'], 4) for h in history]}")
+assert all(h["loss"] < float("inf") for h in history)
+print("   OK")
+
 print(f"\n{'═'*55}")
 print("  All checks passed.")
 print('═'*55)
