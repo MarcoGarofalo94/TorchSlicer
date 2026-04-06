@@ -31,19 +31,58 @@ after partition 1, …, but NOT after the last partition whose output is the
 model prediction fed directly to the criterion).
 """
 
-from abc import ABC, abstractmethod
+from abc import ABC
 
 import torch
 
 
 class ActivationHook(ABC):
-    """Abstract base class for smashed-data activation hooks.
+    """Base class for cut-point hooks in split learning.
 
-    Subclasses must implement ``on_forward_smash``.  ``pop_aux_loss`` is
-    optional — override it when the hook needs to contribute a loss term.
+    A hook is called at every non-final partition boundary — the point where
+    smashed activations cross from one partition to the next.  Override any
+    combination of the three methods below; all have safe pass-through defaults
+    so you only implement what you need.
+
+    Forward interception
+    --------------------
+    ``on_forward_smash`` receives the outgoing activation tensor and can
+    transform it (add noise, compress, encrypt, …) or just observe it::
+
+        class MyForwardHook(ActivationHook):
+            def on_forward_smash(self, smashed, raw_input, partition_idx):
+                return smashed + torch.randn_like(smashed) * 0.1
+
+    Auxiliary loss
+    --------------
+    ``pop_aux_loss`` lets a hook contribute a scalar loss term that is added to
+    the main criterion loss before the backward pass.  Accumulate state in
+    ``on_forward_smash`` and return (then reset) the loss tensor here::
+
+        class PenaltyHook(ActivationHook):
+            def on_forward_smash(self, smashed, raw_input, partition_idx):
+                self._penalty = some_metric(smashed, raw_input)
+                return smashed
+
+            def pop_aux_loss(self):
+                loss, self._penalty = self._penalty, None
+                return loss
+
+    Backward / gradient interception
+    ---------------------------------
+    ``on_backward_smash`` receives the gradient tensor flowing *back* through
+    the same cut point during the backward pass.  Use this for gradient
+    compression, sparsification, noise injection on the gradient signal, or
+    studying gradient leakage::
+
+        class GradientClipHook(ActivationHook):
+            def on_backward_smash(self, grad, partition_idx):
+                return grad.clamp(-1.0, 1.0)
+
+    The ``partition_idx`` is the same index in both directions: index *i* is
+    the cut between partition *i* and partition *i+1*.
     """
 
-    @abstractmethod
     def on_forward_smash(
         self,
         smashed: "torch.Tensor",
@@ -53,25 +92,39 @@ class ActivationHook(ABC):
         """Called after partition *partition_idx* forward pass.
 
         Args:
-            smashed:       Output tensor of partition *partition_idx*
-                           (the smashed / cut-layer activation).
-            raw_input:     The original batch input (partition 0's input).
-                           Useful for privacy hooks that measure correlation
-                           between raw features and intermediate activations.
-            partition_idx: Index of the partition whose output this is.
+            smashed:       Output of partition *partition_idx* (the smashed activation).
+            raw_input:     Original batch input to partition 0.
+            partition_idx: Cut-point index.
 
         Returns:
             The (possibly modified) smashed tensor passed to the next partition.
         """
-        ...
+        return smashed
+
+    def on_backward_smash(
+        self,
+        grad: "torch.Tensor",
+        partition_idx: int,
+    ) -> "torch.Tensor":
+        """Called on the gradient flowing backward through cut point *partition_idx*.
+
+        This is the gradient of the loss w.r.t. the smashed activation — the
+        signal that partition *partition_idx* uses to update its parameters.
+        Override to compress, sparsify, clip, add noise, or log this gradient.
+
+        Args:
+            grad:          Gradient tensor at cut point *partition_idx*.
+            partition_idx: Cut-point index (same as the corresponding forward hook).
+
+        Returns:
+            The (possibly modified) gradient passed to partition *partition_idx*'s backward.
+        """
+        return grad
 
     def pop_aux_loss(self) -> "torch.Tensor | None":
         """Return an accumulated auxiliary loss tensor, then reset state.
 
         Called once per batch, after all partition forwards but before the
-        backward pass.  The returned tensor is added to the main criterion
-        loss so gradients flow through it automatically.
-
-        Return ``None`` (default) if this hook has no auxiliary loss.
+        backward pass.  Return ``None`` (default) if this hook has no auxiliary loss.
         """
         return None

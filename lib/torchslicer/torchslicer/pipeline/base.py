@@ -25,6 +25,7 @@ Built-in schedules
 - ``GPipeSchedule(m)``   — GPipe all-forward / all-backward with *m* micro-batches.
 """
 
+import time
 from abc import ABC, abstractmethod
 
 
@@ -37,24 +38,50 @@ class BasePipelineSchedule(ABC):
     -----
     An optional list of ``ActivationHook`` instances can be attached at
     construction time.  Hooks are called on the output of every non-final
-    partition (the "smashed data") during the forward pass, and their
-    accumulated ``aux_loss`` terms are added to the main criterion loss
-    before the backward pass::
+    partition (the "smashed data") during the forward pass, on the gradient
+    at every cut point during the backward pass, and their accumulated
+    ``aux_loss`` terms are added to the main criterion loss::
 
         schedule = ts.StandardSchedule(hooks=[
             ts.DPNoiseHook(sigma=0.01),
             ts.NoPeekHook(lambda_=0.1),
+            ts.GradientSparsifyHook(keep_ratio=0.01),
         ])
+
+    Straggler simulation
+    --------------------
+    A ``StragglerPolicy`` can be attached to simulate slow partitions.
+    After each partition's forward or backward pass the schedule calls
+    ``policy.delay(partition_idx, phase)`` and sleeps for the returned
+    number of seconds.  Useful for studying straggler-mitigation algorithms
+    on a single machine without a cluster::
+
+        from torchslicer.straggler import FixedDelayPolicy
+
+        schedule = ts.StandardSchedule(
+            straggler_policy=FixedDelayPolicy(forward_delays={1: 0.05})
+        )
     """
 
-    def __init__(self, hooks: list = None):
+    def __init__(self, hooks: list = None, straggler_policy=None):
         self.hooks: list = list(hooks or [])
+        self.straggler_policy = straggler_policy
+
+    # ── Hook helpers ──────────────────────────────────────────────────────────
 
     def _apply_forward_hooks(self, smashed, raw_input, partition_idx):
-        """Run all hooks on a smashed activation tensor. Returns modified tensor."""
+        """Run all hooks' on_forward_smash. Returns modified tensor."""
         for hook in self.hooks:
             smashed = hook.on_forward_smash(smashed, raw_input, partition_idx)
         return smashed
+
+    def _apply_backward_hooks(self, grad, partition_idx):
+        """Run all hooks' on_backward_smash. Returns modified gradient."""
+        if grad is None:
+            return grad
+        for hook in self.hooks:
+            grad = hook.on_backward_smash(grad, partition_idx)
+        return grad
 
     def _collect_aux_losses(self):
         """Collect and sum all pending aux losses from hooks. Returns Tensor or None."""
@@ -64,27 +91,18 @@ class BasePipelineSchedule(ABC):
             if aux is not None:
                 total = aux if total is None else total + aux
         return total
-    """Abstract base for pipeline schedules.
 
-    A schedule receives a prepared batch and the list of ``SplitLayer``
-    objects (already set up with optimizers) and is responsible for running
-    the complete forward + backward + optimizer step.
+    # ── Straggler helper ──────────────────────────────────────────────────────
 
-    Args (passed to ``step()``):
-        split_layers: Ordered list of ``SplitLayer`` instances (partition 0
-                      first, last partition last).
-        inputs:       Main input tensor, already on the correct device.
-        labels:       Target tensor, already on the correct device.
-        aux:          Dict of auxiliary inputs forwarded to partition 0.
-        criterion:    Loss function (``nn.Module``).
-        profilers:    Per-partition ``WorkerProfiler`` list (same length as
-                      ``split_layers``).  Use ``profiler.phase(name)`` as a
-                      context manager to record timing.
-        batch_id:     Global batch index for tracing / logging.
+    def _straggler_delay(self, partition_idx: int, phase: str) -> None:
+        """Sleep for the duration returned by the straggler policy (if any)."""
+        if self.straggler_policy is None:
+            return
+        secs = self.straggler_policy.delay(partition_idx, phase)
+        if secs > 0.0:
+            time.sleep(secs)
 
-    Returns:
-        Scalar loss value (Python ``float``) for the batch.
-    """
+    # ── Abstract interface ────────────────────────────────────────────────────
 
     @abstractmethod
     def step(
@@ -96,4 +114,19 @@ class BasePipelineSchedule(ABC):
         criterion,
         profilers: list,
         batch_id: int,
-    ) -> float: ...
+    ) -> float:
+        """Execute one full batch: forward + backward + optimizer step.
+
+        Args:
+            split_layers: Ordered list of ``SplitLayer`` instances.
+            inputs:       Main input tensor.
+            labels:       Target tensor.
+            aux:          Dict of auxiliary inputs forwarded to partition 0.
+            criterion:    Loss function (``nn.Module``).
+            profilers:    Per-partition ``WorkerProfiler`` list.
+            batch_id:     Global batch index for tracing / logging.
+
+        Returns:
+            Scalar loss value (Python ``float``) for the batch.
+        """
+        ...

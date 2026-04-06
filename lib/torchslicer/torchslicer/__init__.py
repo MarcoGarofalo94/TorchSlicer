@@ -35,7 +35,8 @@ from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
 from ._resolver import resolve_optimizer, resolve_criterion
 from .pipeline import BasePipelineSchedule, StandardSchedule, GPipeSchedule
 from .topology import BaseSplitTopology, PipelineTopology, UShapedTopology
-from .hooks import ActivationHook, DPNoiseHook, NoPeekHook, distance_correlation
+from .hooks import ActivationHook, DPNoiseHook, NoPeekHook, distance_correlation, GradientSparsifyHook
+from .straggler import StragglerPolicy, FixedDelayPolicy, RandomDelayPolicy
 from .adapters.hf_packs import (
     hf_pack,
     pack_gpt2,
@@ -394,6 +395,7 @@ def simulate(
     devices: list = None,
     strategy: str = "uniform",
     pack=None,
+    transport: str = "grpc",
     verbose: bool = False,
     mixed_precision: bool = False,
     use_gpipe: bool = False,
@@ -463,7 +465,7 @@ def simulate(
         device = devices[i] if i < len(devices) else "auto"
         p = ctx.Process(
             target=_run_worker_subprocess,
-            args=(worker_ports[i], coordinator_addr, device),
+            args=(worker_ports[i], coordinator_addr, device, i, transport),
             daemon=True,
         )
         p.start()
@@ -474,6 +476,7 @@ def simulate(
         cfg = RunConfig.create(
             n_workers=n,
             coordinator_address=coordinator_addr,
+            transport=transport,
         )
         cfg.logging.enabled = False   # suppress run-log files in simulation mode
 
