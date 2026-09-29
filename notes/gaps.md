@@ -26,3 +26,11 @@ Recurring pattern in the literature: **multi-hop / chained SL is studied only vi
 
 ## Suggested paper shape
 "Resilient multi-hop split learning": G1 as the method, G2 as the realistic evaluation substrate, and optionally G3 as the trust model that motivates G1's constraints. TorchSlicer becomes the artifact rather than the claim.
+
+## G5 — Training through a party's outage with a stand-in, and merging on rejoin (added 2026-09-29)
+- Formalized in `notes/proposal_g5_standin_merge.md`. Comes out of G1: its "sealed failover" was judged not novel
+  (recovery inside the same party is leak-free by construction). The open part is the accuracy cost of stand-ins and how
+  to merge the stand-in's learning into the owner's slice at rejoin without exposing weights.
+- H: the step-weighted weight average fails when inits differ; delta-merging from a shared public init or a functional
+  hand-over reduces the rejoin dip and the final accuracy gap vs discarding the stand-in, at no more exposure than normal
+  participation.
