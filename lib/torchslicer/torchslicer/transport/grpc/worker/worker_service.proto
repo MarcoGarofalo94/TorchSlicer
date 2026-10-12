@@ -145,6 +145,9 @@ message WorkerStatsResponse {
     int32 n_batches    = 13;
     // raw per-batch records (verbosity=3 only)
     repeated BatchStats batches = 14;
+    // non-empty if this worker hit a fatal runtime error (lets the coordinator
+    // confirm a failure report with the reported worker itself)
+    string fatal_error = 15;
 }
 
 // ── responses ─────────────────────────────────────────────────────────────────

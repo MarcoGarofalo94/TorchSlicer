@@ -151,11 +151,23 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(chunks)
 
 
-def _recv_into(sock: socket.socket, buf: bytearray) -> memoryview:
+def _recv_into(sock: socket.socket, buf: bytearray, idle_timeout_ok: bool = False) -> memoryview:
+    """Fill ``buf`` from ``sock``.
+
+    The socket has a short timeout so the reader can poll its stop flag.  That
+    timeout may only surface while idle *between* frames (``idle_timeout_ok`` and
+    nothing read yet); inside a frame a slow sender must not desynchronise the
+    stream, so timeouts there just retry.
+    """
     view = memoryview(buf)
     offset = 0
     while offset < len(view):
-        n_recv = sock.recv_into(view[offset:])
+        try:
+            n_recv = sock.recv_into(view[offset:])
+        except socket.timeout:
+            if idle_timeout_ok and offset == 0:
+                raise
+            continue
         if n_recv == 0:
             if offset == 0:
                 raise _TensorStreamClosed("peer closed tensor stream")
@@ -185,7 +197,8 @@ def _pack_tensor_frame(kind: bytes, batch_id: int, tensor: torch.Tensor):
 
 def _unpack_tensor_frame(sock: socket.socket) -> tuple[str, int, torch.Tensor, bytes]:
     header_buf = bytearray(_FRAME_HEADER.size)
-    kind, batch_id, dtype_code, ndim, ctx_len = _FRAME_HEADER.unpack(_recv_into(sock, header_buf))
+    kind, batch_id, dtype_code, ndim, ctx_len = _FRAME_HEADER.unpack(
+        _recv_into(sock, header_buf, idle_timeout_ok=True))
     ctx_bytes = bytes(_recv_into(sock, bytearray(ctx_len))) if ctx_len else b""
     shape_buf = bytearray(_SHAPE_ITEM.size * ndim)
     shape_view = _recv_into(sock, shape_buf)
@@ -666,6 +679,7 @@ class WorkerServicer(
             end_mem_mb   = round(current_mem_mb(self.device), 2),
             n_batches    = summary.get("n_batches", 0),
             batches      = batch_stats,
+            fatal_error  = (self._fatal_error or {}).get("message", ""),
         )
 
     # ── forward / backward RPCs (fire-and-forget) ──────────────────────────────
@@ -1294,7 +1308,7 @@ def run_worker(
     if coordinator_addr:
         from ..discovery import NodeInfo, announce_to_coordinator
         node_info = NodeInfo(
-            node_id=_HOSTNAME,
+            node_id=worker_address,  # unique per worker even when several share a host
             address=worker_address,
             device=resolved_device,
             memory_mb=memory_mb,

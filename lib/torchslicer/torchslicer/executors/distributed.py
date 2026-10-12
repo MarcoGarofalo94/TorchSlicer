@@ -517,10 +517,15 @@ class DistributedExecutor(BaseExecutor):
                     send_total_ms += (time.perf_counter() - send_t0) * 1000.0
 
                     wait_t0 = time.perf_counter()
+                    batch_timeout = self._run_config.fault_tolerance.batch_timeout_s
                     # Poll with 1s timeout so a worker failure interrupts the wait
                     while not self._batch_done.wait(timeout=1.0):
                         if self._failure_event.is_set():
                             break
+                        if batch_timeout and time.perf_counter() - wait_t0 > batch_timeout:
+                            raise RuntimeError(
+                                f"batch {batch_id} not completed within {batch_timeout}s "
+                                "and no worker failure was detected (lost message?)")
                     if self._failure_event.is_set():
                         failed_idx = next(iter(self._failed_workers))
                         raise WorkerFailureError(
@@ -763,7 +768,20 @@ class DistributedExecutor(BaseExecutor):
                     ),
                     timeout=timeout,
                 )
-            except grpc.RpcError:
+            except grpc.RpcError as exc:
+                # A crashed worker refuses the connection (UNAVAILABLE) at once; a
+                # live but overloaded one times out.  Confirm timeouts with a longer
+                # probe so a stall is not mistaken for a failure.
+                if exc.code() == grpc.StatusCode.DEADLINE_EXCEEDED and not self._heartbeat_stop.is_set():
+                    try:
+                        proxy.stub().get_stats(
+                            worker_service_pb2.GetStatsRequest(run_id=self._run_id, epoch=-1, verbosity=0),
+                            timeout=3 * timeout,
+                        )
+                        _LOG.warning("heartbeat timeout recovered worker=%s address=%s", idx, proxy.address)
+                        continue
+                    except grpc.RpcError:
+                        pass
                 if not self._heartbeat_stop.is_set():
                     self._on_worker_failure(idx, proxy)
                 break
@@ -779,12 +797,34 @@ class DistributedExecutor(BaseExecutor):
         self._batch_done.set()
         self._failure_event.set()
 
+    def _report_confirmed(self, idx: int) -> bool:
+        """A runtime-error report names a worker index but is not authenticated, so any
+        worker could report another one.  Ask the reported worker: it is failed if it
+        is unreachable or itself holds a fatal error."""
+        ft = self._run_config.fault_tolerance
+        if not ft.verify_reports or not self._proxies:   # nothing to probe before setup
+            return True
+        if not 0 <= idx < len(self._proxies):
+            return False
+        try:
+            res = self._proxies[idx].stub().get_stats(
+                worker_service_pb2.GetStatsRequest(run_id=self._run_id, epoch=-1, verbosity=0),
+                timeout=max(ft.ping_timeout_s, 1.0),
+            )
+        except grpc.RpcError:
+            return True
+        return bool(res.fatal_error)
+
     def _on_worker_runtime_error(self, request) -> None:
         idx = int(request.worker_index)
         address = self._failure_info.get(idx)
         if address is None and 0 <= idx < len(self._proxies):
             address = self._proxies[idx].address
         reason = f"{request.phase}: {request.message}"
+        if not self._report_confirmed(idx):
+            _LOG.warning("failure report rejected: worker=%s is reachable and reports no fatal error "
+                         "(phase=%s batch_id=%s message=%s)", idx, request.phase, request.batch_id, request.message)
+            return
         with self._lock:
             if idx in self._failed_workers:
                 return
@@ -1011,7 +1051,8 @@ class DistributedExecutor(BaseExecutor):
 
     def _shutdown_idle_workers(self) -> None:
         """Send Shutdown RPC to workers that registered but weren't selected."""
-        idle = self._discovery.idle_nodes()
+        active = {p.address for p in self._proxies}
+        idle = [nd for nd in self._discovery.idle_nodes() if nd.address not in active]
         if not idle:
             return
         _LOG.info("shutting down idle workers count=%s addresses=%s", len(idle), [nd.address for nd in idle])
