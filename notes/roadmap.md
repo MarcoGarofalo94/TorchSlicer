@@ -10,6 +10,10 @@ shown in a Flower-based SplitFed baseline.
 3. **Extend everything**: documented, registered extension points (splitter, cut hook, orchestration, transport, discovery, callbacks).
 4. **Community baselines**: curated, reproducible SL papers contributed via a template (cf. Flower Baselines).
 
+## Status
+- M0 (branch `feat/m0-foundations`, not merged/pushed): done = metrics fix, persistent workers, CI, CITATION/Zenodo metadata, pyproject sync.
+  Open = license decision; untrack the stale `lib/torchslicer/build/`; enable Zenodo's GitHub integration; rebuild/push the Docker image.
+
 ## Milestones (one `feat/m<k>-<slug>` branch each, from `main`)
 - **M0, foundations**: workers reusable across runs (end-of-run shutdown optional); CI running the tests on every PR;
   `CITATION.cff` + Zenodo metadata; merge `fix/local-epoch-metrics`; license decision (GPL-3.0 vs Apache-2.0, owner's call).
