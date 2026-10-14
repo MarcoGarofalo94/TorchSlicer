@@ -225,7 +225,7 @@ class LocalExecutor(BaseExecutor):
                         )
                 profiler.reset_epoch()
 
-        return {"loss": avg}
+        return epoch_metrics
 
     # ── standard (non-GPipe) batch ─────────────────────────────────────────────
 
