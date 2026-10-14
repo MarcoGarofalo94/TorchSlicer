@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use TorchSlicer in your research, please cite it as below."
+type: software
+title: "TorchSlicer: a split learning framework for PyTorch"
+abstract: >-
+  TorchSlicer partitions any PyTorch nn.Module into sequential slices and trains
+  them in local simulation or across real devices (gRPC/TCP, centralized or P2P
+  orchestration), for split learning and pipeline-parallel experiments.
+authors:
+  - family-names: Garofalo
+    given-names: Marco
+    email: garofalomarco58@gmail.com
+version: 0.2.0
+license: GPL-3.0-or-later
+repository-code: "https://github.com/MarcoGarofalo94/TorchSlicer"
+url: "https://github.com/MarcoGarofalo94/TorchSlicer"
+keywords:
+  - split learning
+  - pytorch
+  - distributed training
+  - pipeline parallelism
