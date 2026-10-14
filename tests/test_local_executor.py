@@ -82,6 +82,28 @@ def test_train_epoch_multiple_epochs_runs():
     assert all(l < float("inf") for l in losses)
 
 
+def test_train_epoch_returns_callback_metrics():
+    from torchslicer.monitor import TrainingCallback
+
+    class _AddMetric(TrainingCallback):
+        def on_epoch_end(self, epoch, metrics):
+            metrics["val_acc"] = 0.5
+            return metrics
+
+    graph = ModelGraph.from_module(_net())
+    parts = UniformSplitter().split(graph, 2)
+    ex = LocalExecutor()
+    ex.setup(
+        graph, parts,
+        optimizer_cfg={"name": "SGD", "params": {"lr": 0.01}},
+        criterion_cfg={"name": "CrossEntropyLoss", "params": {}},
+        callbacks=[_AddMetric()],
+    )
+    result = ex.train_epoch(_loader(), epoch=1)
+    assert result["val_acc"] == 0.5
+    assert "loss" in result
+
+
 def test_train_epoch_single_partition():
     ex = _setup(n_parts=1)
     result = ex.train_epoch(_loader(), epoch=1)
