@@ -11,6 +11,7 @@ from torchslicer.executors.worker import WorkerServicer
 from torchslicer.retry import RetryPolicy
 from torchslicer import testing_faults as fault_injection
 from torchslicer.transport.grpc.coordinator import coordinator_service_pb2
+from torchslicer.transport.grpc.worker import worker_service_pb2
 
 
 class _FakeCoordinatorStub:
@@ -43,6 +44,39 @@ class _FakePrevStub:
 class _UnavailablePrevStub:
     def backward(self, request, timeout=None):
         raise _UnavailableRpcError()
+
+
+def test_worker_shutdown_stops_server_by_default():
+    servicer = WorkerServicer()
+    servicer._server = _FakeServer()
+
+    servicer.shutdown(worker_service_pb2.ShutdownRequest(), None)
+    time.sleep(0.05)
+
+    assert servicer._server.stop_calls == [1]
+
+
+def test_persistent_worker_shutdown_resets_state_and_keeps_serving():
+    servicer = WorkerServicer()
+    servicer._persistent = True
+    servicer._server = _FakeServer()
+    servicer.layer = object()
+    servicer._run_id = "run-123"
+    generation = servicer._generation
+
+    servicer.shutdown(worker_service_pb2.ShutdownRequest(), None)
+    time.sleep(0.05)
+
+    assert servicer._server.stop_calls == []
+    assert servicer.layer is None
+    assert servicer._run_id == ""
+    assert servicer._generation == generation + 1
+
+
+def test_run_config_worker_persistent_env_override(monkeypatch):
+    assert RunConfig.from_env().network.worker_persistent is False
+    monkeypatch.setenv("WORKER_PERSISTENT", "1")
+    assert RunConfig.from_env().network.worker_persistent is True
 
 
 def test_run_config_load_applies_retry_env_overrides(monkeypatch):

@@ -356,6 +356,7 @@ class WorkerServicer(
         self._generation = 0
         self._tensor_transport = "grpc"
         self._tensor_port_offset = 1
+        self._persistent = False
         self._tensor_server = None
         self._tensor_stop = threading.Event()
         self._tensor_threads: list[threading.Thread] = []
@@ -605,6 +606,20 @@ class WorkerServicer(
                     )
                 except Exception as e:
                     _LOG.exception("shutdown checkpoint save failed: %s", e)
+
+            if self._persistent:
+                # End of run only: drop the slice (bumping the generation discards
+                # in-flight work of the finished run) and wait for the next init().
+                with self._lock:
+                    self._generation += 1
+                    for peer in (self._next_tensor, self._prev_tensor):
+                        if peer is not None:
+                            peer.close()
+                    self._reset_state()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                _LOG.info("run ended, worker persistent — waiting for next run hostname=%s", _HOSTNAME)
+                return
 
             _LOG.info("worker stopping hostname=%s", _HOSTNAME)
             self.stop_tensor_server()
@@ -1291,6 +1306,7 @@ def run_worker(
     servicer = servicer_class()
     servicer._tensor_transport = tensor_transport
     servicer._tensor_port_offset = tensor_port_offset
+    servicer._persistent = bool(cfg.network.worker_persistent)
 
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=grpc_workers),
@@ -1327,9 +1343,12 @@ def run_worker(
             )
             _LOG.info("registration complete run_id=%s worker_index=%s", result.run_id, result.worker_index)
         except RuntimeError as e:
-            _LOG.error("registration failed fatally: %s", e)
-            server.stop(0)
-            sys.exit(1)
+            if not servicer._persistent:
+                _LOG.error("registration failed fatally: %s", e)
+                server.stop(0)
+                sys.exit(1)
+            # Persistent workers outlive coordinators: keep retrying via the watchdog.
+            _LOG.warning("registration failed, worker persistent — retrying via watchdog: %s", e)
 
         # ── coordinator watchdog ─────────────────────────────────────────────
         # Re-registers periodically so that:

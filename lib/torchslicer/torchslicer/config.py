@@ -147,6 +147,10 @@ class NetworkConfig:
         worker_tags:              capability tags for this worker   (env: WORKER_TAGS)
         keep_alive:               if False the coordinator exits after training
                                   (env: KEEP_ALIVE)
+        worker_persistent:        if True a worker survives the end-of-run shutdown:
+                                  it drops its slice and waits for the next run, and
+                                  keeps retrying registration instead of exiting
+                                  (env: WORKER_PERSISTENT)
     """
     device:                   str           = "auto"
     coordinator_address:      Optional[str] = None             # None → no coordinator registration
@@ -155,6 +159,7 @@ class NetworkConfig:
     worker_address:           Optional[str] = None             # None → auto hostname:worker_port
     worker_tags:              list          = field(default_factory=list)
     keep_alive:               bool          = True
+    worker_persistent:        bool          = False
 
     def __post_init__(self):
         if self.worker_tags is None:
@@ -375,6 +380,7 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("WORKER_ADDRESS",           lambda cfg, v: setattr(cfg.network, "worker_address",           v)),
     ("WORKER_TAGS",              lambda cfg, v: setattr(cfg.network, "worker_tags",              _parse_csv(v))),
     ("KEEP_ALIVE",               lambda cfg, v: setattr(cfg.network, "keep_alive",               _parse_bool(v))),
+    ("WORKER_PERSISTENT",        lambda cfg, v: setattr(cfg.network, "worker_persistent",        _parse_bool(v))),
 )
 
 
