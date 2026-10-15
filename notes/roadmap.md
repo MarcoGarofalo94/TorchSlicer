@@ -15,7 +15,7 @@ shown in a Flower-based SplitFed baseline.
   Open = license decision; untrack the stale `lib/torchslicer/build/`; enable Zenodo's GitHub integration; rebuild/push the Docker image.
 - Model x mode check (2026-10-15): DNN, CNN, ResNet-18, TinyGPT, GPT-2, Llama (+ LoRA on the 3 LMs) x
   local / GPipe / centralized gRPC+TCP / P2P gRPC+TCP, CPU (SGD, AdamW) and A100 (AdamW), compared with unsplit PyTorch
-  under the same seed: all match. The one known difference is GPipe + BatchNorm, which micro-batching causes by
+  under the same seed: all match (full record: `notes/validation.md`, harness `benchmarks/equivalence/`). The one known difference is GPipe + BatchNorm, which micro-batching causes by
   design and should be documented. Fixed on M0: tied weights, float32 lr, 5 s worker-init deadline.
   Carried to M2: a crashed P2P follower hangs the driver (no failure detection); `examples/train/lm/{worker,lora_worker}`
   duplicate the P2P driver (no tied-weight support); turn the matrix harness into an integration test (+ small CI subset).
