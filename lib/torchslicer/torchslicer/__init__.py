@@ -3,10 +3,14 @@ __author__ = 'Marco Garofalo'
 
 from .core.slicer import Slicer
 from .core.split_layer import SplitLayer
-from .core.model_graph import ModelGraph, LayerNode, _FlattenWrapper, _AddWrapper
+from .core.model_graph import ModelGraph, LayerNode, TraceError, _FlattenWrapper, _AddWrapper
 from .strategies.base import BaseSplitter, Partition
 from .strategies.uniform import UniformSplitter
-from .strategies.registry import register as register_strategy, get as _get_strategy
+from .strategies.named import NamedCutSplitter
+from .strategies.cost import CostSplitter, ParamSplitter, FlopsSplitter, ProfiledSplitter
+from .strategies.registry import (
+    register as register_strategy, get as _get_strategy, available as available_strategies,
+)
 from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
 from .executors.distributed import DistributedExecutor, WorkerFailureError
@@ -77,6 +81,23 @@ class SlicedModel:
         self.executor       = executor
         self._model_name    = model_name
         self._strategy_name = strategy_name
+
+    def summary(self) -> str:
+        """Which nodes each partition holds, with its parameter count."""
+        lines = [f"SlicedModel({self._model_name}, strategy={self._strategy_name}, "
+                 f"partitions={len(self.partitions)})"]
+        seen = set()
+        for p in self.partitions:
+            params = 0
+            for i in p.layer_indices:
+                for prm in self.graph.nodes[i].module.parameters():
+                    if id(prm) not in seen:
+                        seen.add(id(prm))
+                        params += prm.numel()
+            names = [self.graph.nodes[i].name or str(i) for i in p.layer_indices]
+            shown = names if len(names) <= 6 else names[:3] + ["..."] + names[-2:]
+            lines.append(f"  {p.index}: {len(names)} nodes, {params:,} params  {shown}")
+        return "\n".join(lines)
 
     def train(
         self,
@@ -149,21 +170,51 @@ class SlicedModel:
         return history
 
 
-def slice(model, strategy="uniform", n=2, executor=None, pack=None) -> SlicedModel:
+def _merge_expand(a, b):
+    if a == "all" or b == "all":
+        return "all"
+    a = [a] if isinstance(a, str) else list(a or [])
+    b = [b] if isinstance(b, str) else list(b or [])
+    return a + [x for x in b if x not in a] or None
+
+
+def trace(model, expand=None, pack=None) -> ModelGraph:
+    """Build the layer graph ``ts.slice`` would split, without splitting it.
+
+    ``print(ts.trace(model).summary())`` lists every node's name (use them in
+    ``cuts=``) and marks where a cut is allowed. ``expand`` and ``pack`` mean the
+    same as in :func:`slice`.
+    """
+    if pack is not None:
+        if expand:
+            raise ValueError("expand= has no effect with pack=: packed stages are not traced")
+        return ModelGraph.from_stages(list(pack(model)))
+    return ModelGraph.from_module(model, expand=expand)
+
+
+def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
+          cuts=None, expand=None, example_input=None) -> SlicedModel:
     """Slice a model into ``n`` partitions for distributed training.
 
     Args:
         model:    Any ``nn.Module``.
-        strategy: Splitting strategy name, class, or instance.
-        n:        Number of partitions.
+        strategy: Splitting strategy name, class, or instance. Built in:
+                  ``"uniform"`` (equal layer count, the default), ``"params"``
+                  (balance parameter count), ``"flops"`` (balance forward FLOPs,
+                  needs ``example_input``), ``"profiled"`` (balance measured
+                  forward+backward time, needs ``example_input``). Custom ones:
+                  subclass ``ts.BaseSplitter`` and optionally
+                  ``ts.register_strategy(name, cls)``.
+        n:        Number of partitions (default 2, or ``len(cuts) + 1``).
         executor: Executor to use. Defaults to ``LocalExecutor``.
         pack:     Optional callable ``(model) -> list[nn.Module]``.
                   When provided, the function is called to produce a flat
                   list of stages; torch.fx tracing is skipped entirely.
                   Use this for models with cross-partition residuals, MoE
                   blocks, or any architecture the default tracer cannot
-                  handle. Packed stages are treated as authoritative units for
-                  splitting and fault-tolerance recovery. Example::
+                  handle (``ts.TraceError`` says so). Packed stages are treated
+                  as authoritative units for splitting and fault-tolerance
+                  recovery. See docs/tutorials/pack.md. Example::
 
                       def pack_qwen(model):
                           return [
@@ -174,6 +225,17 @@ def slice(model, strategy="uniform", n=2, executor=None, pack=None) -> SlicedMod
                           ]
 
                       sliced = ts.slice(model, n=4, pack=pack_qwen)
+        cuts:     Named cuts: cut right after each listed node, e.g.
+                  ``cuts=["layer2", "layer3.1"]``. Overrides ``strategy``.
+                  Node names come from ``ts.trace(model).summary()``; a dotted
+                  module name traces into its parent so you can cut inside it.
+                  With ``pack=``, use stage indices.
+        expand:   Submodules to trace through so their children become nodes
+                  (finer cut granularity), e.g. ``["layer1", "layer2"]``, or
+                  ``"all"``. Not allowed with ``pack=``.
+        example_input: An input batch, for strategies that measure the model
+                  (``"flops"``, ``"profiled"``). They run on a copy, so the
+                  model's weights, buffers and RNG state are not changed.
 
     Serialization constraint
     ------------------------
@@ -183,17 +245,28 @@ def slice(model, strategy="uniform", n=2, executor=None, pack=None) -> SlicedMod
     (``BlockStage``, ``GPT2EmbedStage``, ``CausalLMHeadStage``, etc.) and
     standard PyTorch (``nn.Sequential``) which are always available.
     For custom stage classes, either install them as a package on all
-    workers or expose them via ``PYTHONPATH``.
+    workers or expose them via ``PYTHONPATH``. The same holds for functions
+    the traced ``forward`` calls that ``torch.fx`` records by reference.
     """
-    if pack is not None:
-        stages = pack(model)
-        graph = ModelGraph.from_stages(stages)
+    if cuts is not None:
+        splitter = NamedCutSplitter(cuts)
+        if n is not None and n != len(splitter.cuts) + 1:
+            raise ValueError(f"{len(splitter.cuts)} cuts make {len(splitter.cuts) + 1} partitions, not n={n}")
+        n = len(splitter.cuts) + 1
+        strategy_name = "named"
     else:
-        graph = ModelGraph.from_module(model)
-    splitter = _get_strategy(strategy)
+        splitter = _get_strategy(strategy)
+        strategy_name = strategy if isinstance(strategy, str) else type(splitter).__name__
+    n = 2 if n is None else n
+    if example_input is not None and hasattr(splitter, "example_input"):
+        splitter.example_input = example_input
+
+    if pack is not None:
+        graph = trace(model, expand=expand, pack=pack)
+    else:
+        graph = trace(model, expand=_merge_expand(expand, splitter.expand_for(model)))
     partitions = splitter.split(graph, n)
     splitter.validate(graph, partitions)
-    strategy_name = strategy if isinstance(strategy, str) else type(strategy).__name__
     return SlicedModel(
         graph, partitions,
         executor or LocalExecutor(),

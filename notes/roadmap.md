@@ -1,4 +1,4 @@
-# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15)
+# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, end of M1)
 
 Goal: become the de facto framework for split learning (SL) experiments, the way Flower is for FL.
 TorchSlicer is SL-only. Averaging/FL logic stays out of the core; it plugs in through hooks and is
@@ -20,6 +20,17 @@ shown in a Flower-based SplitFed baseline.
   design and should be documented. Fixed on M0: tied weights, float32 lr, 5 s worker-init deadline.
   Carried to M2: a crashed P2P follower hangs the driver (no failure detection); `examples/train/lm/{worker,lora_worker}`
   duplicate the P2P driver (no tied-weight support); turn the matrix harness into an integration test (+ small CI subset).
+
+- M1 (branch `feat/m1-split-anything`, forked from M0's tip, not merged/pushed): **done** =
+  named cuts (`cuts=`, dotted names trace inside, an expanded module name = its output), `expand=` for
+  finer granularity, `params`/`flops`/`profiled` strategies (optimal min-max over `valid_cuts()`;
+  measuring ones run on a copy, so model state and RNG are untouched), `ts.trace()`/`summary()`,
+  `TraceError` pointing to `pack=` instead of the silent fallback, and tutorials
+  `docs/tutorials/{custom_strategy,pack}.md` (executed by `tests/test_docs.py`). Auditing the tracer found 3 silent
+  correctness bugs (dropped functional ops, silent sequential fallback, lax validation) and one crash
+  (a slice starting with an in-place op), all fixed (`notes/validation.md` round 2).
+  Carried: recovery re-slices with its own uniform split, not the run's strategy; `uniform` ignores
+  `valid_cuts()` (kept so existing partitions don't move).
 
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
@@ -49,16 +60,17 @@ shown in a Flower-based SplitFed baseline.
   seed it with vanilla SplitNN, U-shaped, SplitFed-via-Flower, and one compression/attack paper; framework paper vs SplitBud/SLPerf.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-15, at the end of M0.
-- **Where things stand:** M0 is done on `feat/m0-foundations`. **Next: M1.** Create
-  `git switch -c feat/m1-split-anything feat/m0-foundations`.
+Last updated 2026-10-15, at the end of M1.
+- **Where things stand:** M0 is done on `feat/m0-foundations`, and M1 is done on `feat/m1-split-anything`.
+  **Next: M2 (P2P as a reference topology).** Create it with
+  `git switch -c feat/m2-p2p feat/m1-split-anything`.
 - **Read first:**
   - this file;
-  - `notes/validation.md` (how correctness is checked, and every bug found so far);
+  - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–2);
   - `CLAUDE.md` (layout, commands, architecture).
   - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (48 tests at the end of M0);
+  - `.venv/bin/python -m pytest tests/` green (95 tests at the end of M1, about 20 s on an idle CPU);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about 15 min on CPU;
     pass a model name for a quick check). Set `MATRIX_DEVICE=cuda` for the GPU, and
     `MATRIX_OPT='{"name":"AdamW","params":{"lr":0.001,"weight_decay":0.01}}'` for AdamW. A change to splitting
@@ -75,25 +87,22 @@ Last updated 2026-10-15, at the end of M0.
     venv's newer one.
   - Don't commit the owner's untracked files at the repo root (`*.prompt.md`, `prompt*.txt`, `results/`,
     `sota_check.md`) or their `.gitignore` change.
-- **Facts for M1 (verified in code, 2026-10-15):**
-  - `ModelGraph.from_module()` (`core/model_graph.py`) traces with a *shallow* fx tracer: direct children of the root
-    are leaves. So ResNet-18 becomes about 10 nodes (`layer1`..`layer4` are atomic), and cut granularity is limited to
-    top-level children.
-  - If tracing fails, it **silently** falls back to `from_sequential()`, which treats children as a chain. That gives
-    a wrong graph for non-sequential models, with no error. This is the "clear fx-failure error" item.
-  - `strategies/`: `BaseSplitter` (`split`, `validate`), a name registry, and `uniform` as the only splitter (it
-    balances layer *count*). `validate()` requires exactly one tensor to cross each boundary, so skip connections
-    can't straddle a cut.
-  - `ts.slice(model, strategy=..., n=..., pack=...)`; `pack=` skips tracing (`ModelGraph.from_stages`).
-  - Tied parameters across cuts are handled (`core/tied.py`), so new splitters don't need to care, as long as
-    partitions are lists of graph-node indices.
+- **Facts for M2 (verified in code, 2026-10-15):**
+  - P2P lives in `examples/train/p2p/worker/main.py` (driver = worker 0 + embedded coordinator, `StaticDiscovery`),
+    reusing `WorkerServicer`. It calls `ts.slice(model, strategy="uniform", n=n, pack=get_pack())` and then builds the
+    `SliceConfig`s itself. When moving it into the library, expose `strategy`/`cuts`/`expand` there too.
+  - `examples/train/lm/{worker,lora_worker}` duplicate that driver (no tied-weight support). They should go away once P2P is in the library.
+  - Carried bug: a crashed P2P follower hangs the driver (no failure detection).
+  - Partition protocol after M1: `Partition.predecessors` may contain `-1` (a multi-input node reading the
+    partition's external input). Any new driver must pass predecessors through unchanged (they're `int32` in the proto).
+  - Graph nodes now have `name`, `takes_input` and `scope`. The run manifest records `node_names` and `expand`.
 - **Open owner decisions** (don't decide these alone): license GPL-3.0 vs Apache-2.0; untracking the stale
-  `lib/torchslicer/build/`; when to merge into `main` and push; Zenodo/GitHub integration; rebuilding the Docker image.
+  `lib/torchslicer/build/`; when to merge into `main` and push (M0 first, then M1); Zenodo/GitHub integration; rebuilding the Docker image.
 
 ## Known facts this is based on (verified in code, 2026-10-14)
 - Centralized: the coordinator holds no layers and sends raw inputs to W0 → raw data leaves the data owner (fixed by M4 roles).
 - P2P: the driver is worker 0 plus an embedded coordinator; it's an example script with no heartbeats/recovery.
 - Workers exit after every run: `DistributedExecutor.teardown()` sends `shutdown` to all of them, idle ones included.
 - A centralized worker exits(1) if it can't register within ~30 attempts × 3 s.
-- No U-shaped / multi-client / SplitFed in the library; `uniform` is the only built-in splitter.
+- No U-shaped / multi-client / SplitFed in the library. (Since M1, the built-in splitters are uniform, params, flops, profiled and named cuts.)
 - SplitBud (Flower 1.9 fork, 2-tier, manual split, outbound-only clients) and SLPerf (MPI, manual split): see `sota.md`.

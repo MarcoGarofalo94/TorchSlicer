@@ -73,9 +73,22 @@ make run-centralized CONFIG=experiments/resnet18_4gpu.yaml
 make run-phoenix CONFIG=experiments/resnet18_4gpu.yaml
 ```
 
+## Choosing where to cut
+
+```python
+print(ts.trace(model).summary())                      # nodes, and where a cut is allowed
+ts.slice(model, cuts=["layer2", "layer3.0"])          # named cuts (dotted names trace inside)
+ts.slice(model, strategy="params", n=4)               # balance parameters
+ts.slice(model, strategy="flops", n=4, example_input=x, expand="all")   # balance FLOPs, finer graph
+ts.slice(model, strategy="profiled", n=4, example_input=x)              # balance measured time
+```
+
+Write your own strategy in a few lines: see [docs/tutorials/custom_strategy.md](docs/tutorials/custom_strategy.md).
+
 ## Custom architectures
 
-For models `torch.fx` cannot trace (HuggingFace LLMs, MoE, etc.):
+If `torch.fx` can't trace a model (HuggingFace LLMs, MoE, etc.), `ts.slice` raises `ts.TraceError`
+rather than guessing. Pass a `pack` function instead ([docs/tutorials/pack.md](docs/tutorials/pack.md)):
 
 ```python
 def pack_qwen(model):

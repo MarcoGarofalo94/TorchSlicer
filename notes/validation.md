@@ -182,3 +182,122 @@ Each issue has a regression test. Fix commit: `ac9f198`, except issue 4 (`c67f6f
 - Not yet covered: multi-host runs over a real network, bf16 autocast, gradient
   accumulation, checkpoint/recovery mid-run, and losses compared beyond epoch means (per
   batch, or final weights).
+
+## Round 2 (M1 "split anything", 2026-10-15, branch `feat/m1-split-anything`)
+
+M1 reworked how a model becomes a graph (`core/model_graph.py`) and how partitions are
+validated (`strategies/base.py`), and added named cuts and cost strategies. Auditing the M0
+tracer turned up three silent correctness bugs (5, 6, 8 below). Pre-fix numbers were
+measured on `feat/m0-foundations` before any change, with the unsplit forward (eval mode)
+compared to the chained slices, using `ts.slice(model, n=1)`.
+
+| Model (M0) | M0 result |
+|---|---|
+| `F.relu` in the top-level forward | **silently wrong**: max\|Δ\| = 0.31 (the relu was dropped) |
+| data-dependent `if` in forward (untraceable) | **silently wrong**: max\|Δ\| = 1.23 (fell back to a chain of children) |
+| `x.view(x.size(0), -1)` | crash: shape `[-1]` flattened the batch dimension |
+| `x + self.a(x)` at top level | crash: `_AddWrapper` got one argument |
+| torchvision MobileNetV2, DenseNet-121 | crash: functional `adaptive_avg_pool2d` / `F.relu` dropped |
+| torchvision ViT-B/16 | crash: dynamic reshape, `cat` of class token, `permute`, indexing dropped |
+| HF GPT-2 / Llama without `pack=` | crash late: fallback chain `[transformer, lm_head]` fed a ModelOutput to the head |
+| ResNet-18, `uniform`, n=6 | crash: autograd error, a slice started with `ReLU(inplace=True)` (issue 7) |
+
+After M1, all of the traceable models above match the unsplit forward **exactly** (max\|Δ\| = 0) at
+every valid cut (tests: `tests/test_split_anything.py`), and the untraceable models raise `ts.TraceError`.
+
+### 5. Unrecognised functional ops were silently dropped from the graph (correctness, silent)
+
+- **Root cause:** `_node_to_module` mapped only `torch.flatten`, `operator.add` and
+  `view/reshape` to modules. Any other `call_function` or `call_method` node (`F.relu`,
+  `torch.cat`, `x.permute`, `x.size`, `F.adaptive_avg_pool2d`, ...) returned `None` and was
+  skipped. Its consumers were then wired to whatever came before. `view`/`reshape` also
+  dropped non-constant shape arguments, so `view(x.size(0), -1)` became `reshape(-1)`.
+- **Fix:** every live fx node becomes a graph node. Unknown ops become a generic
+  `_FunctionWrapper`, which stores the target plus its args, with graph inputs replaced by
+  `_Slot(i)`. Parameters read in forward become `_AttrWrapper`, which keeps the same
+  `nn.Parameter`, so the tied-weight logic sees any sharing. A submodule called with extra
+  constant arguments becomes `_CallWrapper`. The special wrappers (`_FlattenWrapper`,
+  `_AddWrapper`, `_ReshapeWrapper`) are used only when they are exact, so graphs that were
+  correct in M0 are unchanged: same nodes and edges for DNN, CNN, ResNet-18/50, TinyGPT
+  (± LoRA), VGG-11, EfficientNet-B0, AlexNet and SqueezeNet (checked node by node). Nodes
+  the output doesn't depend on are pruned. An unused in-place op raises `TraceError`.
+- **Model input fan-out:** if the input feeds several nodes (`x + f(x)`), an explicit
+  `input` node (`nn.Identity`) is inserted. Nodes reading the input are flagged
+  `takes_input`, and validation keeps them in partition 0.
+- **Verified by:** `test_every_valid_cut_reproduces_the_unsplit_forward`,
+  `test_split_training_matches_unsplit`, and `test_distributed_traced_graph_matches_unsplit`.
+  The last one ships the wrappers through `torch.save` to in-process gRPC workers.
+
+### 6. Tracing failures silently fell back to a chain of children (correctness, silent)
+
+- **Root cause:** `from_module` caught every exception and returned `from_sequential()`, a
+  chain of `children()` in registration order. That is a different model whenever forward
+  is anything but that chain.
+- **Fix:** it raises `ts.TraceError`, which names the fx error and points to `pack=`
+  (docs/tutorials/pack.md) and `expand=`. Several inputs, several outputs, and unused in-place
+  ops also raise `TraceError`. `from_sequential` is still available, but is never used
+  implicitly.
+- **Behaviour change:** models that "worked" by accident under the fallback now need
+  `pack=`. The fallback was only correct when forward was exactly the child chain, and fx
+  traces those models anyway.
+
+### 7. A slice starting with an in-place op crashed (robustness)
+
+- **Root cause:** `SplitLayer` makes its input a leaf that requires grad
+  (`detach().requires_grad_()`), and `ReLU(inplace=True)` on such a leaf is an autograd error.
+  ResNet-18 hits this with plain `uniform` and n=6, and any fine-grained (`expand=`) split
+  of a torchvision CNN hits it too.
+- **Fix:** if a layer that reads the cut-point input is in-place (an `inplace=True`
+  attribute, or a wrapped `*_` op), `SplitLayer` passes it `self.x.clone()`. Gradients
+  still reach `self.x`. There is no cost for other slices.
+- **Verified by:** `test_inplace_first_layer_of_a_slice_trains` and the fully expanded
+  ResNet runs in the tutorials.
+
+### 8. Validation accepted partitions that the executors run wrongly (correctness, silent)
+
+- **Root cause:** `validate()` checked only multi-input nodes. A *single*-input node
+  reading a node that was not the previous partition's last node passed validation. At
+  runtime it silently received the previous partition's output instead. Partitions that
+  were not contiguous were also accepted.
+- **Fix:** partitions must be non-empty, contiguous and in order. Every edge that crosses
+  a boundary must come from the last node of the previous partition, and only partition
+  0 may read the model input. Errors list the valid cuts. `ModelGraph.valid_cuts()` gives
+  the same rule to strategies.
+- **Extension:** a multi-input node may now read the cut-point input. `Partition.predecessors`
+  uses `-1` for it, and `SplitLayer` feeds it `x_in`. Without this, cutting right after a
+  residual block would be impossible, because the next block's `add` reads that block's
+  output. No proto change was needed (`int32`). Workers older than M1 would fail loudly
+  on `-1`.
+- **Verified by:** `test_validate_rejects_*` and
+  `test_residual_add_right_after_a_cut_gets_the_external_input`, local and distributed.
+
+### New features and how they were checked
+
+- **Named cuts** (`cuts=[...]`, `NamedCutSplitter`). **`expand=`** traces into submodules,
+  for finer cuts. **Cost strategies** `params`, `flops` and `profiled` choose the best
+  min-max cut among the valid cuts. `balanced_cuts` matches a brute-force search on 200
+  random cases. The DP breaks ties by the most even split.
+- `flops` and `profiled` measure on a deep copy, under `torch.random.fork_rng`. Tests check
+  that the model's state_dict, its grads and the global RNG are unchanged, so choosing a
+  split never changes the training trajectory. Every strategy trains to the unsplit losses
+  (≤1e-5) in tests.
+- The run manifest records the node names and `expand`. `restore_model_from_run` reads
+  `expand` back, so checkpoints of expanded graphs restore.
+
+### Round 2 matrix (no-regression check)
+
+Full CPU/SGD matrix rerun on the M1 code (`results/results_cpu_SGD.json` was overwritten; the M0 copy
+was kept aside and compared): **all 54 cells, and both references per model, are bit-identical to M0**.
+53/54 pass; the failing cell is still ResNet-18 + GPipe (BatchNorm, by design). All matrix models used `uniform`
+over a graph that M1 leaves unchanged, so identical numbers are the expected outcome. The new
+paths (generic wrappers, `-1` inputs, cost strategies, named cuts) are covered by the unit tests, local
+and over in-process gRPC workers. Not rerun: CPU AdamW and A100 AdamW. The code paths are the same as with SGD.
+
+### Open (carried)
+
+- Recovery re-slices with its own divmod-uniform split, not the run's strategy or named
+  cuts. With a fine-grained DAG graph it can land on an invalid cut and raise.
+- `profiled` times each node in isolation, so cross-node fusion and transfers are not
+  measured. Heterogeneous workers need per-worker scaling.
+- `uniform` still ignores `valid_cuts()` (kept to leave existing partitions unchanged), so it
+  can fail validation on fine-grained graphs where a cost strategy would succeed.

@@ -110,7 +110,8 @@ class LocalExecutor(BaseExecutor):
             layer_names = [type(l).__name__ for l in layers]
             self._run_logger.record_executor("local")
             self._run_logger.record_config(cfg)
-            self._run_logger.record_model(model_name, layer_names)
+            self._run_logger.record_model(model_name, layer_names,
+                                          node_names=model_graph.names(), expand=model_graph.expand)
             self._run_logger.record_split(partitions, layer_names, strategy_name)
 
         # Notify callbacks

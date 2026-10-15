@@ -27,7 +27,7 @@ jobs:
 
       # PyTorch is intentionally not a declared dependency: install the CPU build explicitly.
       - name: Install PyTorch (CPU)
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       # Install the published package (lib/torchslicer/pyproject.toml), not the dev one,
       # so packaging problems surface here before a release tag.
