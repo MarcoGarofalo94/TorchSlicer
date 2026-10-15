@@ -1,12 +1,13 @@
 from .base import BaseSplitter
 from .uniform import UniformSplitter
-from .cost import ParamSplitter, FlopsSplitter, ProfiledSplitter
+from .cost import ParamSplitter, FlopsSplitter, ProfiledSplitter, MemorySplitter
 
 _REGISTRY: dict = {
     "uniform": UniformSplitter,
     "params": ParamSplitter,
     "flops": FlopsSplitter,
     "profiled": ProfiledSplitter,
+    "memory": MemorySplitter,
 }
 
 

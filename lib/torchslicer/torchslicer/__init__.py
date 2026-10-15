@@ -1,4 +1,4 @@
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 __author__ = 'Marco Garofalo'
 
 from .core.slicer import Slicer
@@ -7,7 +7,10 @@ from .core.model_graph import ModelGraph, LayerNode, TraceError, _FlattenWrapper
 from .strategies.base import BaseSplitter, Partition
 from .strategies.uniform import UniformSplitter
 from .strategies.named import NamedCutSplitter
-from .strategies.cost import CostSplitter, ParamSplitter, FlopsSplitter, ProfiledSplitter, balanced_cuts
+from .strategies.cost import (
+    CostSplitter, ParamSplitter, FlopsSplitter, ProfiledSplitter, MemorySplitter, balanced_cuts,
+    activation_bytes,
+)
 from .strategies.registry import (
     register as register_strategy, get as _get_strategy, available as available_strategies,
 )
@@ -15,6 +18,7 @@ from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
 from .executors.distributed import DistributedExecutor, WorkerFailureError
 from .executors.p2p import P2PExecutor, run_p2p
+from .offload import OffloadExecutor
 from .executors.worker import resolve_device, run_worker, start_worker, WorkerHandle, WorkerServicer
 from .transport.base import BaseTransport
 from .discovery import BaseDiscovery, NodeInfo, AnnounceResult
@@ -23,7 +27,7 @@ from .config import (
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
     StartupConfig, TransportConfig,
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
-    NetworkConfig, PlanningConfig, DeployConfig, SLConfig,
+    NetworkConfig, PlanningConfig, DeployConfig, SLConfig, OffloadConfig,
 )
 from .monitor import TrainingCallback, RunLogger
 from .core.stages import (
@@ -185,6 +189,8 @@ class SlicedModel:
             raise ValueError("criterion must be provided directly or via run_config.training.criterion")
 
         n_micro = resolved_n_micro if resolved_use_gpipe else 1
+        if cfg is not None and cfg.offload.mode not in ("", "none") and type(self.executor) is LocalExecutor:
+            self.executor = OffloadExecutor()          # offload.* comes from the config
         import inspect
         accepted = inspect.signature(self.executor.setup).parameters
         extra = {"planner": self.plan} if "planner" in accepted else {}

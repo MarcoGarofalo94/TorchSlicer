@@ -264,6 +264,32 @@ class SLConfig:
 
 
 @dataclass
+class OffloadConfig:
+    """Out-of-core training on one node (local topology; see torchslicer/offload/ and
+    docs/tutorials/offload.md): slices live in a slower tier and are paged into the
+    device one at a time.
+
+    Fields:
+        mode:      "none" | "cpu" (pinned host RAM) | "disk" (files in ``dir``)  (env: OFFLOAD)
+        optimizer: where the optimizer step runs: "auto" (measured) | "gpu" (the state
+                   is paged with the slice) | "cpu" (gradients go to the host)
+                   (env: OFFLOAD_OPTIMIZER)
+        dir:       disk mode: directory for the slice files  (env: OFFLOAD_DIR)
+        slots:     device slots (>= 2: one computes while the next is prefetched)
+                   (env: OFFLOAD_SLOTS)
+        device:    compute device; "" = ``network.device``  (env: OFFLOAD_DEVICE)
+        direct_io: disk mode: ``O_DIRECT`` file I/O, bypassing the page cache
+                   (env: OFFLOAD_DIRECT_IO)
+    """
+    mode:      str = "none"
+    optimizer: str = "auto"
+    dir:       str = ""
+    slots:     int = 2
+    device:    str = ""
+    direct_io: bool = False
+
+
+@dataclass
 class RunConfig:
     run_id:          str                  = field(default_factory=_default_run_id)
     training:        TrainingConfig       = field(default_factory=TrainingConfig)
@@ -279,6 +305,7 @@ class RunConfig:
     planning:        PlanningConfig       = field(default_factory=PlanningConfig)
     deploy:          DeployConfig         = field(default_factory=DeployConfig)
     sl:              SLConfig             = field(default_factory=SLConfig)
+    offload:         OffloadConfig        = field(default_factory=OffloadConfig)
 
     # ── factory: flat Python API ──────────────────────────────────────────────
 
@@ -499,6 +526,12 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("SL_TAIL_PORT",           lambda cfg, v: setattr(cfg.sl, "tail_port",           int(v))),
     ("SL_CLIENTS",             lambda cfg, v: setattr(cfg.sl, "clients",             int(v))),
     ("SL_CLIENT_MODE",         lambda cfg, v: setattr(cfg.sl, "client_mode",         v.strip().lower())),
+    ("OFFLOAD",                lambda cfg, v: setattr(cfg.offload, "mode",           v.strip().lower())),
+    ("OFFLOAD_OPTIMIZER",      lambda cfg, v: setattr(cfg.offload, "optimizer",      v.strip().lower())),
+    ("OFFLOAD_DIR",            lambda cfg, v: setattr(cfg.offload, "dir",            v)),
+    ("OFFLOAD_SLOTS",          lambda cfg, v: setattr(cfg.offload, "slots",          int(v))),
+    ("OFFLOAD_DIRECT_IO",      lambda cfg, v: setattr(cfg.offload, "direct_io",      _parse_bool(v))),
+    ("OFFLOAD_DEVICE",         lambda cfg, v: setattr(cfg.offload, "device",         v.strip().lower())),
     ("SL_HANDOFF",             lambda cfg, v: setattr(cfg.sl, "handoff",             v.strip().lower())),
 )
 

@@ -252,6 +252,7 @@ class LocalExecutor(BaseExecutor):
             "duration_s": round(epoch_duration_s, 3),
             "phase":      "epoch",
             **self._meter.summary(self._placement, *self._link),
+            **self._epoch_extras(epoch_duration_s),
         }
         for cb in self._callbacks:
             try:
@@ -285,6 +286,10 @@ class LocalExecutor(BaseExecutor):
                 profiler.reset_epoch()
 
         return epoch_metrics
+
+    def _epoch_extras(self, duration_s: float) -> dict:
+        """Executor-specific fields for the epoch's history entry."""
+        return {}
 
     # ── cuts: hooks and byte counting ──────────────────────────────────────────
 

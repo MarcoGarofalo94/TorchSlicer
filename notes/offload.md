@@ -191,3 +191,16 @@ Legend for tiers: G = GPU, C = CPU DRAM, N = NVMe/disk. "Offloaded" = what lives
 - **Baseline for speed (same model, batch, GPU cap):** FSDP2 + `CPUOffloadPolicy` at world size 1
   (built into the installed torch, zero install). DeepSpeed ZeRO-Offload/Infinity as a second
   baseline if it installs here (`pip download` works; its CPU-Adam op is JIT-compiled) `[to check]`.
+
+## Measurements (2026-10-15, after implementing)
+Full numbers and the bugs found are in `notes/validation.md` (round 6). In short (666M-param
+model, A100 capped at 6 GB, 16 GB host RAM, 4 CPUs):
+- Offload with the GPU step: 0.84 s/step with 4.0 GB of GPU memory, against 0.61 s for unsplit
+  PyTorch with 15.5 GB and no cap. It is compute-bound: 0.81 s of compute, including the
+  recompute, against a 0.47 s transfer bound. FSDP2 CPU offload: 5.1 s/step, and only with
+  activation checkpointing.
+- Decision revisited: plain buffered `pread`/`pwrite` beat `O_DIRECT` 3x here, so `O_DIRECT` is an
+  option, off by default. DeepNVMe was not needed for the disk tier. The CPU optimizer step loses
+  on a 4-CPU box, so `auto` measures it.
+- Not done yet: DeepSpeed baselines (they exceed 16 GB of host RAM at 666M), a disk run on a model
+  larger than RAM, and the GPipe batch-32 config.

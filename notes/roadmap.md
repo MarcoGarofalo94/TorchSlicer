@@ -1,4 +1,4 @@
-# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, end of M4)
+# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, M5 in progress)
 
 Goal: become the de facto framework for split learning (SL) experiments, the way Flower is for FL.
 TorchSlicer is SL-only. Averaging/FL logic stays out of the core; it plugs in through hooks and is
@@ -91,6 +91,19 @@ shown in a Flower-based SplitFed baseline.
   Version 0.6.0. **Deviation from the plan:** sessions simulate all clients in the data owner's
   process (see Carried).
 
+- M5 (branch `feat/m5-offload`, forked from M4's tip, pushed): **implemented, benchmarks partly
+  done**. `torchslicer/offload/`: `ts.OffloadExecutor` (cpu or disk tier, GPU or CPU optimizer
+  step, chosen with `auto`), the `memory` strategy, and activation-aware `node_memory`. Survey:
+  `notes/offload.md`. Bugs and measurements: validation.md round 6 (issues 18–21). Exact against
+  unsplit in the matrix. 666M model under a 6 GB cap: 0.84 s/step, against 0.61 s for unsplit with
+  no cap and 5.1 s for FSDP2 offload + checkpointing. Version 0.7.0.
+  **Deferred, owner decision 2026-10-15** (come back after the other milestones):
+  - DeepSpeed ZeRO-3/2 baselines: they exceed this container's 16 GB of RAM at 666M and OOM-killed
+    it once;
+  - the 1.3B disk run, larger than RAM (`benchmarks/offload/configs/gpt1b3_disk.yaml`);
+  - the GPipe batch-32 config;
+  - repeats (mean ± std).
+
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
   from `main`. The chain is `main` → `feat/m0-foundations` → `feat/m1-split-anything` → `feat/m2-...` and so on.
@@ -171,14 +184,14 @@ shown in a Flower-based SplitFed baseline.
   every bug in `notes/validation.md` as usual.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-15, at the end of M4 (version 0.6.0).
+Last updated 2026-10-15, M5 implemented (version 0.7.0).
 - **Where things stand:**
   - Done, one branch per milestone: M0 on `feat/m0-foundations`, M1 on `feat/m1-split-anything`,
     M2 on `feat/m2-p2p`, M3 on `feat/m3-run-anywhere`, M4 on `feat/m4-sl-settings`.
-  - **Next: M5 (out-of-core training on one node).** Create it with
-    `git switch -c feat/m5-offload feat/m4-sl-settings`.
-  - M5 **starts with the technology survey** in `notes/offload.md` (see the M5 entry above).
-    Don't write code before the survey and its decision.
+    All milestone branches are pushed to `origin` (2026-10-15); `main` is unchanged.
+  - M5 is on `feat/m5-offload`: implemented, with benchmarks deferred (see its Status entry).
+  - **Next: M6 (NAT-friendly transport).** Create it with
+    `git switch -c feat/m6-nat feat/m5-offload`.
 - **Read first:**
   - this file;
   - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–5);
@@ -188,7 +201,8 @@ Last updated 2026-10-15, at the end of M4 (version 0.6.0).
   - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not
     for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (196 tests at the end of M4, about 2 min);
+  - `.venv/bin/python -m pytest tests/` green (222 tests at the end of M5, about 2 min;
+    `test_sl.py::test_distributed_hooks_match_local[hook0]` flaked once under load);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about
     15 min on CPU; pass a model name for a quick check).
     - Set `MATRIX_DEVICE=cuda` for the GPU, and
@@ -200,6 +214,10 @@ Last updated 2026-10-15, at the end of M4 (version 0.6.0).
   numbers *before* rerunning, because logs get overwritten. A paper on TorchSlicer will be written
   from these notes.
 - **Environment:**
+  - **Limits:** the container has a 16 GB RAM cgroup limit and a 4-CPU quota (`free` and `nproc`
+    don't show either). Going over the RAM limit OOM-kills the whole container, so estimate a
+    run's host RAM before launching it. The GPU exposes ~42 GB and has no NVML access, so a GPU
+    OOM fails an NVML assert instead of raising `OutOfMemoryError`.
   - Git commits: the container has no git identity, so commit with
     `git -c user.name=... -c user.email=...`. Ask the owner for the values if your memory doesn't
     have them.

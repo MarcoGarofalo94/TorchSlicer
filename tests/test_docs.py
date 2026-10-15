@@ -14,7 +14,7 @@ def _blocks(name):
             if "from_pretrained" not in b and "my_pack)" not in b]
 
 
-@pytest.mark.parametrize("name", ["custom_strategy.md", "pack.md", "p2p.md", "sl_settings.md"])
+@pytest.mark.parametrize("name", ["custom_strategy.md", "pack.md", "p2p.md", "sl_settings.md", "offload.md"])
 def test_tutorial_code_runs(name):
     pytest.importorskip("torchvision")
     ns = {}

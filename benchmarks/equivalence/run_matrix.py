@@ -1,7 +1,8 @@
 """Model x mode matrix: every mode must reproduce the unsplit-PyTorch loss trajectory.
 
 usage: run_matrix.py [model ...]     logs in ./logs/<device>_<opt>/<model>_<mode>*.log
-env:   MATRIX_DEVICE=cpu|cuda, MATRIX_OPT='{"name": ..., "params": {...}}', MATRIX_PORT_BASE
+env:   MATRIX_DEVICE=cpu|cuda, MATRIX_OPT='{"name": ..., "params": {...}}', MATRIX_PORT_BASE,
+       MATRIX_MODES=local,offload,... (a subset of the modes; only a full run writes results)
 A full run (no model args) writes results/results_<device>_<opt>.json; see notes/validation.md.
 """
 import json
@@ -40,7 +41,8 @@ def _spawn(args, env, log):
 def _json_losses(log):
     for line in reversed(Path(log).read_text().splitlines()):
         if line.startswith('{"losses"'):
-            return json.loads(line)["losses"]
+            out = json.loads(line)
+            return "SKIP" if out.get("skip") else out["losses"]
     return None
 
 
@@ -109,10 +111,23 @@ MODES = {
     "central-tcp": lambda n: central(n, "tcp"),
     "p2p-grpc": lambda n: p2p(n, "grpc"),
     "p2p-tcp": lambda n: p2p(n, "tcp"),
+    "offload": lambda n: inproc(n, "offload"),
+    "offload-gpipe": lambda n: inproc(n, "offload-gpipe"),
+    "offload-disk": lambda n: inproc(n, "offload-disk"),
 }
+if GPU:   # the CPU optimizer placement only differs from "offload" with a device
+    MODES["offload-cpuopt"] = lambda n: inproc(n, "offload-cpuopt")
+if os.environ.get("MATRIX_MODES"):   # e.g. MATRIX_MODES=local,offload for a quick check
+    MODES = {k: v for k, v in MODES.items() if k in os.environ["MATRIX_MODES"].split(",")}
+
+
+# modes compared against another reference than the plain unsplit run
+REFERENCE = {"offload-cpuopt": "reference-cpuopt"}
 
 
 def verdict(ref, got, tol):
+    if got == "SKIP":
+        return "SKIP (refused by design)"
     if not got or len(got) != len(ref):
         return "FAIL (no result)"
     err = max(abs(a - b) for a, b in zip(ref, got))
@@ -132,10 +147,16 @@ if __name__ == "__main__":
                 got = fn(name)
             except subprocess.TimeoutExpired:
                 got = None
-            v = verdict(ref, got, 1e-5) if ref else "FAIL (no reference)"
+            r = ref
+            if mode in REFERENCE:
+                key = REFERENCE[mode]
+                if key not in row:
+                    row[key] = inproc(name, key)
+                r = row[key]
+            v = verdict(r, got, 1e-5) if r else "FAIL (no reference)"
             row[mode] = {"losses": got, "verdict": v}
             print(f"{name:9s} {mode:13s} {v:24s} {time.time() - t0:5.1f}s  {got}", flush=True)
         results[name] = row
-    if not sys.argv[1:]:   # only a full run replaces the recorded results
+    if not sys.argv[1:] and not os.environ.get("MATRIX_MODES"):   # only a full run replaces the recorded results
         tag = f"{M.DEVICE}_{M.OPTIMIZER['name']}"
         (HERE / "results" / f"results_{tag}.json").write_text(json.dumps(results, indent=1))

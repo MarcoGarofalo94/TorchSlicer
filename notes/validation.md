@@ -620,3 +620,129 @@ design, max|Δ| = 7.7e-2 as before). All 63 loss lists (references and every mod
 **bit-identical to M3**. Moving the data owner's hosting into `DistributedExecutor`, the always-on
 byte counting and compute timing, and the per-epoch `get_stats` change no loss. Not rerun: CPU
 AdamW and A100 AdamW (same code paths). Test suite: 196 passed.
+
+## Round 6 (M5 "out-of-core training", 2026-10-15, branch `feat/m5-offload`)
+
+M5 adds `torchslicer/offload/` (survey and decision: `notes/offload.md`; tutorial
+`docs/tutorials/offload.md`). `ts.OffloadExecutor` keeps every slice in a slow tier (pinned host
+RAM, or files) and pages it into ≥2 device slots that are allocated once. The schedule is
+L2L/Harmony:
+- forward without a graph, keeping each slice's input and RNG state;
+- the last slice runs forward and backward in one go;
+- backward in reverse, recomputing each slice, with the optimizer step right after and an eager
+  write-back.
+
+The optimizer step runs on the GPU (state paged with the slice) or on the CPU (`auto` measures).
+The new `memory` strategy picks the fewest slices that fit a slot budget.
+`CostSplitter.node_memory` now counts activations when the strategy has an example input.
+
+**How it was checked.**
+- `tests/test_offload.py` (29 tests). Offload is bit-identical to `LocalExecutor` (losses and
+  weights) for cpu/disk tiers, with and without GPipe, with dropout, BatchNorm (running stats
+  updated once), tied weights, buffers shared by slices, and the config/env switch. On CUDA it
+  matches local within 1e-5 for the GPU step, the CPU step, disk, and disk + `O_DIRECT`.
+- A subprocess test caps the GPU at 100 MB. The in-memory executor runs out of memory; offload
+  trains to the uncapped reference loss within 1e-5, under the cap.
+- The equivalence matrix gained modes `offload`, `offload-gpipe` and `offload-disk`, plus
+  `offload-cpuopt` on CUDA:
+  - CPU/SGD: every model OK. ResNet-18 + GPipe differs exactly like plain GPipe (BatchNorm with
+    micro-batches, by design).
+  - CUDA/AdamW: every model OK, except two cases. ResNet-18 offload-gpipe is the same BatchNorm
+    case. GPT-2 offload-cpuopt is SKIP: refused by design, because a trainable tied embedding is
+    shared by two slices.
+  - `offload-cpuopt` is compared with a new `reference-cpuopt`: unsplit, with the optimizer
+    stepping on CPU copies. Against the plain CUDA reference, ResNet-18 differs by 1.1e-3, which is
+    CPU-vs-CUDA AdamW rounding amplified as the loss falls from 2.4 to 0.2. Against the same
+    arithmetic it matches at 3.3e-7.
+
+**Performance** (A100 limited to a 6 GB cap; 666M-param GPT-shaped stack, AdamW,
+batch 8 × 512; `benchmarks/offload/configs/gpt660m_b8.yaml`; one run of 6 steps, median of the
+last 4):
+
+| mode | s/step |
+|---|---|
+| unsplit, no cap (15.5 GB) | 0.61 |
+| unsplit, 6 GB cap | OOM |
+| offload, GPU step (4.0 GB peak) | 0.84 |
+| offload, CPU step | 2.40 |
+| offload, disk (page cache) | 3.92 |
+| FSDP2 CPU offload | OOM |
+| FSDP2 CPU offload + activation checkpointing | 5.10 |
+
+The GPU-step mode is compute-bound. Compute (including the recompute) is 0.81 s; the transfer
+bound is 0.47 s (10 GB in + 8 GB out at the measured pinned-copy bandwidth); the copies are hidden.
+
+### 18. Restoring BatchNorm stats before backward broke cuDNN's saved tensors (dev, crash)
+- **Symptom:** backward of a recomputed slice with BatchNorm on CUDA raised "one of the variables
+  needed for gradient computation has been modified by an inplace operation".
+- **Root cause:** cuDNN batch norm saves `running_mean`/`running_var` for backward, and the
+  restore after the recompute bumped their version.
+- **Fix:** `_replay` returns a `restore()` that is called after backward.
+- **Test:** `test_batchnorm_stats_update_once`, `test_cuda_matches_local`.
+
+### 19. Tensors shared by several slices were paged per slice (dev, silent NaN)
+- **Symptom:** Llama in disk mode gave NaN losses.
+- **Root cause:** HF Llama's rotary `inv_freq` buffer is one tensor used by 4 stages. Each slice's
+  page re-pointed it, so a slice computed with another slice's home or slot view. Tied embeddings
+  have the same shape of problem.
+- **Fix:** any tensor used by more than one slice stays resident on the device. With
+  `optimizer="cpu"`, a trainable shared tensor is refused.
+- **Test:** `test_tensor_shared_by_slices_stays_resident`, the tied-weight tests, the
+  llama/gpt2 matrix rows.
+
+### 20. The cpu tier could be OOM-killed with no message, and the first check was wrong (robustness)
+- **Symptom:** a 1.3B model's pinned homes (params + AdamW state ≈ 15 GB) hit the container's
+  16 GB cgroup limit (`free` shows the host's 1.5 TB). The process was first throttled, which looked
+  like a hang, then killed.
+- **Fix:** `host_memory_available()` is cgroup-aware, and setup raises `MemoryError` with the
+  numbers and points to disk mode. The first version of the check counted reclaimable page cache as
+  used, and counted the pinned home twice, so it refused a 666M run that fits. It now counts clean
+  file cache as available and the optimizer state (+ gradients) as new.
+- **Test:** `test_cpu_tier_checks_host_memory`.
+- **Note:** a DeepSpeed ZeRO-3 baseline launched without such a check OOM-killed the whole
+  container. Baselines need the same estimate before they run.
+
+### 21. Smaller issues found while building M5
+- **Bandwidth probe:** it allocated 256 MB on the device and failed under a 100 MB cap. It now uses
+  32 MB buffers, best of 3, and also measures both directions at once (~30 GB/s total here, not
+  2 × 26).
+- **O_DIRECT alignment:** pinned buffers from the caching host allocator are often not
+  page-aligned (offsets of 512 or 1536 B), which gave EINVAL. Fixed with `_host_aligned`.
+- **Meta placeholders:** `Parameter.data = meta tensor` is refused, so evicted tensors on disk
+  point at mmap views of their files.
+- **GPU OOM on this machine:** with no NVML access, a capped allocation fails an NVML internal
+  assert instead of raising `OutOfMemoryError`. The test and the benchmark treat that assert as
+  OOM.
+
+### Measurements that changed the design
+- **Disk I/O path** (666M model, s/step):
+  - `mmap` + memcpy: 11;
+  - O_DIRECT `pread`/`pwrite` (16 MiB × 4 threads): 12–16;
+  - buffered `pread`/`pwrite`: 3.9.
+
+  Standalone, O_DIRECT reaches 4.5 GB/s for writes and 15 GB/s for reads (the host caches below
+  O_DIRECT), but under training's mixed traffic only ~1.4 GB/s in total. So `direct_io` is an
+  option, off by default. The 666M disk run fits in the page cache, so it measures RAM. A model
+  larger than RAM (the 1.3B config) is not run yet.
+- **CPU optimizer step:** the container has a 4-CPU quota. For 666M params, fused CPU AdamW
+  takes ~2.3 s, against ~11 s for foreach. Both are slower than the transfers they save, so `auto`
+  picks the GPU here.
+- **Micro-batch order:** offload runs slice-major and GPipe micro-batch-major. With dropout in
+  several slices and M > 1, the masks differ from GPipe's: same distribution, not bit-identical.
+  Documented; with M = 1 everything is identical.
+
+### Behaviour changes
+- `CostSplitter.node_memory` adds the measured activation bytes when the strategy has an
+  `example_input` (flops, profiled, memory). This affects distributed planning only with memory
+  caps.
+- `LocalExecutor` gains an `_epoch_extras()` hook for executor-specific history fields.
+- Config: new `offload:` section (`mode`, `optimizer`, `dir`, `slots`, `device`, `direct_io`) and
+  `OFFLOAD*` env vars. Version 0.7.0.
+
+### Open (carried)
+- DeepSpeed ZeRO-3/ZeRO-2 baselines (they don't fit in 16 GB of host RAM at 666M); the 1.3B
+  disk run (larger than RAM); the batch-32 GPipe config; mean ± std over repeats.
+- `tests/test_sl.py::test_distributed_hooks_match_local[hook0]` failed once in a full-suite run
+  and passed in 5 reruns. It looks flaky under load (distributed, gRPC); not touched by M5.
+- The full matrix was not rerun end to end on the final code. The offload modes and touched
+  models were rerun after each fix. Test suite: 221 passed, plus the flaky test above.

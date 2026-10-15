@@ -1,0 +1,12 @@
+# batch 32 as 4 micro-batches. ~660M-param GPT-shaped stack, AdamW: params + grads + state ~ 10.6 GB, under a 6 GB GPU cap.
+# Sized for this container's host RAM (16 GB cgroup limit): the cpu tier holds params + state.
+seed: 0
+model: {vocab: 32000, seq: 512, d_model: 1536, n_heads: 16, d_ff: 6144, n_layers: 20, dropout: 0.0}
+batch: 32
+steps: 6
+warmup: 2
+tf32: true
+gpu_cap_gb: 6
+optimizer: {name: AdamW, params: {lr: 1.0e-4, weight_decay: 0.01, fused: true}}
+offload: {n_slices: 22, slots: 2, n_micro: 4, dir: ""}
+modes: [reference, reference-cap, offload-gpu, offload-cpu, offload-disk, fsdp2-offload, fsdp2-offload-ckpt]

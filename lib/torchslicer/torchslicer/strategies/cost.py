@@ -144,7 +144,13 @@ class CostSplitter(BaseSplitter):
         return list(gflops)
 
     def node_memory(self, model_graph) -> list:
-        """Estimated training memory per node, bytes (shared parameters counted once)."""
+        """Estimated training memory per node, bytes (shared parameters counted once):
+        ``memory_factor`` x trainable parameter bytes (weights, gradients, optimizer
+        state) + frozen parameters + buffers, plus the activations saved for backward when
+        the strategy has an ``example_input`` (measured by ``activation_bytes``)."""
+        acts = None
+        if getattr(self, "example_input", None) is not None:
+            acts = activation_bytes(model_graph, self.example_input, getattr(self, "aux", None))
         seen, out = set(), []
         for node in model_graph.nodes:
             total = 0.0
@@ -158,7 +164,7 @@ class CostSplitter(BaseSplitter):
                 if id(b) not in seen:
                     seen.add(id(b))
                     total += b.numel() * b.element_size()
-            out.append(total)
+            out.append(total + (acts[len(out)] if acts else 0))
         return out
 
 
@@ -298,3 +304,86 @@ class ProfiledSplitter(_InputSplitter):
 
 def _nbytes(t) -> int:
     return t.numel() * t.element_size() if isinstance(t, torch.Tensor) else 0
+
+
+def activation_bytes(model_graph, example_input, aux: dict | None = None) -> list:
+    """Bytes each node saves for backward on ``example_input`` (parameters excluded).
+
+    Runs the real modules node by node, keeping one node's graph at a time, on the
+    device they are on, without changing them: the RNG state is forked and buffers
+    (BatchNorm running stats) are restored afterwards.
+    """
+    params = {p.data_ptr() for n in model_graph.nodes for p in n.module.parameters()}
+    saved = [(b, b.detach().clone()) for n in model_graph.nodes for b in n.module.buffers()]
+    counts, outputs = [], []
+    current = [0]
+
+    def pack(t):
+        if t.data_ptr() not in params:
+            current[0] += _nbytes(t)
+        return t
+
+    devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
+    with torch.random.fork_rng(devices=devices), torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+        for node in model_graph.nodes:
+            args = [outputs[p] for p in node.predecessors] if node.predecessors else [example_input]
+            args = [a.detach().requires_grad_(a.is_floating_point()) if isinstance(a, torch.Tensor) else a
+                    for a in args]
+            kwargs = aux if (not node.predecessors and aux
+                             and getattr(node.module, "accepts_aux_inputs", False)) else {}
+            current[0] = 0
+            with torch.enable_grad():
+                out = node.module(*args, **kwargs)
+            counts.append(current[0])
+            outputs.append(out.detach() if isinstance(out, torch.Tensor) else out)
+    with torch.no_grad():
+        for b, v in saved:
+            b.copy_(v)
+    return counts
+
+
+class MemorySplitter(ParamSplitter):
+    """The fewest slices (at least ``n``) whose estimated training memory each fits
+    ``slot_mb``, balanced by parameter count: for out-of-core training
+    (``ts.OffloadExecutor``), where every slice must fit one device slot.
+
+    A slice's memory is its parameters and buffers, the gradients and ``state_tensors``
+    optimizer-state copies of its trainable parameters (AdamW: 2), and, with an
+    ``example_input`` (one micro-batch), the activations its recompute keeps for
+    backward. ``optimizer`` (``{"name": ..., "params": ...}``) measures ``state_tensors``.
+    """
+
+    name = "memory"
+
+    def __init__(self, slot_mb: float | None = None, optimizer: dict | None = None,
+                 state_tensors: int | None = None, example_input=None, aux: dict | None = None):
+        super().__init__()
+        self.slot_mb = slot_mb
+        if state_tensors is None and optimizer is not None:
+            from ..offload.executor import optimizer_state_tensors
+            state_tensors = optimizer_state_tensors(optimizer)
+        self.state_tensors = 2 if state_tensors is None else state_tensors
+        self.example_input = example_input
+        self.aux = aux
+
+    @property
+    def memory_factor(self) -> float:          # weights + gradients + optimizer state
+        return 2.0 + self.state_tensors
+
+    def split(self, model_graph, n_partitions: int, nodes: list | None = None) -> list:
+        if not self.slot_mb:
+            return super().split(model_graph, n_partitions, nodes)
+        costs = [float(c) for c in self.node_costs(model_graph)]
+        mem = self.node_memory(model_graph)
+        self.last_memory = mem
+        cap = self.slot_mb * 2**20
+        valid = model_graph.valid_cuts()
+        for n in range(max(1, n_partitions), len(valid) + 2):
+            try:
+                cuts = balanced_cuts(costs, valid, n, mem=mem, caps=[cap] * n)
+            except ValueError:
+                continue
+            return self.partitions_from_cuts(model_graph, cuts)
+        biggest = max(mem) / 2**20
+        raise ValueError(f"no split fits slot_mb={self.slot_mb}: the largest node alone needs "
+                         f"~{biggest:.0f} MB; raise slot_mb, or expand= / pack= for finer cuts")
