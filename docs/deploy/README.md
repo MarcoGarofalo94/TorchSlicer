@@ -69,6 +69,8 @@ network:
   coordinator_bind_address: 0.0.0.0:50054
 transport:
   tensor: grpc           # or tcp (listener at worker port + tensor_port_offset)
+  nat: false             # true: the data owner is behind NAT (opens no port, dials out)
+  relay: ""              # "auto": add a relay node; or host:port of a running relay
 deploy:
   topology: centralized  # local | centralized | p2p
   name: torchslicer      # compose project / k8s object prefix
@@ -81,6 +83,16 @@ deploy:
 *on top of* the YAML, so a per-node env var (for example `ROLE`, `PORT` or `DEVICE`) overrides
 the shared file. The full env var → field table is `_ENV_OVERRIDES` in
 `torchslicer/config.py`.
+
+## Nodes behind NAT
+
+`transport.nat: true` puts the driving node (the data owner) behind NAT: it gets
+`TRANSPORT_NAT=true`, opens no port, and dials every worker; their calls to it come back
+over those connections. A worker can be put behind NAT with `TRANSPORT_NAT=true` in its own
+env. It then tunnels to `COORDINATOR_ADDRESS`, which the launcher sets on every worker.
+`transport.relay: auto` adds a `relay` node (`python -m torchslicer relay`; a Deployment +
+Service on k8s), and every other node sends all its calls through it. Use a relay when two
+nodes that talk are both behind NAT. See [the NAT tutorial](../tutorials/nat.md).
 
 ## Start-up order
 

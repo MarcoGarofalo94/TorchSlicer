@@ -1,4 +1,4 @@
-# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, M5 in progress)
+# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, M6 done)
 
 Goal: become the de facto framework for split learning (SL) experiments, the way Flower is for FL.
 TorchSlicer is SL-only. Averaging/FL logic stays out of the core; it plugs in through hooks and is
@@ -104,6 +104,25 @@ shown in a Flower-based SplitFed baseline.
   - the GPipe batch-32 config;
   - repeats (mean ± std).
 
+- M6 (branch `feat/m6-nat`, forked from M5's tip, not merged/pushed): **done** = NAT-friendly
+  transport, `torchslicer/transport/tunnel.py`; tutorial `docs/tutorials/nat.md`.
+  - A node behind NAT (`transport.nat`) opens no port. It dials a `TunnelService.open` stream to
+    each node that calls it, and every call to it (gradients, U-shaped tail activations, metrics,
+    errors, heartbeats, tied weights, `init`) comes back on that stream.
+  - A per-node `Router` routes each call: in-process, inbound tunnel, relay or direct.
+    `router.channel()` replaces `grpc.insecure_channel`, so stubs and call sites are unchanged.
+  - Optional relay: `python -m torchslicer relay`, `transport.relay` (`auto` = a launcher node).
+    Covers NAT'd neighbours and a NAT'd coordinator with registration.
+  - Checked: `tests/test_nat.py` (24 tests: settings × topologies × transports, NAT'd workers,
+    relay, tied weights, failure/recovery, real OS processes). Matrix modes `p2p-nat` and
+    `p2p-relay` are bit-exact on all 9 models; the full CPU matrix is 97/99 (the 2 known GPipe +
+    BatchNorm cells).
+  - Cost (`benchmarks/nat/`, mean ± std of 3): the tunnel is free vs direct gRPC; +27% vs direct
+    raw TCP, because the reverse traffic uses gRPC; the relay is +11%.
+  - Bug fixed: validation.md issue 22. Version 0.8.0.
+  - **Deviation from the plan:** not only the gradient comes back in a reply. Every reverse call
+    rides the client's own connection (rationale in validation.md round 7).
+
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
   from `main`. The chain is `main` → `feat/m0-foundations` → `feat/m1-split-anything` → `feat/m2-...` and so on.
@@ -184,24 +203,26 @@ shown in a Flower-based SplitFed baseline.
   every bug in `notes/validation.md` as usual.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-15, M5 implemented (version 0.7.0).
+Last updated 2026-10-15, M6 done (version 0.8.0).
 - **Where things stand:**
   - Done, one branch per milestone: M0 on `feat/m0-foundations`, M1 on `feat/m1-split-anything`,
     M2 on `feat/m2-p2p`, M3 on `feat/m3-run-anywhere`, M4 on `feat/m4-sl-settings`.
     All milestone branches are pushed to `origin` (2026-10-15); `main` is unchanged.
   - M5 is on `feat/m5-offload`: implemented, with benchmarks deferred (see its Status entry).
-  - **Next: M6 (NAT-friendly transport).** Create it with
-    `git switch -c feat/m6-nat feat/m5-offload`.
+  - M6 is on `feat/m6-nat` (done, not pushed).
+  - **Next: M7 (baselines + paper).** Create it with
+    `git switch -c feat/m7-baselines feat/m6-nat`.
 - **Read first:**
   - this file;
-  - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–5);
+  - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–7);
   - `CLAUDE.md` (layout, commands, architecture, including P2P, planning, run-anywhere and SL
     settings);
-  - `docs/tutorials/p2p.md`, `docs/tutorials/sl_settings.md` and `docs/deploy/README.md`.
+  - `docs/tutorials/p2p.md`, `docs/tutorials/sl_settings.md`, `docs/tutorials/nat.md` and
+    `docs/deploy/README.md`.
   - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not
     for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (222 tests at the end of M5, about 2 min;
+  - `.venv/bin/python -m pytest tests/` green (247 tests at the end of M6, about 3 min;
     `test_sl.py::test_distributed_hooks_match_local[hook0]` flaked once under load);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about
     15 min on CPU; pass a model name for a quick check).
@@ -250,6 +271,15 @@ Last updated 2026-10-15, M5 implemented (version 0.7.0).
     activations or optimizer state. M5 needs the full estimate.
   - Compute timing synchronizes CUDA after each phase on CUDA devices (validation.md round 5,
     "Behaviour changes"). Offload overlap measurements must account for it, or make it optional.
+- **Carried from M6:**
+  - **TCP reverse path.** With `transport.tensor: tcp`, traffic to a NAT'd node rides the gRPC
+    tunnel (+10 ms/batch in the benchmark).
+  - **No STUN/ICE hole punching.** NAT'd peers always go through the relay.
+  - **No TLS or authentication** on tunnels or the relay. Any node can announce any address to a
+    relay, so this is needed before untrusted deployments.
+  - **Never run across a real NAT or WAN.** This belongs with M8.
+  - **A NAT'd worker's `init` waits up to 30 s** for each peer tunnel, so the "two adjacent NAT'd
+    workers" error takes 30 s to appear.
 - **Carried (not done in M4):**
   - **Clients on several machines.** Multi-client sessions simulate every client in the data
     owner's process (one process holds all clients' data). That is enough for experiments, but

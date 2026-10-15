@@ -26,6 +26,7 @@ from ..monitor import tracer as _tracer
 from ..monitor import WorkerProfiler
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
 from ..retry import RetryPolicy
+from ..transport.tunnel import Router
 
 try:
     import grpc
@@ -56,10 +57,6 @@ _FRAME_HEADER = struct.Struct("!cIBHH")
 _SHAPE_ITEM = struct.Struct("!q")
 _PAYLOAD_LEN = struct.Struct("!Q")
 _HOSTNAME = socket.gethostname()
-
-
-def _channel(addr):
-    return grpc.insecure_channel(addr, options=_GRPC_OPTS)
 
 
 class _StaleWorkError(RuntimeError):
@@ -422,6 +419,12 @@ class WorkerServicer(
         # In-process coordinator (P2P driver): called directly instead of over gRPC.
         # Anything with the CoordinatorService stub methods works.
         self.local_coordinator = None
+        # Where calls to other nodes go (transport/tunnel.py): direct, by tunnel, or
+        # through a relay. ``nat``: this worker accepts no connections, so it opens a
+        # tunnel to each neighbour at init (the coordinator's is opened at start).
+        self.router = Router()
+        self.nat = False
+        self._peer_tunnels: set = set()
 
         self._tied_cond = threading.Condition()
         self._reset_state()
@@ -597,27 +600,30 @@ class WorkerServicer(
             self.coordinator = request.coordinator
             self._n_micro    = max(1, request.n_micro) if request.n_micro else 1
 
+            # gRPC stubs always (a peer behind a tunnel or relay is reached through
+            # them); raw TCP is used for a peer while it is directly reachable.
+            channel = self.router.channel
             if self.next_worker:
+                self._next_stub = worker_service_pb2_grpc.WorkerServiceStub(
+                    channel(self.next_worker))
                 if self._tensor_transport == "tcp":
                     self._next_tensor = _TensorPeerClient(
                         _tensor_addr(self.next_worker, self._tensor_port_offset)
                     )
-                else:
-                    self._next_stub = worker_service_pb2_grpc.WorkerServiceStub(
-                        _channel(self.next_worker))
             if self.prev_worker:
+                self._prev_stub = worker_service_pb2_grpc.WorkerServiceStub(
+                    channel(self.prev_worker))
                 if self._tensor_transport == "tcp":
                     self._prev_tensor = _TensorPeerClient(
                         _tensor_addr(self.prev_worker, self._tensor_port_offset)
                     )
-                else:
-                    self._prev_stub = worker_service_pb2_grpc.WorkerServiceStub(
-                        _channel(self.prev_worker))
             if self.local_coordinator is not None:
                 self._coord_stub = self.local_coordinator
             elif self.coordinator:
                 self._coord_stub = coordinator_service_pb2_grpc.CoordinatorServiceStub(
-                    _channel(self.coordinator))
+                    channel(self.coordinator))
+            if self.nat:
+                self._open_peer_tunnels(request)
 
             if request.checkpoint_path:
                 self._load_checkpoint(request.checkpoint_path)
@@ -725,7 +731,8 @@ class WorkerServicer(
                 "group": t.group,
                 "param": retie(self.layer, list(t.names)),
                 "owner": t.owner,
-                "stubs": [worker_service_pb2_grpc.WorkerServiceStub(_channel(a)) for a in t.peers],
+                "stubs": [worker_service_pb2_grpc.WorkerServiceStub(self.router.channel(a))
+                          for a in t.peers],
             }
             for t in tied
         ]
@@ -793,6 +800,29 @@ class WorkerServicer(
                 for stub in t["stubs"]:
                     self._tied_call("tied_update", stub, t["group"], key, t["param"].detach())
 
+    # ── NAT ────────────────────────────────────────────────────────────────────
+
+    def _open_peer_tunnels(self, request) -> None:
+        """A NAT'd worker can't be dialed, so it opens a tunnel to every node that sends
+        to it: its neighbours (activations, gradients) and tied-weight peers. The
+        coordinator's tunnel is already open. Through a relay nothing is needed."""
+        if self.router.relay:
+            return
+        wanted = {a for a in (request.prev_worker, request.next_worker) if a}
+        wanted |= {a for t in request.tied for a in t.peers}
+        wanted -= {request.coordinator, *self.router.addresses()}
+        for address in sorted(self._peer_tunnels - wanted):
+            self.router.release(address)
+        for address in sorted(wanted):
+            try:
+                self.router.keep(address, wait=30.0)
+            except grpc.RpcError as exc:
+                raise RuntimeError(
+                    f"this worker is behind NAT (transport.nat) and can't open a tunnel to its "
+                    f"peer {address}: {exc.details()}. If that peer is behind NAT too, route "
+                    "both through a relay (transport.relay).") from None
+        self._peer_tunnels = wanted
+
     # ── capabilities (planning) ────────────────────────────────────────────────
 
     def capabilities(self) -> dict:
@@ -820,7 +850,7 @@ class WorkerServicer(
 
     def probe_link(self, request, context):
         try:
-            stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(request.target))
+            stub = worker_service_pb2_grpc.WorkerServiceStub(self.router.channel(request.target))
             rtt, mbps = measure_link(stub, request.n_bytes, max(1, request.repeats or 3))
             return worker_service_pb2.LinkProbeReply(rtt_ms=rtt, bandwidth_mbps=mbps)
         except Exception as e:
@@ -1157,7 +1187,8 @@ class WorkerServicer(
     def _send_forward_peer(self, batch_id: int, out: torch.Tensor) -> None:
         out = self._encode_out(batch_id, out)
         try:
-            if self._tensor_transport == "tcp" and self._next_tensor is not None:
+            if (self._tensor_transport == "tcp" and self._next_tensor is not None
+                    and self.router.is_direct(self.next_worker)):
                 with _tracer.span(
                     "torchslicer.worker.activation_send",
                     batch_id=batch_id,
@@ -1414,7 +1445,8 @@ class WorkerServicer(
             grad = self._encode_grad(batch_id, grad)
             with self._profiler.phase("send_bwd"):
                 try:
-                    if self._tensor_transport == "tcp" and self._prev_tensor is not None:
+                    if (self._tensor_transport == "tcp" and self._prev_tensor is not None
+                            and self.router.is_direct(self.prev_worker)):
                         with _tracer.span(
                             "torchslicer.worker.gradient_send",
                             batch_id=batch_id,
@@ -1535,11 +1567,34 @@ class WorkerHandle:
     def stop(self, grace: float = 0) -> None:
         self.servicer.stop_tensor_server()
         self.server.stop(grace)
+        self.servicer.router.close()
+
+
+class _NoServer:
+    """What a NAT'd worker has instead of a gRPC server: it listens on nothing and is
+    served through its tunnels. ``stop`` ends it like ``grpc.Server.stop``."""
+
+    def __init__(self, router):
+        self._router = router
+        self._stopped = threading.Event()
+
+    def stop(self, grace=None):
+        # like grpc.Server.stop(grace): let in-flight replies (e.g. the Ack of the
+        # shutdown call that stops it) leave over the tunnel before closing it
+        if grace:
+            import time
+            time.sleep(min(float(grace), 1.0))
+        self._stopped.set()
+        self._router.close()
+
+    def wait_for_termination(self, timeout=None):
+        return self._stopped.wait(timeout)
 
 
 def start_worker(port: int = 0, *, host: str = "[::]", address: str | None = None,
                  run_config: RunConfig | None = None, servicer_class=None,
-                 grpc_workers: int = 10) -> WorkerHandle:
+                 grpc_workers: int = 10, nat: bool | None = None,
+                 tunnel_to: list | None = None) -> WorkerHandle:
     """Start a worker's gRPC (and, with ``transport.tensor: tcp``, TCP tensor) server in
     this process and return without blocking. It registers with no one: a coordinator
     or P2P driver must know its address (``StaticDiscovery``). ``run_worker`` is the
@@ -1550,8 +1605,14 @@ def start_worker(port: int = 0, *, host: str = "[::]", address: str | None = Non
 
         followers = [ts.start_worker(host="127.0.0.1") for _ in range(2)]
         peers = [w.address for w in followers]
+
+    ``nat`` (default ``transport.nat``): the worker is behind NAT. It opens no port;
+    ``address`` is only its name, and it opens a tunnel to each node in ``tunnel_to``
+    (the coordinator or P2P driver that will drive it), or to ``transport.relay``.
     """
     cfg = run_config or RunConfig.load()
+    nat = bool(cfg.transport.nat if nat is None else nat)
+    relay = (cfg.transport.relay or "").strip()
     servicer = (servicer_class or WorkerServicer)()
     if cfg.network.device and cfg.network.device != "auto":
         # the servicer resolved DEVICE from the env; an explicit config device wins
@@ -1565,17 +1626,38 @@ def start_worker(port: int = 0, *, host: str = "[::]", address: str | None = Non
         "first_slice":    bool(cfg.network.worker_first_slice),
         "tags":           list(cfg.network.worker_tags),
     }
+    servicer.router = router = Router(relay or None, keepalive_s=cfg.transport.tunnel_keepalive_s)
+    servicer.nat = nat
+    if nat:
+        tunnel_to = [a for a in (tunnel_to or []) if a]
+        if not relay and not tunnel_to:
+            router.close()
+            raise ValueError("a worker behind NAT (transport.nat) must know who drives it: "
+                             "network.coordinator_address (the coordinator or P2P driver), "
+                             "or transport.relay")
+        if address is None:
+            address = f"{_HOSTNAME}:{port}" if port else f"{_HOSTNAME}-{os.getpid()}-{id(servicer):x}:0"
+        server = _NoServer(router)
+        servicer.set_server(server)
+        router.serve(address, servicer, worker_service_pb2_grpc.add_WorkerServiceServicer_to_server)
+        if not relay:
+            for target in tunnel_to:
+                router.keep(target)
+        _LOG.info("worker behind NAT address=%s tunnels=%s", address, [relay] if relay else tunnel_to)
+        return WorkerHandle(servicer, server, address)
     if port == 0 and servicer._tensor_transport == "tcp":
         raise ValueError("start_worker(port=0) is gRPC-only: the TCP tensor port is port + offset")
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=grpc_workers), options=_GRPC_OPTS)
     worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(servicer, server)
+    router.add_to_server(server)
     port = server.add_insecure_port(f"{host}:{port}")
     server.start()
     servicer.set_server(server)
     servicer.start_tensor_server(port + servicer._tensor_port_offset)
     if address is None:
         address = f"127.0.0.1:{port}" if host in ("127.0.0.1", "localhost") else f"{_HOSTNAME}:{port}"
+    router.serve(address, servicer, worker_service_pb2_grpc.add_WorkerServiceServicer_to_server)
     return WorkerHandle(servicer, server, address)
 
 
@@ -1669,8 +1751,14 @@ def run_worker(
     tags = list(cfg.network.worker_tags)
 
     # ── build servicer + gRPC server ────────────────────────────────────────
-    handle   = start_worker(port, run_config=cfg, servicer_class=servicer_class,
-                            grpc_workers=grpc_workers)
+    # Behind NAT, the worker tunnels to whoever drives it: the coordinator, else the
+    # P2P driver (network.coordinator_address, else the first of discovery.peers).
+    nat = bool(cfg.transport.nat)
+    driver = coordinator_addr or cfg.network.coordinator_address or next(
+        (p for p in cfg.discovery.peers if p != worker_address), None)
+    handle   = start_worker(port, address=worker_address, run_config=cfg,
+                            servicer_class=servicer_class, grpc_workers=grpc_workers,
+                            tunnel_to=[driver] if nat else None)
     servicer, server = handle.servicer, handle.server
     tag_str = f"  tags=[{', '.join(tags)}]" if tags else ""
     _LOG.info("worker started port=%s hostname=%s device=%s%s", port, _HOSTNAME, resolved_device, tag_str)
@@ -1687,10 +1775,19 @@ def run_worker(
         )
         _LOG.info("capabilities %s", caps)
         _LOG.info("registering with coordinator address=%s", coordinator_addr)
+        policy = RetryPolicy(max_attempts=cfg.discovery.registration_max_attempts,
+                             delay_s=cfg.discovery.registration_delay_s,
+                             rpc_timeout_s=cfg.discovery.registration_rpc_timeout_s)
+        channel = servicer.router.channel(coordinator_addr)
+        if nat and not servicer.router.relay:
+            # the coordinator calls this worker (init) as soon as it registers
+            if not servicer.router.keep(coordinator_addr).wait(policy.max_attempts * policy.delay_s):
+                _LOG.warning("no tunnel to the coordinator yet; registering anyway")
         try:
             result = announce_to_coordinator(
                 coordinator_addr,
                 node_info,
+                channel=channel,
                 retry_policy=RetryPolicy(
                     max_attempts=cfg.discovery.registration_max_attempts,
                     delay_s=cfg.discovery.registration_delay_s,
@@ -1717,7 +1814,7 @@ def run_worker(
             while not _shutdown_watchdog.wait(timeout=watchdog_interval):
                 try:
                     announce_to_coordinator(
-                        coordinator_addr, node_info,
+                        coordinator_addr, node_info, channel=channel,
                         retry_policy=RetryPolicy(max_attempts=1, delay_s=0.0, rpc_timeout_s=5.0),
                     )
                 except RuntimeError:

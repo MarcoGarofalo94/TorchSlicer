@@ -78,8 +78,11 @@ def central(name, transport):
     return _json_losses(log)
 
 
-def p2p(name, transport):
-    ports = _ports(M.N_PARTS)
+def p2p(name, transport, nat=""):
+    """``nat``: "" (every node reachable) | "driver" (the driver is behind NAT and
+    opens no port) | "relay" (every node behind NAT, all calls through a relay process)."""
+    ports = _ports(M.N_PARTS + 1)
+    relay_port = ports.pop()
     peers = ",".join(f"127.0.0.1:{p}" for p in ports)
     cfg_path = LOGS / "p2p.yaml"
     cfg_path.write_text(json.dumps({"training": {"epochs": M.EPOCHS, "optimizer": M.OPTIMIZER,
@@ -87,20 +90,26 @@ def p2p(name, transport):
                                     "logging": {"enabled": False}}))   # JSON is valid YAML
     env = {**BASE_ENV, "TENSOR_TRANSPORT": transport, "WORKER_PEERS": peers,
            "EXPERIMENT_CONFIG": str(cfg_path)}
-    tag = f"{name}_p2p-{transport}"
-    followers = [_spawn(["run_p2p.py", name, str(p)],
-                        {**env, "IS_DRIVER": "false", "WORKER_INDEX": str(i),
-                         "WORKER_ADDRESS": f"127.0.0.1:{p}"},
-                        LOGS / f"{tag}_w{i}.log") for i, p in enumerate(ports) if i > 0]
+    tag = f"{name}_p2p-{transport}" + (f"-nat-{nat}" if nat else "")
+    procs = []
+    if nat == "relay":
+        procs.append(_spawn(["-m", "torchslicer", "relay", "--port", str(relay_port)], BASE_ENV,
+                            LOGS / f"{tag}_relay.log"))
+        env.update(TRANSPORT_RELAY=f"127.0.0.1:{relay_port}", TRANSPORT_NAT="true")
+    procs += [_spawn(["run_p2p.py", name, str(p)],
+                     {**env, "IS_DRIVER": "false", "WORKER_INDEX": str(i),
+                      "WORKER_ADDRESS": f"127.0.0.1:{p}"},
+                     LOGS / f"{tag}_w{i}.log") for i, p in enumerate(ports) if i > 0]
     time.sleep(2)
     log = LOGS / f"{tag}_driver.log"
     driver = _spawn(["run_p2p.py", name, str(ports[0])],
                     {**env, "IS_DRIVER": "true", "WORKER_INDEX": "0",
-                     "WORKER_ADDRESS": f"127.0.0.1:{ports[0]}"}, log)
+                     "WORKER_ADDRESS": f"127.0.0.1:{ports[0]}",
+                     **({"TRANSPORT_NAT": "true"} if nat else {})}, log)
     try:
         driver.wait(TIMEOUT)
     finally:
-        _stop([driver, *followers])
+        _stop([driver, *procs])
     return _json_losses(log)
 
 
@@ -111,6 +120,8 @@ MODES = {
     "central-tcp": lambda n: central(n, "tcp"),
     "p2p-grpc": lambda n: p2p(n, "grpc"),
     "p2p-tcp": lambda n: p2p(n, "tcp"),
+    "p2p-nat": lambda n: p2p(n, "tcp", nat="driver"),      # M6: driver behind NAT
+    "p2p-relay": lambda n: p2p(n, "grpc", nat="relay"),    # M6: every node behind NAT
     "offload": lambda n: inproc(n, "offload"),
     "offload-gpipe": lambda n: inproc(n, "offload-gpipe"),
     "offload-disk": lambda n: inproc(n, "offload-disk"),

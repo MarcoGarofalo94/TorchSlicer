@@ -536,3 +536,87 @@ class WorkerService(object):
             timeout,
             metadata,
             _registered_method=True)
+
+
+class TunnelServiceStub(object):
+    """NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
+    opens this stream to a node that does (a peer or a relay); afterwards the callee
+    sends its calls to the NAT'd node down the stream instead of dialing it. Every
+    TorchSlicer gRPC server (worker, coordinator, tail slice, relay) serves it.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.open = channel.stream_stream(
+                '/torchslicer.worker.TunnelService/open',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.FromString,
+                _registered_method=True)
+
+
+class TunnelServiceServicer(object):
+    """NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
+    opens this stream to a node that does (a peer or a relay); afterwards the callee
+    sends its calls to the NAT'd node down the stream instead of dialing it. Every
+    TorchSlicer gRPC server (worker, coordinator, tail slice, relay) serves it.
+    """
+
+    def open(self, request_iterator, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_TunnelServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'open': grpc.stream_stream_rpc_method_handler(
+                    servicer.open,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'torchslicer.worker.TunnelService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('torchslicer.worker.TunnelService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class TunnelService(object):
+    """NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
+    opens this stream to a node that does (a peer or a relay); afterwards the callee
+    sends its calls to the NAT'd node down the stream instead of dialing it. Every
+    TorchSlicer gRPC server (worker, coordinator, tail slice, relay) serves it.
+    """
+
+    @staticmethod
+    def open(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_stream(
+            request_iterator,
+            target,
+            '/torchslicer.worker.TunnelService/open',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

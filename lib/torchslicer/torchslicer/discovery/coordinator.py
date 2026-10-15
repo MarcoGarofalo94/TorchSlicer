@@ -184,11 +184,13 @@ def announce_to_coordinator(
     retry_delay: float = 3.0,
     rpc_timeout: float = 5.0,
     retry_policy: RetryPolicy | None = None,
+    channel=None,
 ) -> AnnounceResult:
     """
     Client-side: call Register RPC on coordinator. Used by workers at startup
     and by the coordinator watchdog for periodic re-registration.
-    Retries until the coordinator is reachable.
+    Retries until the coordinator is reachable. ``channel``: use this channel (e.g. a
+    worker router's, to register through a relay) instead of dialing directly.
     """
     try:
         import grpc
@@ -224,15 +226,16 @@ def announce_to_coordinator(
     )
 
     def _register():
+        ch = channel or grpc.insecure_channel(coordinator_addr, options=_OPTS)
         try:
-            channel = grpc.insecure_channel(coordinator_addr, options=_OPTS)
-            stub = coordinator_service_pb2_grpc.CoordinatorServiceStub(channel)
+            stub = coordinator_service_pb2_grpc.CoordinatorServiceStub(ch)
             resp = stub.register(req, timeout=policy.rpc_timeout_s)
             if resp.ok:
                 return AnnounceResult(run_id=resp.run_id, worker_index=resp.worker_index)
             raise RuntimeError(f"Coordinator rejected registration: {resp.message}")
         finally:
-            channel.close()
+            if channel is None:
+                ch.close()
 
     def _on_retry(attempt: int, max_attempts: int, exc: Exception, delay_s: float):
         _LOG.warning(

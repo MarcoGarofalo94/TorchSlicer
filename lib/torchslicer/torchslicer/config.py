@@ -113,8 +113,32 @@ class ProfileConfig:
 
 @dataclass
 class TransportConfig:
-    tensor:             str = "grpc"   # "grpc" | "tcp"
-    tensor_port_offset: int = 1
+    """How tensors and calls travel between nodes (see transport/tunnel.py and
+    docs/tutorials/nat.md).
+
+    Fields:
+        tensor:             "grpc" | "tcp" (raw TCP for activations and gradients
+                            between directly reachable nodes)  (env: TENSOR_TRANSPORT)
+        tensor_port_offset: TCP listener port = gRPC port + this  (env: TENSOR_PORT_OFFSET)
+        nat:                this node is behind NAT: it opens no port and only dials
+                            out. It opens a tunnel to every node that sends to it, and
+                            their calls (gradients, U-shaped activations, metrics,
+                            heartbeats) come back over it. A per-node setting
+                            (env: TRANSPORT_NAT); with ``ROLE=all`` it applies to the
+                            data owner (coordinator / driver) only.
+        relay:              address of a relay (``python -m torchslicer relay``): every
+                            node that sets it dials only the relay, which forwards each
+                            call. Needed when two nodes that talk are both behind NAT
+                            (env: TRANSPORT_RELAY); with ``ROLE=all`` any non-empty
+                            value starts a relay on loopback.
+        tunnel_keepalive_s: a node pings its idle tunnels this often, so NAT mappings
+                            stay open (env: TUNNEL_KEEPALIVE)
+    """
+    tensor:             str   = "grpc"   # "grpc" | "tcp"
+    tensor_port_offset: int   = 1
+    nat:                bool  = False
+    relay:              str   = ""
+    tunnel_keepalive_s: float = 20.0
 
 
 @dataclass
@@ -493,6 +517,9 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     # ── transport ──────────────────────────────────────────────────────────────
     ("TENSOR_TRANSPORT",   lambda cfg, v: setattr(cfg.transport, "tensor",             v.strip().lower())),
     ("TENSOR_PORT_OFFSET", lambda cfg, v: setattr(cfg.transport, "tensor_port_offset", int(v))),
+    ("TRANSPORT_NAT",      lambda cfg, v: setattr(cfg.transport, "nat",                _parse_bool(v))),
+    ("TRANSPORT_RELAY",    lambda cfg, v: setattr(cfg.transport, "relay",              v.strip())),
+    ("TUNNEL_KEEPALIVE",   lambda cfg, v: setattr(cfg.transport, "tunnel_keepalive_s", float(v))),
     # ── fault tolerance ────────────────────────────────────────────────────────
     ("FAULT_TOLERANCE_ENABLED", lambda cfg, v: setattr(cfg.fault_tolerance, "enabled",              _parse_bool(v))),
     ("HEARTBEAT_INTERVAL",      lambda cfg, v: setattr(cfg.fault_tolerance, "heartbeat_interval_s", float(v))),

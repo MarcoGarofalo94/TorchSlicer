@@ -11,14 +11,23 @@ from dataclasses import dataclass, field
 from ..config import RunConfig
 from .runner import hosted_slices, resolve_role
 
+RELAY_PORT = 50060   # the relay's port where the target picks fixed ports (compose, k8s, baremetal)
+
 
 @dataclass
 class NodeSpec:
-    name:    str            # "coordinator", "worker-0", ... / "driver", "follower-0", ...
-    role:    str            # coordinator | worker | driver | follower
+    name:    str            # "coordinator", "worker-0", ... / "driver", "follower-0", ... / "relay"
+    role:    str            # coordinator | worker | driver | follower | relay
     host:    str            # how the other nodes reach it
     port:    int            # its gRPC port (the coordinator's, for the coordinator)
     env:     dict = field(default_factory=dict)
+
+    def argv(self, script: str) -> list:
+        """What the node runs after the interpreter: the training script, or for the
+        relay ``-m torchslicer relay`` (it needs no user code)."""
+        if self.role == "relay":
+            return ["-m", "torchslicer", "relay", "--port", str(self.port)]
+        return [script]
 
     @property
     def address(self) -> str:
@@ -33,7 +42,8 @@ class NodeSpec:
 def node_names(cfg: RunConfig) -> list[tuple[str, str]]:
     """``(name, role)`` of every node, the driving one first. ``discovery.n_workers`` is
     the number of slices; the driving node hosts ``sl.setting``'s share of them
-    (``hosted_slices``) and there is one worker/follower per remaining slice."""
+    (``hosted_slices``) and there is one worker/follower per remaining slice. With
+    ``transport.relay: auto`` a relay node comes last."""
     topology, _ = resolve_role(_without_role(cfg))
     n = int(cfg.discovery.n_workers)
     if topology == "local":
@@ -42,9 +52,16 @@ def node_names(cfg: RunConfig) -> list[tuple[str, str]]:
     if topology == "p2p" and n < 1:
         raise ValueError("p2p needs discovery.n_workers >= 1 (the driver holds one slice)")
     k = n - hosted_slices(cfg, topology, n)
+    relay = [("relay", "relay")] if relay_node(cfg) else []
     if topology == "centralized":
-        return [("coordinator", "coordinator")] + [(f"worker-{i}", "worker") for i in range(k)]
-    return [("driver", "driver")] + [(f"follower-{i}", "follower") for i in range(k)]
+        return [("coordinator", "coordinator")] + [(f"worker-{i}", "worker") for i in range(k)] + relay
+    return [("driver", "driver")] + [(f"follower-{i}", "follower") for i in range(k)] + relay
+
+
+def relay_node(cfg: RunConfig) -> bool:
+    """``transport.relay: auto``: the launcher adds a relay node. Any other non-empty
+    value is the address of a relay that runs elsewhere."""
+    return (cfg.transport.relay or "").strip().lower() == "auto"
 
 
 def tail_slice(cfg: RunConfig) -> bool:
@@ -68,6 +85,11 @@ def plan_nodes(cfg: RunConfig, hosts: list[str], ports: list[int], *,
     the coordinator gets the worker list; "coordinator": workers register).
     ``tail_port``: u_shaped, the driving node's port for the last slice (env
     ``SL_TAIL_PORT``); default ``sl.tail_port`` or its port + 2.
+
+    ``transport.nat`` in the shared config means the driving node (the data owner) is
+    behind NAT: it gets ``TRANSPORT_NAT=true`` and the others ``false`` (set
+    ``TRANSPORT_NAT=true`` on a worker's own env to put it behind NAT). Every worker
+    and follower gets ``COORDINATOR_ADDRESS``, the node a NAT'd one tunnels to.
     """
     topology, _ = resolve_role(_without_role(cfg))
     names = node_names(cfg)
@@ -75,8 +97,15 @@ def plan_nodes(cfg: RunConfig, hosts: list[str], ports: list[int], *,
         raise ValueError(f"{len(names)} nodes need {len(names)} hosts and ports, "
                          f"got {len(hosts)} and {len(ports)}")
     nodes = [NodeSpec(name, role, h, p) for (name, role), h, p in zip(names, hosts, ports)]
+    relay = nodes.pop() if relay_node(cfg) else None
     lead, others = nodes[0], nodes[1:]
     backend = discovery or cfg.discovery.backend
+    nat = bool(cfg.transport.nat)
+    if nat and not cfg.transport.relay and topology == "centralized" and backend == "coordinator" \
+            and others:
+        raise ValueError("the coordinator is behind NAT (transport.nat), so workers can't "
+                         "register with it: use discovery.backend static, or a relay "
+                         "(transport.relay)")
     common = {
         "PYTHONUNBUFFERED": "1",
         "TOPOLOGY": topology,
@@ -98,12 +127,19 @@ def plan_nodes(cfg: RunConfig, hosts: list[str], ports: list[int], *,
             nd.env["WORKER_ADDRESS"] = nd.address
         if nd.role == "worker":
             nd.env["DISCOVERY_BACKEND"] = backend
-            if backend == "coordinator":
-                nd.env["COORDINATOR_ADDRESS"] = lead.address
+        if nd.role in ("worker", "follower"):
+            nd.env["COORDINATOR_ADDRESS"] = lead.address
         if nd.role == "driver":
             nd.env["WORKER_PEERS"] = ",".join(x.address for x in nodes)
+        if nat:
+            nd.env["TRANSPORT_NAT"] = "true" if nd is lead else "false"
+        if relay is not None:
+            nd.env["TRANSPORT_RELAY"] = relay.address
     if tail_slice(cfg):
         lead.env["SL_TAIL_PORT"] = str(tail_port or cfg.sl.tail_port or lead.port + 2)
+    if relay is not None:
+        relay.env = {"PYTHONUNBUFFERED": "1", "ROLE": "relay"}
+        nodes.append(relay)
     return nodes
 
 

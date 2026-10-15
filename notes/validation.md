@@ -746,3 +746,133 @@ bound is 0.47 s (10 GB in + 8 GB out at the measured pinned-copy bandwidth); the
   and passed in 5 reruns. It looks flaky under load (distributed, gRPC); not touched by M5.
 - The full matrix was not rerun end to end on the final code. The offload modes and touched
   models were rerun after each fix. Test suite: 221 passed, plus the flaky test above.
+
+## Round 7 (M6 "NAT-friendly transport", 2026-10-15, branch `feat/m6-nat`)
+
+M6 lets any node work behind NAT, so it needs only outbound connections
+(`torchslicer/transport/tunnel.py`; tutorial `docs/tutorials/nat.md`):
+
+- **Tunnel.** A node behind NAT (`transport.nat`) opens no port. It dials each node that has to
+  call it, opens one bidi gRPC stream there (`TunnelService.open`, added to
+  `worker_service.proto`) and announces its addresses (HELLO). The far end then sends its
+  unary calls to that node down the stream; the NAT'd node's own calls go out directly as
+  before. A tunnel carries the serialized messages gRPC would send, so cut bytes, hooks and
+  metrics are unchanged.
+- **Router.** Each node has one. `router.channel(addr)` replaces `grpc.insecure_channel`, so
+  every generated stub and call site is unchanged. Each call is routed when it is made:
+  in-process service, inbound tunnel, relay, or a plain (now cached) channel. Raw TCP is used for
+  a peer only while it is directly reachable.
+- **Who dials whom.** The NAT'd data owner opens tunnels to every remote worker after
+  discovery. A NAT'd worker opens one to its coordinator/driver at start, and to its neighbours
+  and tied-weight peers at `init`.
+- **Relay.** `python -m torchslicer relay` is a router that forwards by target address. Every
+  node with `transport.relay` dials only the relay. That covers two NAT'd neighbours, and a NAT'd
+  coordinator with `CoordinatorDiscovery`.
+- **Launcher.** `transport.nat` in a shared config means the data owner (`plan_nodes` sets
+  `TRANSPORT_NAT` per node). `relay: auto` adds a relay node (processes, compose, k8s Deployment,
+  bare metal), and `ROLE=all` starts one on loopback.
+
+**Deviation from the plan.** The roadmap said "the gradient comes back in the reply". A
+reply-only design covers one of the reverse calls: the gradient to slice 0. A NAT'd client also
+receives the U-shaped activation for its tail slice, `report_metrics`, `report_worker_error`,
+tied-weight gradients and updates, heartbeats and its own `init`. So every call to a NAT'd node
+travels back on the connection it opened: the gradient *is* in a reply on that connection, and
+the rest come back the same way. Per-call routing kept the executors' and workers' send code as
+it was.
+
+**How it was checked.**
+- `tests/test_nat.py` (24 tests, about 80 s); the 3-slice MLP from `test_sl.py`, 2 epochs, CPU.
+  - Data owner behind NAT: P2P vanilla (gRPC, TCP), P2P u_shaped (TCP), centralized vanilla
+    (gRPC) and u_shaped (TCP). Losses match unsplit PyTorch within 1e-6. They equal the direct
+    run exactly, as do the byte metrics, key by key.
+  - Through a relay: P2P u_shaped, centralized pipeline (TCP configured, so gRPC through the
+    relay) and centralized vanilla; same checks.
+  - The NAT'd driver has no gRPC server, no tail server and no TCP listener, so any call
+    that dialed it would fail. The batches complete, its router counts at least 16 calls arriving
+    by tunnel (8 backward + 8 `report_metrics`), and the follower next to it counts the calls it
+    sent by tunnel.
+  - NAT'd workers (centralized pipeline: workers 0 and 2 behind NAT, worker 1 reachable,
+    CoordinatorDiscovery, gRPC and TCP) register, train and match the reference.
+  - Two adjacent NAT'd workers without a relay fail at `init` with a message that names the
+    relay. With a relay, a 4-slice U-shaped run where the driver and both (adjacent) followers
+    are NAT'd matches the reference.
+  - Tied weights across a NAT'd driver (embedding on slice 0, head on the last follower) match
+    local.
+  - A NAT'd follower that dies fails the run with `WorkerFailureError` within the timeout,
+    instead of hanging. Recovery with a NAT'd driver re-plans over the survivor.
+  - Tunnel errors keep their gRPC codes: UNKNOWN with the remote exception, DEADLINE_EXCEEDED,
+    and UNAVAILABLE (fast, never dialed) once a NAT'd address's tunnel is gone.
+  - `--target processes` (real OS processes): P2P u_shaped with the driver behind NAT (TCP),
+    the same through a relay process, and centralized vanilla + static discovery through a relay.
+    All match `--target local` within 1e-6. Plan, compose and k8s rendering of the relay are
+    checked for structure.
+- The tutorial's code blocks run in `tests/test_docs.py`.
+
+### Round 7 matrix (no-regression check + 2 new modes)
+`run_matrix.py` (CPU, SGD) gained `p2p-nat` (P2P driver behind NAT, TCP) and `p2p-relay` (driver
+and followers behind NAT, a relay process, gRPC), as real OS processes. Full run on the final
+code: **97/99 OK**. Both new modes are bit-exact (max|Δ| = 0) on all 9 models. The 2 DIFFs are
+ResNet-18 + GPipe and ResNet-18 + offload-gpipe (7.7e-2), the known by-design BatchNorm
+difference. `results/results_cpu_SGD.json` was rewritten by this run.
+
+### Cost of the tunnel and the relay (`benchmarks/nat/bench_nat.py`)
+U-shaped P2P, driver + 1 follower as OS processes on loopback, CPU, 1 thread per process. A
+3-slice MLP whose cuts carry 1 MiB per batch and direction (batch 256 × 1024 fp32), so 4 MiB
+cross per batch and the driver receives 2 MiB of them. 32 batches per epoch, 3 epochs; time per
+batch = mean of epochs 2–3. Mean ± std over 3 runs; losses are identical in every mode
+(`benchmarks/nat/results/bench_nat.json`).
+
+| mode | ms/batch | vs direct |
+|---|---|---|
+| direct, gRPC | 53.0 ± 5.1 | — |
+| direct, TCP | 38.3 ± 0.3 | — |
+| driver behind NAT, gRPC | 51.8 ± 3.1 | same within noise |
+| driver behind NAT, TCP | 48.7 ± 2.8 | +10.4 ms (+27%) vs direct TCP |
+| everything through a relay | 58.7 ± 3.6 | +5.7 ms (+11%) vs direct gRPC |
+
+- **The tunnel itself costs nothing measurable.** It replaces a gRPC call with a gRPC stream
+  message.
+- **With TCP, the reverse traffic is the cost.** The driver's 2 MiB per batch come back over the
+  gRPC tunnel instead of raw TCP. A raw-TCP reverse path is possible (the peer would write frames
+  back down the socket the client opened) but is not built; see Open.
+- **The relay adds one hop per message.** On loopback that is a copy; over a WAN it is a second
+  link.
+
+### 22. A NAT'd worker could lose the Ack of its own shutdown (dev, spurious warning)
+- **Symptom:** in the all-NAT relay test, the driver logged `shutdown failed worker=nat-0:1 ...
+  UNAVAILABLE` for both NAT'd followers in 3 out of 3 runs. Training was unaffected.
+- **Root cause:** `shutdown()` returns its Ack and stops the server from a thread. A gRPC server
+  stops with `grace`, which lets the reply go out. The NAT'd worker's stand-in (`_NoServer`)
+  closed its tunnels at once, sometimes before the Ack frame was sent.
+- **Fix:** `_NoServer.stop(grace)` waits up to `grace` (at most 1 s) before closing, like
+  `grpc.Server.stop`. After the fix: 0 warnings in the same test.
+- **Cost:** shutdown of a NAT'd worker takes up to 1 s longer.
+- **Test:** checked by hand on `test_every_node_behind_nat_through_a_relay` (log count). There is
+  no assertion, because the symptom is only a log line.
+
+### Behaviour changes
+- Every stub is built on the node's `Router`. Channels are now cached per address per node; before,
+  there was one channel per stub.
+- Raw TCP vs gRPC is now decided per send (`router.is_direct(peer)`) instead of at `init`. Workers
+  always build gRPC stubs for their neighbours, and also TCP clients when `transport.tensor: tcp`.
+- The coordinator's gRPC pool is `max(8, 2n + 4)` (was `max(4, n)`): each NAT'd worker's tunnel
+  holds one server thread.
+- `run_worker` passes the advertised address to `start_worker`; `WorkerHandle.stop()` also closes
+  the worker's tunnels.
+- `plan_nodes` sets `COORDINATOR_ADDRESS` on every worker/follower (a NAT'd one tunnels to it).
+- `announce_to_coordinator(channel=)`. Config: `transport.nat`, `transport.relay`,
+  `transport.tunnel_keepalive_s` (env `TRANSPORT_NAT`, `TRANSPORT_RELAY`, `TUNNEL_KEEPALIVE`).
+  New command `python -m torchslicer relay`. Version 0.8.0.
+
+### Open (carried)
+- **Raw-TCP reverse path.** With `transport.tensor: tcp`, traffic to a NAT'd node goes over the
+  gRPC tunnel; that is the +10 ms/batch above.
+- **No hole punching (STUN/ICE).** Two NAT'd peers always go through the relay.
+- **No TLS or authentication.** That covers tunnels and the relay, as for every channel. Any node
+  can announce any address to a relay, which on an untrusted network lets it intercept that
+  address's calls. Needs auth before real deployments.
+- **No real NAT tested.** Everything ran on loopback, where "behind NAT" means "listens on
+  nothing". A run across a real NAT (and a WAN relay) belongs with M8.
+- **The keepalive interval (20 s) is not measured** against real NAT timeouts.
+- **Router stats are approximate.** `stats` counters are incremented without a lock; they are
+  diagnostics only.

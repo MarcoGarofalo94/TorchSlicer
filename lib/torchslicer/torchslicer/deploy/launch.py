@@ -25,7 +25,7 @@ import sys
 import time
 
 from ..config import RunConfig
-from .nodes import NodeSpec, coordinator_port, node_names, plan_nodes, tail_slice
+from .nodes import RELAY_PORT, NodeSpec, coordinator_port, node_names, plan_nodes, tail_slice
 from .runner import free_port
 
 TARGETS = ("local", "processes", "compose", "k8s", "baremetal")
@@ -111,15 +111,18 @@ def run_processes(script: str, config_path: str, cfg: RunConfig, *, out: str,
     python = python or sys.executable
     procs: list[tuple[NodeSpec, subprocess.Popen]] = []
     logs = []
+    # the relay first, then workers, then the driving node
+    order = [nd for nd in nodes if nd.role == "relay"] + \
+            [nd for nd in nodes[1:] if nd.role != "relay"] + nodes[:1]
     try:
-        for nd in nodes[1:] + nodes[:1]:     # workers first
+        for nd in order:
             env = {**os.environ, **(extra_env or {}), **nd.env}
             if nd.drives:
                 stdout = None
             else:
                 stdout = open(os.path.join(out, f"{nd.name}.log"), "w")
                 logs.append(stdout)
-            procs.append((nd, subprocess.Popen([python, script], env=env, stdout=stdout,
+            procs.append((nd, subprocess.Popen([python, *nd.argv(script)], env=env, stdout=stdout,
                                                stderr=subprocess.STDOUT if stdout else None)))
             print(f"[launch] {nd.name:<12} {nd.role:<11} {nd.address}  pid={procs[-1][1].pid}",
                   flush=True)
@@ -136,8 +139,11 @@ def run_processes(script: str, config_path: str, cfg: RunConfig, *, out: str,
                     procs.remove((nd, pr))
             time.sleep(0.2)
         code = lead.returncode
-        # the driving node shuts the workers down at the end of the run
+        # the driving node shuts the workers down at the end of the run (not the relay,
+        # which serves until stopped)
         for nd, pr in procs[:-1]:
+            if nd.role == "relay":
+                continue
             try:
                 pr.wait(timeout=30)
             except subprocess.TimeoutExpired:
@@ -166,7 +172,8 @@ def render_compose(cfg: RunConfig, script: str, config_path: str, *, out: str = 
     and ``config_path`` are relative to it, as on the host."""
     names = node_names(cfg)
     port_w = int(cfg.network.worker_port)
-    ports = [coordinator_port(cfg) if r == "coordinator" else port_w for _, r in names]
+    ports = [coordinator_port(cfg) if r == "coordinator" else RELAY_PORT if r == "relay" else port_w
+             for _, r in names]
     nodes = plan_nodes(cfg, [n for n, _ in names], ports, config_path=config_path)
     root = os.path.relpath(os.path.abspath(project_dir or os.getcwd()), os.path.abspath(out))
     volumes = [f"{root}:/workspace"]
@@ -182,7 +189,7 @@ def render_compose(cfg: RunConfig, script: str, config_path: str, *, out: str = 
             "working_dir": "/workspace",
             "environment": dict(nd.env),
             "volumes": list(volumes),
-            "command": [python, script],
+            "command": [python, *nd.argv(script)],
             "networks": ["torchslicer"],
         }
         if cfg.deploy.gpus:
@@ -218,10 +225,16 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
     lead = _k8s_name(cfg, lead_name)
     port_w = int(cfg.network.worker_port)
     lead_port = coordinator_port(cfg) if lead_role == "coordinator" else port_w
-    hosts = [lead] + [f"{wjob}-{i}.{wjob}" for i in range(len(names) - 1)]
-    ports = [lead_port] + [port_w] * (len(names) - 1)
+    has_relay = names[-1][1] == "relay"
+    k = len(names) - 1 - has_relay
+    hosts = [lead] + [f"{wjob}-{i}.{wjob}" for i in range(k)]
+    ports = [lead_port] + [port_w] * k
+    if has_relay:
+        hosts.append(_k8s_name(cfg, "relay"))
+        ports.append(RELAY_PORT)
     nodes = plan_nodes(cfg, hosts, ports, config_path=f"{_CONFIG_DIR}/run.yaml",
                        discovery="static")
+    relay = nodes.pop() if has_relay else None
     tcp = cfg.transport.tensor.strip().lower() == "tcp"
     offset = int(cfg.transport.tensor_port_offset)
 
@@ -242,10 +255,12 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
             "name": "torchslicer",
             "image": cfg.deploy.image,
             "workingDir": "/workspace",
-            "command": [python, script],
+            "command": [python, *nd.argv(script)],
             "env": [{"name": k, "value": v} for k, v in env.items()],
             "ports": [{"containerPort": p["targetPort"], "name": p["name"]}
-                      for p in ports_of(nd.port, lead_tail if nd is nodes[0] else None)],
+                      for p in (ports_of(nd.port, lead_tail if nd is nodes[0] else None)
+                                if nd.role != "relay"
+                                else [{"name": "grpc", "port": nd.port, "targetPort": nd.port}])],
             "volumeMounts": [{"name": "config", "mountPath": _CONFIG_DIR}],
         }
         if cfg.deploy.gpus:
@@ -298,6 +313,23 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
         "apiVersion": "batch/v1", "kind": "Job", "metadata": meta(lead),
         "spec": {"backoffLimit": 0, "template": pod(lead_labels, nodes[0], nodes[0].env)},
     })
+    if relay is not None:
+        # a long-running service (it outlives runs), so a Deployment rather than a Job
+        r_labels = {"app.kubernetes.io/name": cfg.deploy.name, "torchslicer/node": "relay"}
+        template = pod(r_labels, relay, relay.env)
+        template["spec"]["restartPolicy"] = "Always"
+        template["spec"].pop("volumes")
+        template["spec"]["containers"][0].pop("volumeMounts")
+        template["spec"]["containers"][0].pop("resources", None)
+        docs.insert(1, {
+            "apiVersion": "v1", "kind": "Service", "metadata": meta(relay.host),
+            "spec": {"selector": r_labels,
+                     "ports": [{"name": "grpc", "port": relay.port, "targetPort": relay.port}]},
+        })
+        docs.insert(2, {
+            "apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta(relay.host),
+            "spec": {"replicas": 1, "selector": {"matchLabels": r_labels}, "template": template},
+        })
     return docs
 
 
@@ -316,7 +348,8 @@ def render_baremetal(cfg: RunConfig, script: str, config_path: str, hosts: list[
     used: dict[tuple, int] = {}
     ports = []
     for (_, role), h in zip(names, hosts):
-        base = coordinator_port(cfg) if role == "coordinator" else int(cfg.network.worker_port)
+        base = (coordinator_port(cfg) if role == "coordinator" else RELAY_PORT if role == "relay"
+                else int(cfg.network.worker_port))
         ports.append(base + step * used.get((h, base), 0))
         used[(h, base)] = used.get((h, base), 0) + 1
     tail = None
@@ -332,7 +365,7 @@ def render_baremetal(cfg: RunConfig, script: str, config_path: str, hosts: list[
         lines = ["#!/bin/sh", f"# {nd.name} ({nd.role}) on {nd.host}", "set -e",
                  f"cd {shlex.quote(workdir)}"]
         lines += [f"export {k}={shlex.quote(v)}" for k, v in nd.env.items()]
-        lines.append(f"exec {python} {shlex.quote(script)}")
+        lines.append(f"exec {python} " + " ".join(shlex.quote(a) for a in nd.argv(script)))
         path = os.path.join(out, f"{nd.name}.sh")
         with open(path, "w") as f:
             f.write("\n".join(lines) + "\n")

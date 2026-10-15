@@ -172,11 +172,19 @@ def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwar
     if (cfg.sl.setting or "").strip().lower().replace("-", "_") in ("u_shaped", "ushaped") \
             and not cfg.sl.tail_port:
         cfg.sl.tail_port = free_port(offset if tcp else 0)   # the data owner's last slice
-    workers = []
+    workers, relay = [], None
+    # transport.nat stands for the data owner (the client) here: the workers stay
+    # reachable. Any transport.relay is replaced by one on loopback.
+    worker_cfg = copy.deepcopy(cfg)
+    worker_cfg.transport.nat = False
     try:
+        if cfg.transport.relay:
+            from ..transport.tunnel import start_relay
+            relay = start_relay(host="127.0.0.1")
+            cfg.transport.relay = worker_cfg.transport.relay = relay.address
         for _ in range(n_workers):
             port = free_port(offset if tcp else 0)
-            workers.append(start_worker(port, host="127.0.0.1", run_config=cfg))
+            workers.append(start_worker(port, host="127.0.0.1", run_config=worker_cfg))
         peers = [w.address for w in workers]
         cfg.discovery.backend = "static"
         if topology == "centralized":
@@ -192,6 +200,8 @@ def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwar
     finally:
         for w in workers:
             w.stop()
+        if relay is not None:
+            relay.stop()
 
 
 def free_port(offset: int = 0, host: str = "127.0.0.1") -> int:

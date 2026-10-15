@@ -16,6 +16,14 @@ service WorkerService {
     rpc probe_link       (LinkProbeRequest) returns (LinkProbeReply);   // measure this worker → target
 }
 
+// NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
+// opens this stream to a node that does (a peer or a relay); afterwards the callee
+// sends its calls to the NAT'd node down the stream instead of dialing it. Every
+// TorchSlicer gRPC server (worker, coordinator, tail slice, relay) serves it.
+service TunnelService {
+    rpc open (stream TunnelFrame) returns (stream TunnelFrame);
+}
+
 // ── tensor ────────────────────────────────────────────────────────────────────
 
 enum DType {
@@ -233,4 +241,27 @@ message LinkProbeReply {
     double rtt_ms         = 1;
     double bandwidth_mbps = 2;
     string error          = 3;
+}
+
+// ── tunnel (NAT traversal) ────────────────────────────────────────────────────
+
+// One message on a tunnel, in either direction. A REQUEST carries a unary call of
+// any TorchSlicer service, serialized exactly as gRPC would send it.
+message TunnelFrame {
+    enum Kind {
+        HELLO    = 0;  // first frame of the dialing side: the addresses it serves
+        REQUEST  = 1;
+        RESPONSE = 2;
+        ERROR    = 3;
+        PING     = 4;  // keeps NAT mappings open on an idle tunnel; ignored
+    }
+    Kind            kind      = 1;
+    uint64          call_id   = 2;  // matches a RESPONSE/ERROR to its REQUEST
+    string          target    = 3;  // REQUEST: address of the node being called
+    string          method    = 4;  // REQUEST: full method name, "/package.Service/method"
+    bytes           payload   = 5;  // REQUEST / RESPONSE: the serialized message
+    int32           code      = 6;  // ERROR: grpc.StatusCode value
+    string          details   = 7;  // ERROR
+    repeated string addresses = 8;  // HELLO
+    double          timeout_s = 9;  // REQUEST: the caller's deadline; 0 = none
 }

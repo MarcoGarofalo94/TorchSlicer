@@ -31,6 +31,7 @@ from ..sl.hooks import resolve_cut_hooks, tensor_nbytes
 from ..sl.roles import Placement, resolve_setting
 from ..sl.metrics import CommMeter
 from ..sl.clients import ClientSession, SplitLayerClientState
+from ..transport.tunnel import Router
 
 try:
     import grpc
@@ -63,9 +64,6 @@ _GRPC_OPTS = [
     ('grpc.max_send_message_length',    _MAX_MSG),
     ('grpc.max_receive_message_length', _MAX_MSG),
 ]
-
-def _channel(addr): return grpc.insecure_channel(addr, options=_GRPC_OPTS)
-
 
 # ── tensor helpers ─────────────────────────────────────────────────────────────
 
@@ -261,11 +259,11 @@ class _WorkerProxy:
     _tensor_client: object = field(default=None, repr=False)
     local:          object = field(default=None, repr=False)   # in-process WorkerServicer
 
-    def connect(self, tensor_transport: str = "grpc", tensor_port_offset: int = 1):
+    def connect(self, router: Router, tensor_transport: str = "grpc", tensor_port_offset: int = 1):
         if self.local is not None:
             self._stub = _LocalStub(self.local)
             return
-        self._stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.address))
+        self._stub = worker_service_pb2_grpc.WorkerServiceStub(router.channel(self.address))
         if tensor_transport == "tcp":
             self._tensor_client = _TensorPeerClient(
                 _tensor_addr(self.address, tensor_port_offset)
@@ -371,10 +369,18 @@ class DistributedExecutor(BaseExecutor):
         self._stored_crit_cfg = None
         self._ft_checkpoint_dir: str = ""
 
+        # Where this process's calls go (direct, by tunnel, or through a relay), and
+        # what it serves to calls arriving by tunnel (transport/tunnel.py). Behind NAT
+        # (transport.nat) it listens on nothing: it opens a tunnel to every remote
+        # worker, and the workers' calls to it come back over those.
+        cfg = self._run_config
+        self._nat = bool(cfg.transport.nat)
+        self._router = Router(cfg.transport.relay or None,
+                              keepalive_s=cfg.transport.tunnel_keepalive_s)
+
         # Split-learning setting: the slices the data owner (this process) hosts
         # in-process: slice 0 ("front", served on the coordinator's gRPC server) for
         # vanilla / u_shaped, plus the last slice ("tail", own server) for u_shaped.
-        cfg = self._run_config
         self._setting = resolve_setting(cfg.sl.setting, self.topology)
         self.local = (self._new_local_servicer(True, [self._local_tag], device)
                       if self._setting != "pipeline" else None)
@@ -423,6 +429,13 @@ class DistributedExecutor(BaseExecutor):
         cfg = self._run_config
         configure_process_logging(cfg.logging.level)
 
+        if (self._nat and not self._router.relay and n > len(self._local)
+                and hasattr(self._discovery, "handle_register")):
+            raise ValueError(
+                f"{self._owner_name} is behind NAT (transport.nat), so workers can't register "
+                "with it: list them (discovery.backend: static, discovery.peers) or route "
+                "everything through a relay (transport.relay)")
+
         # Start embedded coordinator gRPC server FIRST so the Register endpoint
         # is available before discover() blocks waiting for registrations.
         self._start_server(n)
@@ -433,9 +446,11 @@ class DistributedExecutor(BaseExecutor):
         self._proxies = [self._make_proxy(i, nd) for i, nd in enumerate(self._nodes)]
         for proxy in self._proxies:
             proxy.connect(
+                self._router,
                 tensor_transport=cfg.transport.tensor,
                 tensor_port_offset=cfg.transport.tensor_port_offset,
             )
+        self._open_tunnels()
 
         # Capabilities → slice order → plan (deferred planning)
         self._probe_nodes()
@@ -760,6 +775,7 @@ class DistributedExecutor(BaseExecutor):
             if srv is not None:
                 srv.stop_tensor_server()
         self._proxies.clear()
+        self._router.close()
 
         if ckpt.enabled:
             self._save_run_state(run_dir)
@@ -1028,6 +1044,9 @@ class DistributedExecutor(BaseExecutor):
                 "The run stops.")
         alive = [(i, p) for i, p in enumerate(self._proxies)
                  if i not in self._failed_workers]
+        for i in self._failed_workers:
+            if i < len(self._proxies):
+                self._router.release(self._proxies[i].address)
         n_alive = len(alive)
         if n_alive == 0:
             raise RuntimeError("[recovery] all workers failed — cannot continue")
@@ -1091,14 +1110,28 @@ class DistributedExecutor(BaseExecutor):
     # ── topology steps (overridden by P2PExecutor) ─────────────────────────────
 
     def _start_server(self, n: int) -> None:
-        """Start the gRPC server hosting the CoordinatorService."""
+        """Start the gRPC server hosting the CoordinatorService (and the data owner's
+        slices). The same services are served to calls arriving by tunnel; behind NAT
+        those are the only calls, and no server is started."""
+        coordinator = _CoordinatorServicer(self)
+        self._router.serve(self.coordinator_addr, coordinator,
+                           coordinator_service_pb2_grpc.add_CoordinatorServiceServicer_to_server)
+        for srv, address in self._hosted(n).values():
+            self._router.serve(address, srv, worker_service_pb2_grpc.add_WorkerServiceServicer_to_server)
+        if self._nat:
+            _LOG.info("%s is behind NAT: no listening port; serving %s by tunnel%s",
+                      self._owner_name, self._router.addresses(),
+                      f" through relay {self._router.relay}" if self._router.relay else "")
+            return
+        # one thread per worker call in flight, plus one per open tunnel (NAT'd workers)
         self._grpc_server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=max(4, n)), options=_GRPC_OPTS
+            futures.ThreadPoolExecutor(max_workers=max(8, 2 * n + 4)), options=_GRPC_OPTS
         )
         coordinator_service_pb2_grpc.add_CoordinatorServiceServicer_to_server(
-            _CoordinatorServicer(self), self._grpc_server
+            coordinator, self._grpc_server
         )
         self._add_servicers(self._grpc_server)
+        self._router.add_to_server(self._grpc_server)
         bind_addr = self.coordinator_bind_addr
         if not bind_addr:
             port = self.coordinator_addr.split(":")[-1]
@@ -1115,6 +1148,7 @@ class DistributedExecutor(BaseExecutor):
             self._tail_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10),
                                             options=_GRPC_OPTS)
             worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(self._tail, self._tail_server)
+            self._router.add_to_server(self._tail_server)
             self._tail_server.add_insecure_port(f"{self._bind_host()}:{port}")
             self._tail_server.start()
             self._tail._tensor_stop.clear()
@@ -1143,7 +1177,27 @@ class DistributedExecutor(BaseExecutor):
             "tags":           [*tags, *cfg.network.worker_tags],
         }
         srv.local_coordinator = _LocalStub(_CoordinatorServicer(self))
+        srv.router = self._router
         return srv
+
+    def _open_tunnels(self) -> None:
+        """Behind NAT: a tunnel to every remote worker, before their slices are sent,
+        so that each can call back (gradients, metrics, errors, U-shaped activations).
+        Through a relay the relay's tunnel serves instead."""
+        if not self._nat or self._router.relay:
+            return
+        timeout = float(self._run_config.discovery.timeout)
+        deadline = time.monotonic() + timeout
+        remote = [p.address for p in self._proxies if p.local is None]
+        for address in remote:
+            self._router.keep(address)
+        for address in remote:
+            try:
+                self._router.keep(address, wait=max(0.0, deadline - time.monotonic()))
+            except grpc.RpcError as e:
+                raise RuntimeError(f"{self._owner_name} is behind NAT and could not open a "
+                                   f"tunnel to worker {address}: {e.details()}") from None
+        _LOG.info("tunnels open to %s", remote)
 
     def _bind_port(self) -> int:
         return int((self.coordinator_bind_addr or self.coordinator_addr).rsplit(":", 1)[-1])
@@ -1235,15 +1289,11 @@ class DistributedExecutor(BaseExecutor):
         deadline = time.monotonic() + timeout
         for proxy in self._proxies:
             if proxy.local is None:
-                ch = _channel(proxy.address)
                 try:
-                    grpc.channel_ready_future(ch).result(
-                        timeout=max(0.0, deadline - time.monotonic()))
-                except grpc.FutureTimeoutError:
+                    self._router.wait_ready(proxy.address, max(0.0, deadline - time.monotonic()))
+                except TimeoutError:
                     raise RuntimeError(f"worker {proxy.address} not reachable within "
                                        f"discovery.timeout={timeout:.0f}s") from None
-                finally:
-                    ch.close()
         for node, proxy in zip(self._nodes, self._proxies):
             try:
                 d = proxy.stub().describe(worker_service_pb2.DescribeRequest(), timeout=120.0)
@@ -1382,7 +1432,7 @@ class DistributedExecutor(BaseExecutor):
         _LOG.info("shutting down idle workers count=%s addresses=%s", len(idle), [nd.address for nd in idle])
         for nd in idle:
             try:
-                stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(nd.address))
+                stub = worker_service_pb2_grpc.WorkerServiceStub(self._router.channel(nd.address))
                 stub.shutdown(worker_service_pb2.ShutdownRequest(
                     save_checkpoint=False,
                     checkpoint_dir="",
@@ -1572,7 +1622,7 @@ class DistributedExecutor(BaseExecutor):
             return
         self._meter.add_input(tensor_nbytes(tensor) + sum(tensor_nbytes(v) for v in aux.values()))
         tcp_client = self._proxies[0]._tensor_client
-        if tcp_client is not None and not aux:
+        if tcp_client is not None and not aux and self._router.is_direct(self._proxies[0].address):
             with tracer.span("torchslicer.coordinator.input_send", batch_id=batch_id, transport="tcp"):
                 tcp_client.send_tensor(b"F", batch_id, tensor)
         else:
