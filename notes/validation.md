@@ -317,7 +317,7 @@ splitting option (`strategy`, `cuts`, `expand`).
 printed the epoch loss with 4 decimals, so P2P cells were compared at 1e-4. `run_p2p.py` now prints
 the full-precision history like `run_central.py`, and every mode uses the same 1e-5 tolerance. On
 the M2 code, DNN, TinyGPT and GPT-2 (tied weights) give max|Δ| = 0 against the unsplit reference
-in `p2p-grpc` and `p2p-tcp` (CPU/SGD, A100 container, logs `benchmarks/equivalence/logs`).
+in `p2p-grpc` and `p2p-tcp` (CPU/SGD, logs `benchmarks/equivalence/logs`). The full matrix is under "Round 3 matrix" below.
 
 ### 9. Heartbeats wiped the workers' profiling stats (correctness of metrics, silent)
 
@@ -358,3 +358,61 @@ in `p2p-grpc` and `p2p-tcp` (CPU/SGD, A100 container, logs `benchmarks/equivalen
   driver is always worker 0.
 - The run manifest records `executor: p2p` for P2P runs (was `distributed` in the library, `p2p` in
   the old script).
+
+### 11. `uniform` silently made fewer partitions than asked (correctness, silent)
+
+- **Symptom:** `ts.slice(model, n=3)` on a 4-node graph returned 2 partitions (`[[0, 1], [2, 3]]`),
+  so a 3-worker run quietly trained on 2 workers. The same happened for every (L, n) where
+  `ceil(L / n)` sizes run out of nodes early: 1193 of the 1770 pairs with L < 60.
+- **Root cause:** fixed slices of `ceil(L / n)` nodes, stopping when the nodes run out.
+- **Fix:** only in those short cases, spread the remainder instead (`[[0, 1], [2], [3]]`), and
+  raise if `n > L`. All pairs that already gave `n` partitions are unchanged (checked for
+  every L < 60), so no existing split moves.
+- **Verified by:** `tests/test_split_anything.py::test_uniform_gives_the_requested_number_of_partitions`.
+
+### Capability-aware planning (feature, M2 block 2)
+
+- **What:** `NodeInfo` now carries measured and declared capabilities: `compute_gflops`
+  (a constant-matrix matmul benchmark that leaves the RNG untouched, or the declared
+  `network.worker_compute_gflops`), `memory_mb` / `max_memory_mb`, `first_slice`, plus
+  `rtt_ms` / `bandwidth_mbps` from the executor and `link_*` from each worker to the next one
+  (`planning.measure_links`). Centralized workers send them when they register; any worker
+  reports them through the new `describe` RPC, which is how a P2P driver learns them. `echo`
+  and `probe_link` measure the network.
+- **Deferred planning:** `ts.slice` still computes the partitions right away (local runs,
+  `summary()`), but keeps the strategy. A distributed executor calls `SlicedModel.plan(nodes)`
+  after discovery, and again in `recover()` for the survivors. Strategies whose `split` takes
+  `nodes=` use the capabilities. The others are unchanged: the same count gives the same
+  partitions.
+- **Heterogeneous DP:** `balanced_cuts(..., speeds, mem, caps, cut_cost, link_cost)` minimises the
+  largest `cost / speed + cut transfer time`, subject to each slice's estimated memory
+  fitting its worker's cap. With every option off it does exactly the arithmetic it did
+  before. Speeds within 25% count as identical, so benchmark noise on identical workers
+  can't move the cuts.
+- **Verified by:** `tests/test_planning.py`. The DP matches brute force on 300 random cases with
+  speeds, caps and link costs. On 3 simulated P2P nodes (10/10/80 GFLOP/s) the fast node gets
+  most of the parameters and training matches unsplit (≤1e-5). A fast node declaring a 5 MB
+  cap gets one 4 MB layer instead of two, and still matches unsplit. Recovery re-plans with
+  `params` for the survivors' speeds (`[[0], [1..6]]`, where the old uniform recovery gave
+  `[[0..3], [4..6]]`). `first_slice` puts a centralized worker first. Links are measured
+  between neighbours. Registration carries the new fields.
+- **Behaviour change (fixes the M1 carried issue):** recovery now uses the run's strategy,
+  given the survivors' capabilities. It falls back to the old uniform split only when the
+  strategy can't produce that many partitions (for example, named cuts fixed for more workers).
+- **Cost:** one `describe` per worker (the benchmark runs once per worker process: ~384³
+  matmuls on CPU, 2048³ on GPU) and, with `planning.measure_network` (default on), 3 + 3 echoes
+  of up to 1 MiB per worker at setup. Set `planning.heterogeneous: false` to plan exactly as before.
+- **Limits:** the memory estimate counts parameters, gradients and two optimizer states
+  (`memory_factor` 4), not activations. The speed is a single matmul number, which ignores
+  memory bandwidth, kernels other than matmul, and the GPU's current load.
+
+### Round 3 matrix (no-regression check)
+
+Full CPU/SGD matrix rerun on the final M2 code. The M1 `results_cpu_SGD.json` was kept aside and compared.
+**53/54 cells pass.** The failing cell is still ResNet-18 + GPipe (BatchNorm, by design, max|Δ| = 7.7e-2 as before).
+- Every reference and all 36 local/GPipe/centralized cells are **bit-identical to M1**. Deferred planning, the probes,
+  always-on heartbeats and the `uniform` fix change no loss (all matrix models use `uniform` with n=3 over graphs where
+  it already gave 3 partitions).
+- All 18 P2P cells (9 models × gRPC/TCP, now through `ts.P2PExecutor`) match the unsplit reference **exactly**
+  (max|Δ| = 0, compared at full precision). They also agree with M1's 4-decimal P2P numbers.
+Not rerun: CPU AdamW and A100 AdamW (same code paths as SGD).

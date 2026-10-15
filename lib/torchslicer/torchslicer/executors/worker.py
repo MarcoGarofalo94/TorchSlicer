@@ -348,6 +348,54 @@ def current_mem_mb(device) -> float:
     return 0.0
 
 
+def measure_compute_gflops(device, n: int | None = None, repeats: int = 5) -> float:
+    """Median fp32 matmul throughput (GFLOP/s) of ``device``: a coarse speed for planning.
+
+    Uses constant matrices, so the global RNG (and with it data order and init) is
+    untouched.
+    """
+    import statistics
+    import time
+    dev = torch.device(device)
+    n = n or (2048 if dev.type == "cuda" else 384)
+    sync = (lambda: torch.cuda.synchronize(dev)) if dev.type == "cuda" else (lambda: None)
+    a = torch.full((n, n), 0.5, device=dev)
+    b = torch.full((n, n), 0.25, device=dev)
+    with torch.no_grad():
+        for _ in range(2):
+            a @ b
+        sync()
+        times = []
+        for _ in range(repeats):
+            t0 = time.perf_counter()
+            a @ b
+            sync()
+            times.append(time.perf_counter() - t0)
+    return 2 * n ** 3 / max(statistics.median(times), 1e-9) / 1e9
+
+
+def measure_link(stub, n_bytes: int = 1 << 20, repeats: int = 3, timeout: float = 30.0):
+    """(rtt_ms, bandwidth_mbps) to the worker behind ``stub``, using its ``echo`` RPC:
+    the median time of an empty echo, and ``n_bytes`` over the extra time a payload of
+    that size takes."""
+    import statistics
+    import time
+
+    def _time(payload: bytes) -> float:
+        out = []
+        for _ in range(repeats):
+            t0 = time.perf_counter()
+            stub.echo(worker_service_pb2.EchoRequest(payload=payload), timeout=timeout)
+            out.append(time.perf_counter() - t0)
+        return statistics.median(out)
+
+    _time(b"")                                   # connect
+    rtt = _time(b"")
+    data = _time(bytes(n_bytes)) if n_bytes else rtt
+    mbps = n_bytes * 8 / max(data - rtt, 1e-6) / 1e6 if n_bytes else 0.0
+    return rtt * 1e3, mbps
+
+
 # ── WorkerServicer ─────────────────────────────────────────────────────────────
 
 class WorkerServicer(
@@ -364,6 +412,9 @@ class WorkerServicer(
         self._tensor_server = None
         self._tensor_stop = threading.Event()
         self._tensor_threads: list[threading.Thread] = []
+        # Declared capabilities (network.worker_* config); measured ones fill the gaps.
+        self.declared = {"compute_gflops": 0.0, "max_memory_mb": 0, "first_slice": False, "tags": []}
+        self._measured_gflops = None
         # In-process coordinator (P2P driver): called directly instead of over gRPC.
         # Anything with the CoordinatorService stub methods works.
         self.local_coordinator = None
@@ -723,6 +774,39 @@ class WorkerServicer(
             if t["owner"]:
                 for stub in t["stubs"]:
                     self._tied_call("tied_update", stub, t["group"], key, t["param"].detach())
+
+    # ── capabilities (planning) ────────────────────────────────────────────────
+
+    def capabilities(self) -> dict:
+        """What this worker tells the planner (fields of ``NodeInfo``)."""
+        gflops = self.declared["compute_gflops"]
+        if not gflops:
+            if self._measured_gflops is None:
+                self._measured_gflops = measure_compute_gflops(self.device)
+            gflops = self._measured_gflops
+        dev = str(self.device)
+        return {
+            "device":         dev,
+            "memory_mb":      get_available_memory_mb(dev),
+            "compute_gflops": float(gflops),
+            "max_memory_mb":  int(self.declared["max_memory_mb"]),
+            "first_slice":    bool(self.declared["first_slice"]),
+            "tags":           list(self.declared["tags"]),
+        }
+
+    def describe(self, request, context):
+        return worker_service_pb2.NodeDescription(hostname=_HOSTNAME, **self.capabilities())
+
+    def echo(self, request, context):
+        return worker_service_pb2.EchoReply(n_bytes=len(request.payload))
+
+    def probe_link(self, request, context):
+        try:
+            stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(request.target))
+            rtt, mbps = measure_link(stub, request.n_bytes, max(1, request.repeats or 3))
+            return worker_service_pb2.LinkProbeReply(rtt_ms=rtt, bandwidth_mbps=mbps)
+        except Exception as e:
+            return worker_service_pb2.LinkProbeReply(error=str(e))
 
     # ── save_checkpoint ────────────────────────────────────────────────────────
 
@@ -1365,6 +1449,12 @@ def start_worker(port: int = 0, *, host: str = "[::]", address: str | None = Non
     servicer._tensor_transport   = cfg.transport.tensor.strip().lower()
     servicer._tensor_port_offset = int(cfg.transport.tensor_port_offset)
     servicer._persistent         = bool(cfg.network.worker_persistent)
+    servicer.declared = {
+        "compute_gflops": float(cfg.network.worker_compute_gflops),
+        "max_memory_mb":  int(cfg.network.worker_max_memory_mb),
+        "first_slice":    bool(cfg.network.worker_first_slice),
+        "tags":           list(cfg.network.worker_tags),
+    }
     if port == 0 and servicer._tensor_transport == "tcp":
         raise ValueError("start_worker(port=0) is gRPC-only: the TCP tensor port is port + offset")
 
@@ -1464,7 +1554,6 @@ def run_worker(
     elif cfg.network.device and cfg.network.device != "auto":
         os.environ["DEVICE"] = cfg.network.device
     resolved_device = resolve_device()
-    memory_mb       = get_available_memory_mb(resolved_device)
 
     # ── resolve worker tags ─────────────────────────────────────────────────
     tags = list(cfg.network.worker_tags)
@@ -1479,13 +1568,14 @@ def run_worker(
     # ── announce to coordinator (centralized topology only) ─────────────────
     if coordinator_addr:
         from ..discovery import NodeInfo, announce_to_coordinator
+        # declared + measured capabilities (one short matmul benchmark, cached)
+        caps = servicer.capabilities()
         node_info = NodeInfo(
             node_id=worker_address,  # unique per worker even when several share a host
             address=worker_address,
-            device=resolved_device,
-            memory_mb=memory_mb,
-            tags=tags,
+            **caps,
         )
+        _LOG.info("capabilities %s", caps)
         _LOG.info("registering with coordinator address=%s", coordinator_addr)
         try:
             result = announce_to_coordinator(

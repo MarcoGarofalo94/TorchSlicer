@@ -59,6 +59,7 @@ class CoordinatorDiscovery(BaseDiscovery):
         memory_mb: int,
         run_id:    str = "",
         tags:      list = None,
+        **capabilities,
     ) -> tuple[bool, int, str]:
         """
         Called by _CoordinatorServicer.register().
@@ -73,6 +74,8 @@ class CoordinatorDiscovery(BaseDiscovery):
                     existing.device    = device
                     existing.memory_mb = memory_mb
                     existing.tags      = tags
+                    for k, v in capabilities.items():
+                        setattr(existing, k, v)
                     tag_str = f"  tags=[{', '.join(tags)}]" if tags else ""
                     _LOG.info(
                         "worker re-registered node_id=%s address=%s index=%s device=%s mem_mb=%s%s",
@@ -94,6 +97,7 @@ class CoordinatorDiscovery(BaseDiscovery):
                 device=device,
                 memory_mb=memory_mb,
                 tags=tags,
+                **capabilities,
             )
             self._nodes.append(node)
             tag_str = f"  tags=[{', '.join(tags)}]" if tags else ""
@@ -207,6 +211,9 @@ def announce_to_coordinator(
         device=node_info.device,
         memory_mb=node_info.memory_mb,
         tags=node_info.tags,
+        compute_gflops=node_info.compute_gflops,
+        max_memory_mb=node_info.max_memory_mb,
+        first_slice=node_info.first_slice,
     )
     req = coordinator_service_pb2.RegisterRequest(node=node_proto, run_id=run_id)
 

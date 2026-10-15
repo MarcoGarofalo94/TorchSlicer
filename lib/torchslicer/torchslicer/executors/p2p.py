@@ -82,6 +82,12 @@ class P2PExecutor(DistributedExecutor):
         self.local._tensor_transport   = cfg.transport.tensor.strip().lower()
         self.local._tensor_port_offset = int(cfg.transport.tensor_port_offset)
         self.local._persistent = True   # teardown must not stop the shared gRPC server
+        self.local.declared = {
+            "compute_gflops": float(cfg.network.worker_compute_gflops),
+            "max_memory_mb":  int(cfg.network.worker_max_memory_mb),
+            "first_slice":    True,      # it holds the data
+            "tags":           ["driver", *cfg.network.worker_tags],
+        }
         self.local.local_coordinator = _LocalStub(_CoordinatorServicer(self))
 
     # ── topology steps ─────────────────────────────────────────────────────────
@@ -101,8 +107,16 @@ class P2PExecutor(DistributedExecutor):
         followers = super()._discover(n - 1) if n > 1 else []
         dev = str(self.local.device)
         driver = NodeInfo(node_id=self.address, address=self.address, device=dev,
-                          memory_mb=get_available_memory_mb(dev), tags=["driver"])
+                          memory_mb=get_available_memory_mb(dev), tags=["driver"],
+                          first_slice=True)
         return [driver, *followers]
+
+    def _order_nodes(self) -> None:
+        # the driver holds the data, so it always keeps slice 0
+        for nd in self._nodes[1:]:
+            if nd.first_slice:
+                _LOG.warning("follower %s declares first_slice; in P2P the driver holds slice 0",
+                             nd.address)
 
     def _make_proxy(self, i: int, node):
         proxy = super()._make_proxy(i, node)

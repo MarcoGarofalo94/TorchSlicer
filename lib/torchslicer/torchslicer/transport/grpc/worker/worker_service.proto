@@ -11,6 +11,9 @@ service WorkerService {
     rpc save_checkpoint  (ShutdownRequest)  returns (Ack);  // save without stopping server
     rpc tied_grad        (TiedTensor)       returns (Ack);  // replica → owner: gradient of a tied parameter
     rpc tied_update      (TiedTensor)       returns (Ack);  // owner → replica: value after the optimizer step
+    rpc describe         (DescribeRequest)  returns (NodeDescription);  // capabilities, for planning
+    rpc echo             (EchoRequest)      returns (EchoReply);        // network probe target
+    rpc probe_link       (LinkProbeRequest) returns (LinkProbeReply);   // measure this worker → target
 }
 
 // ── tensor ────────────────────────────────────────────────────────────────────
@@ -182,4 +185,38 @@ message StatusMessage {
     bool   ok      = 1;
     string message = 2;
     string hostname = 3;
+}
+
+// ── capabilities (planning) ───────────────────────────────────────────────────
+
+message DescribeRequest {}
+
+message NodeDescription {
+    string          device         = 1;
+    uint64          memory_mb      = 2;  // available memory on the device
+    double          compute_gflops = 3;  // measured (or declared) matmul GFLOP/s
+    uint64          max_memory_mb  = 4;  // declared cap; 0 = none
+    bool            first_slice    = 5;
+    repeated string tags           = 6;
+    string          hostname       = 7;
+}
+
+message EchoRequest {
+    bytes payload = 1;  // ignored; its size is what is being measured
+}
+
+message EchoReply {
+    uint64 n_bytes = 1;
+}
+
+message LinkProbeRequest {
+    string target  = 1;  // host:port of the worker to measure
+    uint64 n_bytes = 2;
+    uint32 repeats = 3;
+}
+
+message LinkProbeReply {
+    double rtt_ms         = 1;
+    double bandwidth_mbps = 2;
+    string error          = 3;
 }

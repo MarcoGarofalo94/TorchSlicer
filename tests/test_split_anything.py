@@ -541,3 +541,14 @@ def test_distributed_traced_graph_matches_unsplit(name):
         for s in servers:
             s.stop(0)
     assert [h["loss"] for h in history] == pytest.approx(_reference_losses(name), abs=1e-5)
+
+
+def test_uniform_gives_the_requested_number_of_partitions():
+    """It returned 2 partitions for n=3 over 4 layers (ceil sizes ran out), silently
+    leaving a worker unused; cases that already gave n partitions are unchanged."""
+    m = nn.Sequential(*[nn.Linear(4, 4) for _ in range(4)])
+    assert [p.layer_indices for p in ts.slice(m, n=3).partitions] == [[0, 1], [2], [3]]
+    m7 = nn.Sequential(*[nn.Linear(4, 4) for _ in range(7)])
+    assert [p.layer_indices for p in ts.slice(m7, n=3).partitions] == [[0, 1, 2], [3, 4, 5], [6]]
+    with pytest.raises(ValueError, match="can't make 5 partitions"):
+        ts.slice(m, n=5)

@@ -134,6 +134,17 @@ class FaultToleranceConfig:
 
 
 @dataclass
+class PlanningConfig:
+    """Capability-aware planning: partitions are computed after discovery, from
+    what the workers report and what the executor measures."""
+    # False = plan as if every worker were identical (the partitions ts.slice made).
+    heterogeneous:   bool = True
+    measure_network: bool = True       # RTT + bandwidth executor → each worker
+    measure_links:   bool = False      # RTT + bandwidth worker i → worker i+1
+    probe_bytes:     int  = 1 << 20    # payload of each bandwidth probe
+
+
+@dataclass
 class NetworkConfig:
     """Infrastructure config: device, addresses, ports, keep-alive.
 
@@ -157,6 +168,12 @@ class NetworkConfig:
                                   it drops its slice and waits for the next run, and
                                   keeps retrying registration instead of exiting
                                   (env: WORKER_PERSISTENT)
+        worker_compute_gflops:    declared speed in GFLOP/s, used instead of the
+                                  startup micro-benchmark (env: WORKER_COMPUTE_GFLOPS)
+        worker_max_memory_mb:     memory cap for this worker's slice
+                                  (env: WORKER_MAX_MEMORY_MB)
+        worker_first_slice:       this worker must hold slice 0, e.g. it owns the
+                                  data (env: WORKER_FIRST_SLICE)
     """
     device:                   str           = "auto"
     coordinator_address:      Optional[str] = None             # None → no coordinator registration
@@ -166,6 +183,10 @@ class NetworkConfig:
     worker_tags:              list          = field(default_factory=list)
     keep_alive:               bool          = True
     worker_persistent:        bool          = False
+    # Declared capabilities (planning). 0 / False = measure / none.
+    worker_compute_gflops:    float         = 0.0    # overrides the measured speed (e.g. simulation)
+    worker_max_memory_mb:     int           = 0      # cap for this worker's slice
+    worker_first_slice:       bool          = False  # this worker must hold slice 0
 
     def __post_init__(self):
         if self.worker_tags is None:
@@ -185,6 +206,7 @@ class RunConfig:
     transport:       TransportConfig      = field(default_factory=TransportConfig)
     fault_tolerance: FaultToleranceConfig = field(default_factory=FaultToleranceConfig)
     network:         NetworkConfig        = field(default_factory=NetworkConfig)
+    planning:        PlanningConfig       = field(default_factory=PlanningConfig)
 
     # ── factory: flat Python API ──────────────────────────────────────────────
 
@@ -388,6 +410,13 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("WORKER_TAGS",              lambda cfg, v: setattr(cfg.network, "worker_tags",              _parse_csv(v))),
     ("KEEP_ALIVE",               lambda cfg, v: setattr(cfg.network, "keep_alive",               _parse_bool(v))),
     ("WORKER_PERSISTENT",        lambda cfg, v: setattr(cfg.network, "worker_persistent",        _parse_bool(v))),
+    ("WORKER_COMPUTE_GFLOPS",    lambda cfg, v: setattr(cfg.network, "worker_compute_gflops",    float(v))),
+    ("WORKER_MAX_MEMORY_MB",     lambda cfg, v: setattr(cfg.network, "worker_max_memory_mb",     int(v))),
+    ("WORKER_FIRST_SLICE",       lambda cfg, v: setattr(cfg.network, "worker_first_slice",       _parse_bool(v))),
+    # ── planning ───────────────────────────────────────────────────────────────
+    ("PLANNING_HETEROGENEOUS",   lambda cfg, v: setattr(cfg.planning, "heterogeneous",   _parse_bool(v))),
+    ("PLANNING_MEASURE_NETWORK", lambda cfg, v: setattr(cfg.planning, "measure_network", _parse_bool(v))),
+    ("PLANNING_MEASURE_LINKS",   lambda cfg, v: setattr(cfg.planning, "measure_links",   _parse_bool(v))),
 )
 
 

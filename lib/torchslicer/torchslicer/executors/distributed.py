@@ -15,7 +15,7 @@ from ..core.tied import find_tied_parameters
 
 from .base import BaseExecutor
 from .startup import init_worker_with_retry
-from .worker import _TensorPeerClient, _tensor_addr
+from .worker import _TensorPeerClient, _tensor_addr, measure_link
 from ..monitor import tracer
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
 from ..monitor.run_logger import RunLogger
@@ -213,6 +213,9 @@ class _CoordinatorServicer(
             memory_mb = request.node.memory_mb,
             run_id    = request.run_id,
             tags      = list(request.node.tags),
+            compute_gflops = request.node.compute_gflops,
+            max_memory_mb  = request.node.max_memory_mb,
+            first_slice    = request.node.first_slice,
         )
         return coordinator_service_pb2.RegisterResponse(
             ok=ok,
@@ -319,6 +322,8 @@ class DistributedExecutor(BaseExecutor):
 
         self._proxies: list[_WorkerProxy] = []
         self._nodes:   list               = []
+        self._planner  = None   # planner(nodes) -> partitions, from setup()
+        self.partitions: list = []   # the partitions in use (after planning / recovery)
         self._grpc_server = None
         self._n_micro  = 1
         self._last_epoch = 0
@@ -364,9 +369,14 @@ class DistributedExecutor(BaseExecutor):
         model_name: str = "unknown",
         strategy_name: str = "unknown",
         run_config=None,  # ignored — DistributedExecutor uses constructor-injected RunConfig
+        planner=None,
     ) -> None:
+        """``planner(nodes) -> partitions`` (from ``SlicedModel``) re-plans the split for
+        the discovered nodes, in slice order, once their capabilities are known; it is
+        also used by ``recover()``. Without it, ``partitions`` are used as given."""
         layers = model_graph.get_layers()
         n = len(partitions)
+        self._planner = planner
         self._n_micro = max(1, n_micro_batches)
         self._callbacks = list(callbacks or [])
         self._model_name = model_name
@@ -387,6 +397,18 @@ class DistributedExecutor(BaseExecutor):
                 tensor_transport=cfg.transport.tensor,
                 tensor_port_offset=cfg.transport.tensor_port_offset,
             )
+
+        # Capabilities → slice order → plan (deferred planning)
+        self._probe_nodes()
+        self._order_nodes()
+        if cfg.planning.measure_links:
+            self._measure_links()
+        if planner is not None and cfg.planning.heterogeneous:
+            partitions = planner(list(self._nodes))
+            if len(partitions) != n:
+                raise RuntimeError(f"planner returned {len(partitions)} partitions for {n} nodes")
+        self.partitions = partitions
+        self._log_plan(model_graph, partitions)
 
         # Initialise RunLogger now that we have run_id and worker info
         if cfg.logging.enabled:
@@ -884,8 +906,12 @@ class DistributedExecutor(BaseExecutor):
             start += size
         return groups
 
-    def _build_recovery_partitions(self, n_alive: int) -> list[Partition]:
-        """Rebuild partitions for recovery at the same abstraction level as setup().
+    def _build_recovery_partitions(self, n_alive: int, nodes: list | None = None) -> list[Partition]:
+        """Re-plan for the survivors with the run's strategy (``planner``), given their
+        capabilities. Falls back to a uniform split when there is no planner or it can't
+        produce ``n_alive`` partitions (e.g. named cuts fixed for more workers).
+
+        The uniform fallback works at the same abstraction level as setup().
 
         If setup used an explicit pack(model) stage list, those packed stages
         remain the atomic units here. Recovery only supports the same partition
@@ -894,6 +920,17 @@ class DistributedExecutor(BaseExecutor):
         """
         if self._stored_model_graph is None:
             raise RuntimeError("[recovery] missing stored model graph")
+
+        planner = getattr(self, "_planner", None)
+        if planner is not None and nodes is not None:
+            try:
+                partitions = planner(list(nodes))
+                if len(partitions) == n_alive:
+                    return partitions
+                _LOG.warning("recovery planner made %s partitions for %s survivors; using uniform",
+                             len(partitions), n_alive)
+            except ValueError as e:
+                _LOG.warning("recovery planner failed (%s); using uniform", e)
 
         layer_groups = self._uniform_split(list(range(len(self._stored_model_graph))), n_alive)
         partitions = []
@@ -944,14 +981,19 @@ class DistributedExecutor(BaseExecutor):
             _LOG.warning("recovery using initial layer weights because no checkpoint was available")
             all_layers = list(self._stored_layers)
 
-        # Rebuild partitions at the same abstraction level as setup().
-        partitions = self._build_recovery_partitions(n_alive)
-
         # Rebuild proxy + node lists with new sequential indices
         self._nodes   = [self._nodes[old_i]   for old_i, _ in alive]
         self._proxies = [proxy                 for _,     proxy in alive]
         for new_i, proxy in enumerate(self._proxies):
             proxy.worker_index = new_i
+        if cfg.planning.measure_links:
+            self._measure_links()   # survivors have new neighbours
+
+        # Re-plan for the survivors (their real capabilities), see _build_recovery_partitions
+        partitions = self._build_recovery_partitions(
+            n_alive, self._nodes if cfg.planning.heterogeneous else None)
+        self.partitions = partitions
+        self._log_plan(self._stored_model_graph, partitions)
 
         # Update stored partition state so subsequent _load_all_slices is consistent
         self._stored_layers = all_layers
@@ -1011,6 +1053,69 @@ class DistributedExecutor(BaseExecutor):
         if tag_filter:
             discover_kwargs["tag_filter"] = tag_filter
         return self._discovery.discover(**discover_kwargs)
+
+    def _probe_nodes(self) -> None:
+        """Fill each node's capabilities from the worker itself (``describe``), and measure
+        the network from this process to it (``planning.measure_network``)."""
+        plan = self._run_config.planning
+        for node, proxy in zip(self._nodes, self._proxies):
+            try:
+                d = proxy.stub().describe(worker_service_pb2.DescribeRequest(), timeout=120.0)
+                node.device         = d.device or node.device
+                node.memory_mb      = d.memory_mb or node.memory_mb
+                node.compute_gflops = d.compute_gflops
+                node.max_memory_mb  = d.max_memory_mb
+                node.first_slice    = d.first_slice
+                node.tags           = list(node.tags) or list(d.tags)
+            except grpc.RpcError as e:   # e.g. a worker older than M2 (UNIMPLEMENTED)
+                _LOG.warning("describe failed address=%s error=%s; planning without its capabilities",
+                             node.address, e.code() if hasattr(e, "code") else e)
+            if plan.measure_network and proxy.local is None:
+                try:
+                    node.rtt_ms, node.bandwidth_mbps = measure_link(proxy.stub(), plan.probe_bytes)
+                except grpc.RpcError as e:
+                    _LOG.warning("network probe failed address=%s error=%s", node.address, e)
+
+    def _order_nodes(self) -> None:
+        """Slice order: a node declaring ``first_slice`` (e.g. the data owner) goes first;
+        the others keep discovery order."""
+        firsts = [i for i, nd in enumerate(self._nodes) if nd.first_slice]
+        if len(firsts) > 1:
+            raise ValueError("more than one worker declares first_slice: "
+                             f"{[self._nodes[i].address for i in firsts]}")
+        if firsts and firsts[0] != 0:
+            order = [firsts[0]] + [i for i in range(len(self._nodes)) if i != firsts[0]]
+            self._nodes   = [self._nodes[i] for i in order]
+            self._proxies = [self._proxies[i] for i in order]
+            for i, proxy in enumerate(self._proxies):
+                proxy.worker_index = i
+
+    def _measure_links(self) -> None:
+        """Worker i measures its link to worker i+1 (the activations' path)."""
+        plan = self._run_config.planning
+        for node, nxt, proxy in zip(self._nodes, self._nodes[1:], self._proxies):
+            try:
+                r = proxy.stub().probe_link(worker_service_pb2.LinkProbeRequest(
+                    target=nxt.address, n_bytes=plan.probe_bytes, repeats=3), timeout=120.0)
+            except grpc.RpcError as e:
+                r = None
+                _LOG.warning("link probe failed %s -> %s error=%s", node.address, nxt.address, e)
+            if r is not None and not r.error:
+                node.link_rtt_ms, node.link_bandwidth_mbps = r.rtt_ms, r.bandwidth_mbps
+            elif r is not None:
+                _LOG.warning("link probe failed %s -> %s error=%s", node.address, nxt.address, r.error)
+        if self._nodes:
+            self._nodes[-1].link_rtt_ms = self._nodes[-1].link_bandwidth_mbps = 0.0
+
+    def _log_plan(self, model_graph, partitions) -> None:
+        for i, (nd, p) in enumerate(zip(self._nodes, partitions)):
+            params = sum(prm.numel() for j in p.layer_indices
+                         for prm in model_graph.nodes[j].module.parameters()) if model_graph.nodes else 0
+            _LOG.info(
+                "plan slice=%s address=%s device=%s gflops=%.1f mem_cap_mb=%s nodes=%s params=%s",
+                i, nd.address, nd.device, nd.compute_gflops, nd.memory_cap_mb(),
+                f"{p.layer_indices[0]}..{p.layer_indices[-1]}", params,
+            )
 
     def _make_proxy(self, i: int, node) -> "_WorkerProxy":
         return _WorkerProxy(name=node.node_id, address=node.address, worker_index=i)

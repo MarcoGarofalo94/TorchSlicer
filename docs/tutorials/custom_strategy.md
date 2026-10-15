@@ -187,3 +187,30 @@ assert abs(hist[0]["loss"] - sum(ref_losses) / len(ref_losses)) < 1e-5
 
 For the full model × execution-mode check (local, GPipe, centralized and P2P, over gRPC or
 TCP), see `benchmarks/equivalence/`.
+
+## 5. Plan for heterogeneous workers
+
+Distributed executors plan again once they know the workers. If your `split` accepts a
+`nodes=None` argument, it receives the discovered workers as `ts.NodeInfo` objects, in slice
+order. Each one carries `compute_gflops`, `memory_cap_mb()`, `device`, and the measured
+`rtt_ms`/`bandwidth_mbps` (plus `link_*` to the next worker with
+`planning.measure_links`). The built-in cost strategies already use these fields, through
+`ts.balanced_cuts(costs, valid_cuts, n, speeds=..., mem=..., caps=..., ...)`. Here is a
+strategy that balances node count weighted by speed:
+
+```python
+class SpeedWeighted(ts.BaseSplitter):
+    def split(self, model_graph, n_partitions, nodes=None):
+        costs = [1.0] * len(model_graph)
+        speeds = [nd.compute_gflops for nd in nodes] if nodes else None
+        cuts = ts.balanced_cuts(costs, model_graph.valid_cuts(), n_partitions, speeds=speeds)
+        return self.partitions_from_cuts(model_graph, cuts)
+
+graph = ts.trace(nn.Sequential(*[nn.Linear(8, 8) for _ in range(8)]))
+nodes = [ts.NodeInfo("a", "a:1", compute_gflops=10), ts.NodeInfo("b", "b:1", compute_gflops=30)]
+print([p.layer_indices for p in SpeedWeighted().split(graph, 2, nodes=nodes)])
+# [[0, 1], [2, 3, 4, 5, 6, 7]]: the 3x faster worker gets 3x the layers
+```
+
+Without `nodes` (local runs, or `planning.heterogeneous: false`), the same strategy splits
+evenly.

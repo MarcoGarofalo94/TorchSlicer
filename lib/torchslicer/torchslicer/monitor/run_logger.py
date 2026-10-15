@@ -156,6 +156,10 @@ class RunLogger:
                 "address":        nd.address,
                 "device":         nd.device,
                 "memory_mb_free": nd.memory_mb,
+                **{k: getattr(nd, k) for k in (
+                    "compute_gflops", "max_memory_mb", "first_slice", "rtt_ms",
+                    "bandwidth_mbps", "link_rtt_ms", "link_bandwidth_mbps")
+                   if getattr(nd, k, None)},
             }
             for i, nd in enumerate(nodes)
         ]
