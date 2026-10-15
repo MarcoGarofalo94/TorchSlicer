@@ -7,6 +7,7 @@ import torch.optim as optim
 
 from .base import BaseExecutor
 from ..core.split_layer import SplitLayer
+from ..core.tied import find_tied_parameters, non_owned_names, optimizer_parameters
 from ..monitor import tracer
 from ..monitor.profiler import WorkerProfiler
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
@@ -68,16 +69,19 @@ class LocalExecutor(BaseExecutor):
         self.split_layers = []
         self._callbacks   = list(callbacks or [])
 
+        partitions_layers = [[layers[j] for j in p.layer_indices] for p in partitions]
+        # A tied parameter is one shared tensor here, so its .grad sums every use;
+        # only its owner (lowest partition, which steps last) may update it.
+        self.tied_groups = find_tied_parameters(partitions_layers)
         for i, partition in enumerate(partitions):
             is_last = (i == n - 1)
-            partition_layers = [layers[j] for j in partition.layer_indices]
+            partition_layers = partitions_layers[i]
             preds = partition.predecessors if partition.predecessors else None
             sl = SplitLayer(partition_layers, is_last=is_last, predecessors=preds,
                             mixed_precision=mixed_precision)
             sl.train()
-            trainable = [p for p in sl.parameters() if p.requires_grad]
-            params = trainable if trainable else list(sl.parameters())
-            opt = getattr(optim, optimizer_cfg["name"])(params, **optimizer_cfg["params"])
+            params = optimizer_parameters(sl, exclude=non_owned_names(i, self.tied_groups))
+            opt = getattr(optim, optimizer_cfg["name"])(params, **optimizer_cfg["params"]) if params else None
             sl.set_optimizer(opt)
             self.split_layers.append(sl)
 
@@ -368,9 +372,7 @@ class LocalExecutor(BaseExecutor):
         # Step 3: optimizer
         for i, sl in enumerate(self.split_layers):
             with self._profilers[i].phase("optimizer"):
-                sl.optimizer.step()
-                sl.optimizer.zero_grad()
-            sl.x = None
+                sl.optimize()
 
         return total_loss / M
 

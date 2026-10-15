@@ -82,7 +82,10 @@ class DiscoveryConfig:
 class StartupConfig:
     worker_init_max_attempts:  int   = 20
     worker_init_delay_s:       float = 1.0
-    worker_init_rpc_timeout_s: float = 5.0
+    # covers the whole init: deserializing the slice (imports transformers/peft for HF
+    # layers, GBs for an LLM slice) and moving it to the device. A worker that is not up
+    # yet still fails fast (UNAVAILABLE) and is retried.
+    worker_init_rpc_timeout_s: float = 300.0
 
 
 @dataclass

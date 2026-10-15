@@ -88,6 +88,14 @@ def pack_qwen(model):
 sliced = ts.slice(model, n=4, pack=pack_qwen)
 ```
 
+**Tied weights** (one parameter used by several layers, e.g. the token embedding and the
+LM head of GPT-2, Llama-3.2-1B, Qwen2.5-0.5B, Gemma) are handled automatically and train
+exactly like the unsplit model. The lowest partition that uses the parameter owns it and is
+the only one that updates it. Locally, all uses share one tensor. Across workers, the other
+holders send their gradient to the owner before it steps, and the owner sends the new value
+back before the batch completes. That costs one parameter-sized message in each direction
+per batch.
+
 ## Configuration
 
 ```python

@@ -9,6 +9,8 @@ service WorkerService {
     rpc shutdown         (ShutdownRequest)  returns (Ack);
     rpc get_stats        (GetStatsRequest)  returns (WorkerStatsResponse);
     rpc save_checkpoint  (ShutdownRequest)  returns (Ack);  // save without stopping server
+    rpc tied_grad        (TiedTensor)       returns (Ack);  // replica → owner: gradient of a tied parameter
+    rpc tied_update      (TiedTensor)       returns (Ack);  // owner → replica: value after the optimizer step
 }
 
 // ── tensor ────────────────────────────────────────────────────────────────────
@@ -69,6 +71,17 @@ message SliceConfig {
     uint32  profile_verbosity      = 12; // 0=off 1=epoch totals 2=phase breakdown 3=per-batch
     bool    profile_memory         = 13; // capture GPU memory snapshots per phase
     repeated PredecessorList predecessors = 14; // intra-partition DAG; one entry per layer
+    repeated TiedParam tied        = 15; // parameters shared with other layers (tied weights)
+    string  init_token             = 16; // unique per init round; tied messages from other rounds are dropped
+}
+
+// A parameter reachable under several names, possibly on several workers.
+// The owner (lowest worker index using it) is the only one that optimizes it.
+message TiedParam {
+    uint32          group = 1;
+    repeated string names = 2;  // local names (SplitLayer-relative) that must share one tensor
+    bool            owner = 3;
+    repeated string peers = 4;  // owner: replica addresses; replica: [owner address]; empty if local-only
 }
 
 // ── forward / backward ────────────────────────────────────────────────────────
@@ -148,6 +161,15 @@ message WorkerStatsResponse {
     // non-empty if this worker hit a fatal runtime error (lets the coordinator
     // confirm a failure report with the reported worker itself)
     string fatal_error = 15;
+}
+
+// ── tied parameters ───────────────────────────────────────────────────────────
+
+message TiedTensor {
+    uint32 group      = 1;
+    uint32 batch_id   = 2;  // full-batch id (micro-batch id // n_micro)
+    string init_token = 3;
+    Tensor tensor     = 4;
 }
 
 // ── responses ─────────────────────────────────────────────────────────────────

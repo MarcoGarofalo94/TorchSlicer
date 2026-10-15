@@ -334,3 +334,14 @@ def test_init_worker_with_retry_retries_unavailable_once():
     assert stub.calls == 2
     assert len(logger.messages) == 1
     assert "retry 1/2" in logger.messages[0]
+
+
+def test_optimizer_config_keeps_full_precision_lr():
+    # the proto lr field is float32; workers must get the exact value via extra_params
+    import io
+    from torchslicer.executors.distributed import _build_optimizer_config
+
+    msg = _build_optimizer_config({"name": "AdamW", "params": {"lr": 0.001, "weight_decay": 0.01}})
+    extra = torch.load(io.BytesIO(msg.extra_params), weights_only=False)
+    assert msg.lr != 0.001          # float32 rounding: why lr must not come from this field
+    assert extra == {"lr": 0.001, "weight_decay": 0.01}

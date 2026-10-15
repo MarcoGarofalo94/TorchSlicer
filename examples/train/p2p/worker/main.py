@@ -34,6 +34,7 @@ import sys
 import socket
 import threading
 import time
+import uuid
 from concurrent import futures
 
 import grpc
@@ -60,6 +61,8 @@ from torchslicer.transport.grpc.coordinator import (
     coordinator_service_pb2_grpc,
 )
 from torchslicer.core.split_layer import SplitLayer
+from torchslicer.core.tied import optimizer_parameters
+from torchslicer.executors.distributed import build_tied_configs
 from torchslicer.monitor import tracer, WorkerProfiler
 from torchslicer.monitor.process_logger import get_logger, configure as configure_process_logging
 from torchslicer.monitor.run_logger import RunLogger
@@ -97,6 +100,12 @@ def build_model():
     model.maxpool = nn.Identity()
     model.fc      = nn.Linear(512, 10)
     return model
+
+
+def get_pack():
+    """Optional ``pack=`` function for ``ts.slice`` (e.g. ``examples.pack.gpt2.pack_gpt2``
+    for HF LLMs).  None = trace the model with torch.fx."""
+    return None
 
 
 # ── embedded coordinator for the driver ────────────────────────────────────────
@@ -206,7 +215,8 @@ def _build_layer_configs(layers: list) -> list:
 
 
 def _build_optimizer_config(cfg: dict):
-    extra = {k: v for k, v in cfg.get("params", {}).items() if k != "lr"}
+    # lr also travels in extra_params at full precision (the proto field is float32)
+    extra = dict(cfg.get("params", {}))
     buf   = io.BytesIO()
     torch.save(extra, buf)
     return worker_service_pb2.OptimizerConfig(
@@ -271,6 +281,8 @@ def _configure_driver_slice(
     opt_cfg: dict,
     run_id: str,
     cfg: RunConfig,
+    tied: list = (),
+    init_token: str = "",
 ):
     """Configure driver's own partition directly (no init() RPC self-call)."""
     driver._reset_state()
@@ -301,14 +313,17 @@ def _configure_driver_slice(
 
     # No coordinator stub needed: _send_backward is overridden to signal directly.
 
+    # tied weights: same handling as WorkerServicer.init (the driver is partition 0,
+    # so it owns every tied parameter it uses)
+    driver._configure_tied(tied, init_token)
     extra     = {k: v for k, v in opt_cfg.get("params", {}).items() if k != "lr"}
-    trainable = [p for p in driver.layer.parameters() if p.requires_grad]
-    params    = trainable if trainable else list(driver.layer.parameters())
+    params    = optimizer_parameters(
+        driver.layer, exclude={n for t in tied if not t.owner for n in t.names})
     opt       = getattr(optim, opt_cfg["name"])(
         params,
         lr=float(opt_cfg.get("params", {}).get("lr", 0.001)),
         **extra,
-    )
+    ) if params else None
     driver.layer.set_optimizer(opt)
     driver.layer = driver.layer.to(driver.device)
 
@@ -541,7 +556,7 @@ def serve():
 
     # Build model graph + partitions
     model        = build_model()
-    sliced       = ts.slice(model, strategy="uniform", n=n)
+    sliced       = ts.slice(model, strategy="uniform", n=n, pack=get_pack())
     all_layers   = sliced.graph.get_layers()
     partitions   = sliced.partitions
     opt_cfg      = cfg.training.optimizer
@@ -553,6 +568,11 @@ def serve():
     for peer_addr in peers[1:]:
         stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(peer_addr))
         follower_stubs.append((peer_addr, stub))
+
+    # Parameters shared across partitions (tied weights), wired up on every peer
+    tied       = build_tied_configs(
+        [[all_layers[j] for j in p.layer_indices] for p in partitions], peers)
+    init_token = uuid.uuid4().hex
 
     # Send SliceConfig to each follower
     _LOG.info("distributing slices follower_count=%s", len(follower_stubs))
@@ -579,6 +599,8 @@ def serve():
             profile_verbosity = cfg.profile.verbosity,
             profile_memory    = cfg.profile.memory,
             predecessors      = pred_proto,
+            tied              = tied[wi],
+            init_token        = init_token,
         )
         res = init_worker_with_retry(
             stub,
@@ -596,7 +618,7 @@ def serve():
 
     # Configure driver's own slice (partition 0)
     _configure_driver_slice(driver_svc, partitions[0], all_layers,
-                            peers, opt_cfg, run_id, cfg)
+                            peers, opt_cfg, run_id, cfg, tied[0], init_token)
 
     # Start TCP tensor server on driver if transport=tcp (followers connect back for backward)
     driver_svc.start_tensor_server(int(port) + cfg.transport.tensor_port_offset)

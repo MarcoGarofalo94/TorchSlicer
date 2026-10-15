@@ -353,7 +353,8 @@ def _build_layer_configs(layers: list) -> list:
 
 
 def _build_optimizer_config(cfg: dict):
-    extra = {k: v for k, v in cfg.get("params", {}).items() if k != "lr"}
+    # lr also travels in extra_params at full precision (the proto field is float32)
+    extra = dict(cfg.get("params", {}))
     buf   = io.BytesIO()
     torch.save(extra, buf)
     return worker_service_pb2.OptimizerConfig(

@@ -44,9 +44,13 @@ class SplitLayer(nn.Module):
         self._amp_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.x = None
         self.optimizer = None
+        self._optimizer_set = False
 
-    def set_optimizer(self, optimizer: torch.optim.Optimizer):
+    def set_optimizer(self, optimizer: "torch.optim.Optimizer | None"):
+        """``None`` = this slice has nothing to optimize (no parameters, or only tied
+        parameters owned by another slice)."""
         self.optimizer = optimizer
+        self._optimizer_set = True
 
     # ── forward ───────────────────────────────────────────────────────────────
 
@@ -139,8 +143,9 @@ class SplitLayer(nn.Module):
     # ── optimize ──────────────────────────────────────────────────────────────
 
     def optimize(self, dry_run: bool = False):
-        assert self.optimizer is not None, "Call set_optimizer() before optimize()"
-        if not dry_run:
-            self.optimizer.step()
-        self.optimizer.zero_grad()
+        assert self._optimizer_set, "Call set_optimizer() before optimize()"
+        if self.optimizer is not None:
+            if not dry_run:
+                self.optimizer.step()
+            self.optimizer.zero_grad()
         self.x = None  # release cut-point tensor; prevents CUDA allocator growth

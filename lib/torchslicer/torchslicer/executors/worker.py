@@ -18,6 +18,7 @@ from torch import nn, optim
 
 from ..config import RunConfig
 from ..core.split_layer import SplitLayer
+from ..core.tied import optimizer_parameters, retie
 
 _UNSET = object()  # sentinel: distinguish "not provided" from explicit None
 from ..monitor import tracer as _tracer
@@ -43,6 +44,9 @@ _GRPC_OPTS = [
 ]
 
 _LOG = get_logger("torchslicer.worker")
+
+# How long a tied-parameter owner waits for the replicas' gradients before failing.
+_TIED_GRAD_TIMEOUT_S = 300.0
 # TCP tensor frame format (big-endian):
 #   kind(1c) | batch_id(4I) | dtype(1B) | ndim(2H) | ctx_len(2H)
 #   followed by: ctx_bytes(ctx_len) | shape(ndim×8q) | payload_len(8Q) | payload
@@ -361,6 +365,7 @@ class WorkerServicer(
         self._tensor_stop = threading.Event()
         self._tensor_threads: list[threading.Thread] = []
 
+        self._tied_cond = threading.Condition()
         self._reset_state()
 
         # Single-worker compute pool: serialises forward/backward on this worker
@@ -474,6 +479,11 @@ class WorkerServicer(
 
         self._profiler: WorkerProfiler = WorkerProfiler(verbosity=0)
 
+        # tied parameters (see core/tied.py): [{group, param, owner, stubs}]
+        self._tied:        list = []
+        self._tied_token:  str  = ""
+        self._tied_grads:  dict = {}   # (group, batch_id) → [grad from each replica]
+
     # ── init ───────────────────────────────────────────────────────────────────
 
     def init(self, request, context):
@@ -503,10 +513,11 @@ class WorkerServicer(
                 torch.load(io.BytesIO(request.optimizer.extra_params), weights_only=False)
                 if request.optimizer.extra_params else {}
             )
-            trainable = [p for p in self.layer.parameters() if p.requires_grad]
-            params = trainable if trainable else list(self.layer.parameters())
+            self._configure_tied(request.tied, request.init_token)
+            params = optimizer_parameters(
+                self.layer, exclude={n for t in request.tied if not t.owner for n in t.names})
             opt = getattr(optim, request.optimizer.name)(
-                params, lr=request.optimizer.lr, **opt_extra)
+                params, **{"lr": request.optimizer.lr, **opt_extra}) if params else None
             self.layer.set_optimizer(opt)
 
             self.prev_worker = request.prev_worker or None
@@ -628,6 +639,85 @@ class WorkerServicer(
 
         threading.Thread(target=_do_shutdown, daemon=True).start()
         return worker_service_pb2.Ack(batch_id=0)
+
+    # ── tied parameters ────────────────────────────────────────────────────────
+
+    def _configure_tied(self, tied: list, init_token: str) -> None:
+        """Re-tie shared parameters (layers arrive serialized one by one) and connect
+        to the workers holding other copies."""
+        self._tied_token = init_token
+        self._tied = [
+            {
+                "group": t.group,
+                "param": retie(self.layer, list(t.names)),
+                "owner": t.owner,
+                "stubs": [worker_service_pb2_grpc.WorkerServiceStub(_channel(a)) for a in t.peers],
+            }
+            for t in tied
+        ]
+
+    def tied_grad(self, request, context):
+        """Owner side: a replica's gradient for a tied parameter."""
+        if request.init_token == self._tied_token:
+            grad = deserialize_tensor(request.tensor)
+            with self._tied_cond:
+                self._tied_grads.setdefault((request.group, request.batch_id), []).append(grad)
+                self._tied_cond.notify_all()
+        return worker_service_pb2.Ack(batch_id=request.batch_id)
+
+    def tied_update(self, request, context):
+        """Replica side: the owner's value after its optimizer step."""
+        if request.init_token == self._tied_token:
+            value = deserialize_tensor(request.tensor)
+            for t in self._tied:
+                if t["group"] == request.group:
+                    with torch.no_grad():
+                        t["param"].copy_(value)
+        return worker_service_pb2.Ack(batch_id=request.batch_id)
+
+    def _tied_call(self, method, stub, group: int, key: int, tensor: torch.Tensor) -> None:
+        try:
+            getattr(stub, method)(worker_service_pb2.TiedTensor(
+                group=group, batch_id=key, init_token=self._tied_token,
+                tensor=serialize_tensor(tensor)))
+        except Exception as exc:
+            if self._is_unavailable_rpc(exc):
+                raise _PeerUnavailableError(
+                    f"peer unavailable phase={method} group={group} batch_id={key}") from exc
+            raise
+
+    def _optimize(self, batch_id: int) -> None:
+        """Optimizer step with tied-parameter sync across workers.
+
+        Replicas step first (they are downstream), so they hand their gradient to the
+        owner and drop it; the owner adds every replica gradient, steps, and pushes the
+        new value back before this batch completes — the next batch sees it everywhere.
+        """
+        synced = [t for t in self._tied if t["stubs"] and t["param"].requires_grad]
+        key = batch_id // self._n_micro if self._n_micro > 1 else batch_id
+        for t in synced:
+            if not t["owner"]:
+                p = t["param"]
+                self._tied_call("tied_grad", t["stubs"][0], t["group"], key,
+                                p.grad if p.grad is not None else torch.zeros_like(p))
+                p.grad = None
+        for t in synced:
+            if t["owner"]:
+                k = (t["group"], key)
+                with self._tied_cond:
+                    if not self._tied_cond.wait_for(
+                            lambda: len(self._tied_grads.get(k, ())) >= len(t["stubs"]),
+                            timeout=_TIED_GRAD_TIMEOUT_S):
+                        raise RuntimeError(f"tied gradient missing group={t['group']} batch_id={key}")
+                    grads = self._tied_grads.pop(k)
+                p = t["param"]
+                total = sum(g.to(p.device) for g in grads)
+                p.grad = total if p.grad is None else p.grad + total
+        self.layer.optimize()
+        for t in synced:
+            if t["owner"]:
+                for stub in t["stubs"]:
+                    self._tied_call("tied_update", stub, t["group"], key, t["param"].detach())
 
     # ── save_checkpoint ────────────────────────────────────────────────────────
 
@@ -1027,7 +1117,7 @@ class WorkerServicer(
                 grad = x_ref.grad if x_ref is not None else None
             if is_last_micro:
                 with self._profiler.phase("optimizer"):
-                    self.layer.optimize()
+                    self._optimize(batch_id)
 
         del out
         self._send_backward(batch_id, grad, is_last_micro, generation)
@@ -1080,7 +1170,7 @@ class WorkerServicer(
                     grad = x_ref.grad
                 if is_last_micro:
                     with self._profiler.phase("optimizer"):
-                        self.layer.optimize()
+                        self._optimize(batch_id)
 
             del out, label, loss, loss_unscaled
             self._send_backward(batch_id, grad, is_last_micro, generation)

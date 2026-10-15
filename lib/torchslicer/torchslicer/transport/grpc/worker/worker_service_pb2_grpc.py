@@ -69,6 +69,16 @@ class WorkerServiceStub(object):
                 request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.SerializeToString,
                 response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
                 _registered_method=True)
+        self.tied_grad = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/tied_grad',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+                _registered_method=True)
+        self.tied_update = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/tied_update',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+                _registered_method=True)
 
 
 class WorkerServiceServicer(object):
@@ -111,6 +121,20 @@ class WorkerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def tied_grad(self, request, context):
+        """replica → owner: gradient of a tied parameter
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def tied_update(self, request, context):
+        """owner → replica: value after the optimizer step
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -142,6 +166,16 @@ def add_WorkerServiceServicer_to_server(servicer, server):
             'save_checkpoint': grpc.unary_unary_rpc_method_handler(
                     servicer.save_checkpoint,
                     request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
+            ),
+            'tied_grad': grpc.unary_unary_rpc_method_handler(
+                    servicer.tied_grad,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
+            ),
+            'tied_update': grpc.unary_unary_rpc_method_handler(
+                    servicer.tied_update,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.FromString,
                     response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
             ),
     }
@@ -306,6 +340,60 @@ class WorkerService(object):
             target,
             '/torchslicer.worker.WorkerService/save_checkpoint',
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def tied_grad(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/tied_grad',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def tied_update(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/tied_update',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.SerializeToString,
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
             options,
             channel_credentials,

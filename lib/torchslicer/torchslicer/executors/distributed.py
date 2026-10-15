@@ -3,6 +3,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from concurrent import futures
 from dataclasses import dataclass, field
 
@@ -10,6 +11,7 @@ import torch
 from torch import nn
 
 from ..core.split_layer import SplitLayer
+from ..core.tied import find_tied_parameters
 
 from .base import BaseExecutor
 from .startup import init_worker_with_retry
@@ -126,6 +128,22 @@ def _unpack_inputs(inputs):
     return inputs, {}
 
 
+def build_tied_configs(partitions_layers: list, addresses: list) -> list:
+    """Per-partition ``TiedParam`` lists for ``SliceConfig.tied`` (see core/tied.py).
+
+    ``addresses[i]`` is the worker hosting partition ``i``.
+    """
+    configs = [[] for _ in partitions_layers]
+    for g in find_tied_parameters(partitions_layers):
+        for p_idx, names in g.members.items():
+            owner = p_idx == g.owner
+            peers = [addresses[r] for r in g.replicas] if owner else [addresses[g.owner]]
+            configs[p_idx].append(worker_service_pb2.TiedParam(
+                group=g.group_id, names=names, owner=owner,
+                peers=peers if g.cross_partition else []))
+    return configs
+
+
 def _build_layer_configs(layers: list) -> list:
     configs = []
     for layer in layers:
@@ -139,7 +157,9 @@ def _build_layer_configs(layers: list) -> list:
 
 
 def _build_optimizer_config(cfg: dict):
-    extra = {k: v for k, v in cfg.get("params", {}).items() if k != "lr"}
+    # lr is also kept in extra_params: the proto ``lr`` field is float32, and a
+    # rounded learning rate silently changes training (measurable with Adam).
+    extra = dict(cfg.get("params", {}))
     buf = io.BytesIO()
     torch.save(extra, buf)
     return worker_service_pb2.OptimizerConfig(
@@ -404,6 +424,10 @@ class DistributedExecutor(BaseExecutor):
         self._stored_opt_cfg  = opt_cfg
         self._stored_crit_cfg = crit_cfg
 
+        tied = build_tied_configs(
+            [[layers[j] for j in p.layer_indices] for p in partitions],
+            [proxy.address for proxy in self._proxies])
+        init_token = uuid.uuid4().hex
         for i, proxy in enumerate(self._proxies):
             is_last = (i == n - 1)
             partition_layers = [layers[j] for j in partitions[i].layer_indices]
@@ -426,6 +450,8 @@ class DistributedExecutor(BaseExecutor):
                 profile_verbosity  = cfg.profile.verbosity,
                 profile_memory     = cfg.profile.memory,
                 predecessors       = pred_proto,
+                tied               = tied[i],
+                init_token         = init_token,
             )
             res = self._init_worker(proxy, slice_cfg, phase="init")
             _LOG.info(
@@ -647,6 +673,10 @@ class DistributedExecutor(BaseExecutor):
         opt_cfg  = _build_optimizer_config(optimizer_cfg)
         crit_cfg = _build_criterion_config(criterion_cfg)
 
+        tied = build_tied_configs(
+            [[layers[j] for j in p.layer_indices] for p in partitions],
+            [proxy.address for proxy in self._proxies])
+        init_token = uuid.uuid4().hex
         for i, proxy in enumerate(self._proxies):
             is_last = (i == n - 1)
             partition_layers = [layers[j] for j in partitions[i].layer_indices]
@@ -669,6 +699,8 @@ class DistributedExecutor(BaseExecutor):
                 profile_verbosity  = cfg.profile.verbosity,
                 profile_memory     = cfg.profile.memory,
                 predecessors       = pred_proto,
+                tied               = tied[i],
+                init_token         = init_token,
             )
             res = self._init_worker(proxy, slice_cfg, phase="reinit")
             _LOG.info(
@@ -1002,6 +1034,10 @@ class DistributedExecutor(BaseExecutor):
         self._stored_partition_indices = [list(p.layer_indices) for p in partitions]
 
         # Send new SliceConfig to each survivor (reinit wires up new prev/next stubs)
+        tied = build_tied_configs(
+            [[all_layers[j] for j in p.layer_indices] for p in partitions],
+            [proxy.address for proxy in self._proxies])
+        init_token = uuid.uuid4().hex
         for new_i, (proxy, partition) in enumerate(zip(self._proxies, partitions)):
             is_last  = (new_i == n_alive - 1)
             partition_layers = [all_layers[j] for j in partition.layer_indices]
@@ -1024,6 +1060,8 @@ class DistributedExecutor(BaseExecutor):
                 profile_verbosity = cfg.profile.verbosity,
                 profile_memory    = cfg.profile.memory,
                 predecessors      = pred_proto,
+                tied              = tied[new_i],
+                init_token        = init_token,
             )
             res = self._init_worker(proxy, slice_cfg, phase="recovery")
             _LOG.info("recovery reinit complete worker=%s address=%s message=%s", new_i, proxy.address, res.message)
