@@ -1,4 +1,4 @@
-# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, end of M2)
+# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, end of M3)
 
 Goal: become the de facto framework for split learning (SL) experiments, the way Flower is for FL.
 TorchSlicer is SL-only. Averaging/FL logic stays out of the core; it plugs in through hooks and is
@@ -48,6 +48,24 @@ shown in a Flower-based SplitFed baseline.
   partitions than asked). Version 0.4.0.
   Carried: see the Handoff.
 
+- M3 (branch `feat/m3-run-anywhere`, forked from M2's tip, not merged/pushed): **done** =
+  one script + one config on every target. `ts.run(model_fn, data_fn, **slice_kwargs)` is the node
+  entry point: `deploy.topology` (local/centralized/p2p) and the node's role (`ROLE`:
+  all/coordinator/worker/driver/follower) pick what it does. `ROLE=all` (the default) runs every node
+  in one process, with workers on loopback over real gRPC/TCP. `python -m torchslicer launch SCRIPT -c
+  CONFIG --target local|processes|compose|k8s|baremetal` derives the node list once from the config
+  (`deploy.plan_nodes`) and runs it (local, processes) or renders it (compose; k8s = ConfigMap +
+  Indexed Job of workers behind a headless Service + coordinator/driver Job; baremetal = one script
+  per host). One guide per environment in `docs/deploy/`; example `examples/run_anywhere/` +
+  `experiments/run_anywhere_{local,centralized,p2p}.yaml`; `make launch`. On CPU, local, in-process,
+  OS processes (both topologies, both transports, both discovery backends) and the bare-metal scripts
+  (run on 127.0.0.1) all give exactly the unsplit losses. Bugs fixed: validation.md issues 12–15
+  (`start_worker` ignored `network.device`; local ignored it too; with static discovery the plan
+  depended on which nodes were up first; the documented config priority was backwards). Version 0.5.0.
+  **Deviation from the plan:** k8s workers are an Indexed Job, not a StatefulSet. Same stable ordered
+  DNS names, but a finite run completes instead of its workers being restarted forever (rationale in
+  `docs/deploy/k8s.md`).
+
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
   from `main`. The chain is `main` → `feat/m0-foundations` → `feat/m1-split-anything` → `feat/m2-...` and so on.
@@ -88,22 +106,22 @@ shown in a Flower-based SplitFed baseline.
   seed it with vanilla SplitNN, U-shaped, SplitFed-via-Flower, and one compression/attack paper; framework paper vs SplitBud/SLPerf.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-15, at the end of M2 (version 0.4.0).
-- **Where things stand:** M0 is done on `feat/m0-foundations`, M1 on `feat/m1-split-anything`, and M2
-  on `feat/m2-p2p`. **Next: M3 (run anywhere).** Create it with
-  `git switch -c feat/m3-run-anywhere feat/m2-p2p`.
+Last updated 2026-10-15, at the end of M3 (version 0.5.0).
+- **Where things stand:** M0 is done on `feat/m0-foundations`, M1 on `feat/m1-split-anything`, M2 on
+  `feat/m2-p2p`, and M3 on `feat/m3-run-anywhere`. **Next: M4 (SL settings).** Create it with
+  `git switch -c feat/m4-sl-settings feat/m3-run-anywhere`.
 - **Read first:**
   - this file;
-  - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–3);
-  - `CLAUDE.md` (layout, commands, architecture, including P2P and planning);
-  - `docs/tutorials/p2p.md` (P2P extension points and capability-aware planning).
+  - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–4);
+  - `CLAUDE.md` (layout, commands, architecture, including P2P, planning and run-anywhere);
+  - `docs/tutorials/p2p.md` and `docs/deploy/README.md`.
   - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (119 tests at the end of M2, about 25 s);
+  - `.venv/bin/python -m pytest tests/` green (142 tests at the end of M3, about 60 s);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about 15 min on CPU;
     pass a model name for a quick check). Set `MATRIX_DEVICE=cuda` for the GPU, and
     `MATRIX_OPT='{"name":"AdamW","params":{"lr":0.001,"weight_decay":0.01}}'` for AdamW. A change to splitting
-    must not change any loss. Since M2, every mode, P2P included, is compared at 1e-5 against full-precision losses.
+    must not change any loss. Every mode is compared at 1e-5 against full-precision losses.
 - **Record as you go:** each bug found or behaviour changed goes into `notes/validation.md`, with the symptom, root
   cause, fix, cost and test, in the same commit as the fix. Note the pre-fix numbers *before* rerunning, because logs
   get overwritten. A paper on TorchSlicer will be written from these notes.
@@ -112,33 +130,41 @@ Last updated 2026-10-15, at the end of M2 (version 0.4.0).
     owner for the values if your memory doesn't have them.
   - Downloads: HF hub and dataset downloads are blocked. Use random-init HF configs and synthetic data, as in
     `benchmarks/equivalence/tsmodels.py`.
+  - No Docker and no kubectl in this container: compose/k8s output can be rendered and checked, not run.
+    The host has a GPU, so `DEVICE`/`network.device: auto` means CUDA here. Pin `cpu` when comparing against a CPU reference.
   - gRPC stubs: regenerating them needs grpcio-tools 1.64.0 (so the gencode matches the declared minimum). It has no
     wheel for the venv's Python 3.13. What worked in M2: `pip download --only-binary=:all: --python-version 3.12
     --platform manylinux2014_x86_64 grpcio-tools==1.64.0 -d wheels`, unzip the wheels into a directory, and run
     `PYTHONPATH=<dir> /usr/bin/python3.12 -m grpc_tools.protoc ...` (the command in `CLAUDE.md`). Regenerating the
-    unchanged protos this way gives byte-identical files.
+    unchanged protos this way gives byte-identical files. (M3 changed no proto.)
+  - The `torchslicer` console script needs a reinstall of the editable package; `python -m torchslicer` works without it.
   - Don't commit the owner's untracked files at the repo root (`*.prompt.md`, `prompt*.txt`, `results/`,
-    `sota_check.md`) or their `.gitignore` change.
-- **Facts for M3 (verified in code, 2026-10-15):**
-  - Three entry points exist today: centralized (`examples/train/centralized/GRPC/{coordinator,worker}`), P2P
-    (`ts.run_p2p` via `examples/train/p2p/worker/main.py`, role from `IS_DRIVER`), and local (`ts.slice(...).train`).
-    `ts.start_worker()` gives in-process workers, which is enough for a "local simulation" backend.
-  - Ordering: slice i goes to node i in discovery order, except that a `first_slice` worker goes first (centralized).
-    In P2P the driver is always slice 0. With k8s StatefulSets, stable ordinal DNS names would give a
-    deterministic `StaticDiscovery` order.
-  - Docker compose for P2P still passes `WORKER_INDEX`, which nothing reads any more (harmless). There are no
-    compose/Make targets for `examples/train/lm` (`experiments/tinygpt_2gpu_p2p.yaml` mentions a `make run-lm-gpu`
-    that doesn't exist).
-- **Carried (not done in M2):**
-  - The matrix is still a script, not a repo integration test with a small CI subset (from M0).
-  - Multi-host runs over a real network have not been tested. Bandwidth/RTT probes have only run over loopback.
-  - The memory estimate ignores activations. The speed is one matmul number, and `profiled` costs are scaled by
-    it, not re-profiled on each worker.
-  - `uniform` still ignores `valid_cuts()`.
-  - Recovery reloads the last *epoch* checkpoint: in-epoch progress is lost (by design so far).
+    `sota_check.md`) or their `.gitignore` change. Launcher output goes to `runs/deploy/` (ignored).
+- **Facts for M4 (verified in code, 2026-10-15):**
+  - Naming: `ROLE` / `deploy.role` already means the *deployment* role (coordinator, worker, driver, follower,
+    all). M4's SL roles (data owner, label owner) are a different axis. Give them their own name (e.g. `sl_role`
+    or per-slice ownership in the plan) so they don't overload `ROLE`.
+  - Data flow today: centralized: the coordinator sends **raw inputs to worker 0** and labels to the last worker
+    (`DistributedExecutor._send_batch`). P2P: the driver keeps inputs and slice 0 in-process and sends labels to the
+    last worker. Neither keeps labels on the data owner (no U-shaped). `first_slice` (declared capability) already
+    pins a worker to slice 0, which is the hook for "the data owner hosts stage 0".
+  - Every slice boundary carries exactly one tensor (`BaseSplitter.validate`). U-shaped needs the last slice (head
+    + loss) back on the data owner, i.e. one node holding two non-adjacent slices; the executors assume node i holds slice i.
+  - `ts.run` + `plan_nodes` are where a new role would be wired for deployment (one more `NodeSpec` role, env).
+- **Carried (not done in M3):**
+  - Compose and k8s output never ran (no Docker/kubectl here); multi-host bare metal not tested over a real network.
+  - The M0–M2 entry points (`examples/train/centralized/GRPC/{coordinator,worker}`, `examples/train/hf`) and the
+    hand-written root `docker-compose*.yml` (fixed 4 workers; P2P compose still passes the unused `WORKER_INDEX`)
+    are unchanged. They could become `ts.run` scripts plus generated compose files. The P2P/LM scripts
+    (`ts.run_p2p`) already work with the launcher, since `run_p2p` reads `ROLE`.
+  - On k8s, discovery is always static (pod DNS order). A long-lived worker pool (StatefulSet + registration) is
+    documented but not generated.
+  - From M2: the matrix is still a script (not a CI integration test); the memory estimate ignores activations; one
+    matmul number for speed; `uniform` ignores `valid_cuts()`; recovery reloads the last *epoch* checkpoint.
 - **Open owner decisions** (don't decide these alone): license GPL-3.0 vs Apache-2.0; untracking the stale
-  `lib/torchslicer/build/`; when to merge into `main` and push (M0 first, then M1, then M2); Zenodo/GitHub
-  integration; rebuilding the Docker image (needed for M2: new protos and RPCs).
+  `lib/torchslicer/build/`; when to merge into `main` and push (M0 first, then M1, M2, M3); Zenodo/GitHub
+  integration; rebuilding the Docker image (needed since M2: new protos and RPCs; generated compose/k8s use
+  `deploy.image`).
 
 ## Known facts this is based on (verified in code, 2026-10-14)
 - Centralized: the coordinator holds no layers and sends raw inputs to W0 → raw data leaves the data owner (fixed by M4 roles).

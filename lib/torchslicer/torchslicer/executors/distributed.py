@@ -1058,6 +1058,22 @@ class DistributedExecutor(BaseExecutor):
         """Fill each node's capabilities from the worker itself (``describe``), and measure
         the network from this process to it (``planning.measure_network``)."""
         plan = self._run_config.planning
+        # A static peer list names addresses, not live workers: wait (up to
+        # discovery.timeout) for each to accept connections, so the plan doesn't
+        # depend on which nodes happened to be up first.
+        timeout = float(self._run_config.discovery.timeout)
+        deadline = time.monotonic() + timeout
+        for proxy in self._proxies:
+            if proxy.local is None:
+                ch = _channel(proxy.address)
+                try:
+                    grpc.channel_ready_future(ch).result(
+                        timeout=max(0.0, deadline - time.monotonic()))
+                except grpc.FutureTimeoutError:
+                    raise RuntimeError(f"worker {proxy.address} not reachable within "
+                                       f"discovery.timeout={timeout:.0f}s") from None
+                finally:
+                    ch.close()
         for node, proxy in zip(self._nodes, self._proxies):
             try:
                 d = proxy.stub().describe(worker_service_pb2.DescribeRequest(), timeout=120.0)

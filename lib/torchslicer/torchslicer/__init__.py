@@ -1,4 +1,4 @@
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __author__ = 'Marco Garofalo'
 
 from .core.slicer import Slicer
@@ -23,7 +23,7 @@ from .config import (
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
     StartupConfig, TransportConfig,
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
-    NetworkConfig, PlanningConfig,
+    NetworkConfig, PlanningConfig, DeployConfig,
 )
 from .monitor import TrainingCallback, RunLogger
 from .core.stages import (
@@ -35,6 +35,7 @@ from .core.stages import (
     SimpleEmbedStage,
 )
 from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
+from .deploy import run
 
 
 def peft_unwrap(model) -> "nn.Module":

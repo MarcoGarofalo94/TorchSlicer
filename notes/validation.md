@@ -416,3 +416,92 @@ Full CPU/SGD matrix rerun on the final M2 code. The M1 `results_cpu_SGD.json` wa
 - All 18 P2P cells (9 models × gRPC/TCP, now through `ts.P2PExecutor`) match the unsplit reference **exactly**
   (max|Δ| = 0, compared at full precision). They also agree with M1's 4-decimal P2P numbers.
 Not rerun: CPU AdamW and A100 AdamW (same code paths as SGD).
+
+## Round 4 (M3 "run anywhere", 2026-10-15, branch `feat/m3-run-anywhere`)
+
+M3 makes one script + one config run on every target. `ts.run(model_fn, data_fn, **slice_kwargs)`
+is the node entry point: `deploy.topology` (local / centralized / p2p) and the node's role
+(`deploy.role`, env `ROLE`: all / coordinator / worker / driver / follower) pick what it does.
+`ROLE=all` (the default) runs every node in one process, with workers on loopback through the
+real gRPC/TCP stack. `python -m torchslicer launch SCRIPT -c CONFIG --target T` builds one node list
+from the config (`deploy.plan_nodes`: names, roles, addresses, env) and either runs it
+(`local`, `processes`: one OS process per node) or renders it (`compose`, `k8s`: Indexed Job +
+headless Service, `baremetal`: one shell script per host). Guides: `docs/deploy/`.
+
+**How it was checked.** `examples/run_anywhere/train.py` (SmallCNN, synthetic CIFAR-shaped data,
+128 samples, batch 32, 3 slices, SGD momentum, 2 epochs, CPU) against the same model trained
+unsplit in plain PyTorch: reference `[2.3475069403648376, 2.1740013360977173]`. After the fixes
+below, every one of these gives exactly that (max|Δ| = 0):
+local (`LocalExecutor`, history rounded to 6 decimals), `ROLE=all` centralized and P2P,
+`--target processes` centralized (registration; static + TCP) and P2P (gRPC and TCP), and the
+`--target baremetal` scripts run as written with every host = 127.0.0.1, both topologies, also with
+the coordinator/driver started 8 s before its workers. `tests/test_deploy.py` (23 tests) keeps this.
+Compose and k8s are **rendered, not run**: this container has neither Docker nor kubectl. The tests
+check their structure (selectors match pod labels, subdomain = headless Service, peer list =
+pod DNS names in index order, TCP tensor ports exposed, ConfigMap = the config file verbatim), and
+their node env is the same `plan_nodes` output that the `processes` target runs.
+
+### 12. `start_worker(run_config=)` ignored `network.device` (correctness, silent; M2 API)
+
+- **Symptom:** on the GPU host, `ts.start_worker(run_config=cfg)` with `network.device: cpu` put the
+  slice on CUDA, so an in-process simulation of a CPU config did not train on CPU. On the example
+  above it gave `[2.3474976420402527, 2.174286723136902]` vs the CPU reference
+  `[2.3475069403648376, 2.1740013360977173]` (max|Δ| = 2.9e-4; 5.7e-5 with plain SGD). This is CPU
+  vs CUDA arithmetic, not a split error, but the run silently used a device the config did not ask for.
+- **Root cause:** `WorkerServicer.__init__` resolves its device from the `DEVICE` env var only.
+  `run_worker` works around that by exporting `DEVICE` from the config first; `start_worker` (added in
+  M2 for in-process followers) did not.
+- **Fix:** `start_worker` sets the servicer's device from `network.device` when the config names
+  one (not `auto`); otherwise env/auto as before.
+- **Verified by:** `tests/test_deploy.py::test_start_worker_honours_config_device` (fails before the
+  fix with `'cuda' == 'cpu'`), and the losses above.
+
+### 13. The local topology ignored `network.device` (consistency)
+
+- **Symptom:** with the same config, local training ran on the device the model was built on (CPU),
+  while workers resolved `network.device: auto` to CUDA, so "the same config" trained on two
+  devices depending on the target.
+- **Fix:** `ts.run` moves the model to `resolve_device(network.device)` in the local topology, so
+  `network.device` means the same on every target. `LocalExecutor` itself is unchanged: a direct
+  `ts.slice(...).train()` still uses the model's device.
+- **Verified by:** `tests/test_deploy.py::test_local_topology_honours_network_device`.
+
+### 14. With static discovery, the plan depended on which nodes were up first (correctness, silent)
+
+- **Symptom:** a P2P driver (or a static-discovery coordinator) started before its followers probed
+  them anyway. It logged `describe failed address=127.0.0.1:50052 error=StatusCode.UNAVAILABLE;
+  planning without its capabilities` and planned with `gflops=0.0 mem_cap_mb=0` for the late
+  followers. The run still trained (slice init retries 20 × 1 s), but a capability-aware strategy
+  would have split differently depending on start-up timing, and a follower slower than ~20 s to
+  start failed in init with no clear message. This is the normal case on compose and k8s, where
+  pods start in any order and may still be pulling their image.
+- **Root cause:** `StaticDiscovery` returns addresses, not live workers, and `_probe_nodes` made one
+  attempt per worker.
+- **Fix:** before probing, the executor waits up to `discovery.timeout` for each remote worker's
+  channel to become ready. If a worker never comes up, the run fails with
+  `worker <addr> not reachable within discovery.timeout=<t>s`. Cost: none when the workers are already
+  up (one channel-state check each).
+- **Verified by:** `test_late_followers_are_waited_for_and_planned_with_their_capabilities` (followers
+  start 1.5 s after the driver; every node has `compute_gflops > 0` and training matches unsplit;
+  fails before the fix) and `test_a_follower_that_never_comes_up_fails_within_discovery_timeout`.
+
+### 15. The documented config priority was the opposite of the code (docs)
+
+- `config.py`'s docstring, `CLAUDE.md` and `.env.example` said YAML > env vars. `RunConfig.load()`
+  applies env vars on top of the YAML, so env wins (`EPOCHS=7` beats `epochs: 3`). Deployments rely
+  on that: a node's `ROLE`, `PORT` or `WORKER_PEERS` must override the shared file. The docs now say
+  Python kwargs > env vars > YAML > defaults. No behaviour change.
+
+### Behaviour changes
+
+- `ts.run_p2p` also takes the role from `deploy.role` (env `ROLE`: driver/follower) before
+  `IS_DRIVER`, so the launcher can deploy the M2 P2P/LM scripts too. It also accepts `callbacks=`.
+- New config section `deploy:` (`topology`, `role`, `name`, `image`, `namespace`, `gpus`) and env
+  vars `TOPOLOGY`, `ROLE`. Version 0.5.0; console script `torchslicer` (= `python -m torchslicer`).
+
+### Round 4 matrix (no-regression check)
+
+Full CPU/SGD matrix rerun on the final M3 code, compared with M2's `results_cpu_SGD.json` (kept aside).
+**53/54 cells pass.** The failing cell is still ResNet-18 + GPipe (BatchNorm, by design, max|Δ| = 7.7e-2 as before).
+All 63 loss lists (references and every mode) are **bit-identical to M2**: the readiness wait, the `start_worker`
+device fix and `run_p2p`'s role lookup change no loss. Not rerun: CPU AdamW and A100 AdamW (same code paths).

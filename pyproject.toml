@@ -4,11 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchslicer"
-version = "0.4.0"
+version = "0.5.0"
 description = "Split learning framework for PyTorch."
 authors = [{ name = "Marco Garofalo", email = "garofalomarco58@gmail.com" }]
 requires-python = ">=3.10"
 dependencies = ["numpy", "pyyaml"]
+
+[project.scripts]
+torchslicer = "torchslicer.__main__:main"
 
 [project.optional-dependencies]
 peft = ["peft>=0.10"]

@@ -148,11 +148,12 @@ def _advertised(cfg: RunConfig) -> str | None:
 
 def run_p2p(model_fn, data_fn, *, port: int | None = None, is_driver: bool | None = None,
             address: str | None = None, run_config: RunConfig | None = None,
-            verbose: bool = True, **slice_kwargs) -> list:
+            verbose: bool = True, callbacks: list | None = None, **slice_kwargs) -> list:
     """Run this process as one node of a P2P run, and return the history on the driver.
 
-    Every node runs the same script; the role comes from ``is_driver`` (env
-    ``IS_DRIVER``). A follower serves its slice until the driver shuts it down and
+    Every node runs the same script; the role comes from ``is_driver``, else
+    ``deploy.role`` (env ``ROLE``: driver/follower), else env ``IS_DRIVER``. A
+    follower serves its slice until the driver shuts it down and
     returns ``[]``. The driver calls ``model_fn()`` and ``data_fn()`` (followers never
     do: they get only their slice), slices the model over ``discovery.peers`` (env
     ``WORKER_PEERS``, driver first) and trains with ``P2PExecutor``.
@@ -176,7 +177,9 @@ def run_p2p(model_fn, data_fn, *, port: int | None = None, is_driver: bool | Non
     configure_process_logging(cfg.logging.level)
     port = int(port or cfg.network.worker_port)
     if is_driver is None:
-        is_driver = os.environ.get("IS_DRIVER", "false").lower() in ("true", "1")
+        role = (cfg.deploy.role or "").strip().lower()   # env ROLE (ts.run, the launcher)
+        is_driver = (role == "driver" if role in ("driver", "follower")
+                     else os.environ.get("IS_DRIVER", "false").lower() in ("true", "1"))
     address = address or _advertised(cfg) or f"{socket.gethostname()}:{port}"
 
     if not is_driver:
@@ -193,6 +196,6 @@ def run_p2p(model_fn, data_fn, *, port: int | None = None, is_driver: bool | Non
                            run_config=cfg)
     sliced = ts_slice(model_fn(), n=len(followers) + 1, executor=executor, **slice_kwargs)
     _LOG.info("p2p driver start run_id=%s\n%s", cfg.run_id, sliced.summary())
-    history = sliced.train(data_fn(), run_config=cfg, verbose=verbose)
+    history = sliced.train(data_fn(), run_config=cfg, verbose=verbose, callbacks=callbacks)
     _LOG.info("p2p driver complete run_id=%s", cfg.run_id)
     return history

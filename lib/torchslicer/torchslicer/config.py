@@ -3,8 +3,10 @@ RunConfig — single source of truth for all experiment parameters.
 
 Load priority (highest wins):
     1. Python API kwargs — pass directly to SlicedModel.train() or executor
-    2. YAML experiment file — --config path/to/run.yaml or EXPERIMENT_CONFIG env var
-    3. Environment variables — standard env vars or .env file read by Docker Compose
+    2. Environment variables — standard env vars or .env file read by Docker Compose;
+       ``RunConfig.load()`` applies them on top of the YAML, so a per-node env var
+       (ROLE, PORT, DEVICE, ...) overrides the file every node shares
+    3. YAML experiment file — --config path/to/run.yaml or EXPERIMENT_CONFIG env var
     4. Defaults in code
 
 Example::
@@ -194,6 +196,36 @@ class NetworkConfig:
 
 
 @dataclass
+class DeployConfig:
+    """Where and how the run is deployed: the same YAML drives every target.
+
+    ``topology`` and ``role`` are read by :func:`torchslicer.run` on every node;
+    the rest is read by ``python -m torchslicer launch`` when it renders a target
+    (processes, compose, k8s, bare metal). See ``docs/deploy/``.
+
+    Fields:
+        topology:  "local" (one process, ``LocalExecutor``) | "centralized"
+                   (coordinator + workers) | "p2p" (driver + followers)  (env: TOPOLOGY)
+        role:      this node's role: "all" (every node in this process, workers
+                   on loopback) | "coordinator" | "worker" | "driver" | "follower".
+                   "" = "all"  (env: ROLE)
+        name:      prefix for compose services / k8s objects
+        image:     container image for compose and k8s (must contain the script)
+        namespace: k8s namespace
+        gpus:      GPUs per node (compose device reservations, k8s nvidia.com/gpu)
+
+    The coordinator listens on ``network.coordinator_bind_address`` and workers
+    on ``network.worker_port``.
+    """
+    topology:         str = "local"
+    role:             str = ""
+    name:             str = "torchslicer"
+    image:            str = "torchslicer:cpu"
+    namespace:        str = "default"
+    gpus:             int = 0
+
+
+@dataclass
 class RunConfig:
     run_id:          str                  = field(default_factory=_default_run_id)
     training:        TrainingConfig       = field(default_factory=TrainingConfig)
@@ -207,6 +239,7 @@ class RunConfig:
     fault_tolerance: FaultToleranceConfig = field(default_factory=FaultToleranceConfig)
     network:         NetworkConfig        = field(default_factory=NetworkConfig)
     planning:        PlanningConfig       = field(default_factory=PlanningConfig)
+    deploy:          DeployConfig         = field(default_factory=DeployConfig)
 
     # ── factory: flat Python API ──────────────────────────────────────────────
 
@@ -287,7 +320,7 @@ class RunConfig:
     @classmethod
     def load(cls, config_path: str = None) -> "RunConfig":
         """
-        Load with merge priority: YAML > env vars > defaults.
+        Load with merge priority: env vars > YAML > defaults.
         config_path overrides the EXPERIMENT_CONFIG env var if both are set.
         """
         path = config_path or os.environ.get("EXPERIMENT_CONFIG")
@@ -417,6 +450,9 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("PLANNING_HETEROGENEOUS",   lambda cfg, v: setattr(cfg.planning, "heterogeneous",   _parse_bool(v))),
     ("PLANNING_MEASURE_NETWORK", lambda cfg, v: setattr(cfg.planning, "measure_network", _parse_bool(v))),
     ("PLANNING_MEASURE_LINKS",   lambda cfg, v: setattr(cfg.planning, "measure_links",   _parse_bool(v))),
+    # ── deploy ─────────────────────────────────────────────────────────────────
+    ("TOPOLOGY", lambda cfg, v: setattr(cfg.deploy, "topology", v.strip().lower())),
+    ("ROLE",     lambda cfg, v: setattr(cfg.deploy, "role",     v.strip().lower())),
 )
 
 

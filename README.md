@@ -60,6 +60,23 @@ criterion_cfg = {"name": "CrossEntropyLoss", "params": {}}
 sliced.train(train_loader, optimizer_cfg, criterion_cfg, epochs=5, verbose=True)
 ```
 
+## Run anywhere: one script, one config
+
+```python
+# train.py
+import torchslicer as ts
+ts.run(build_model, get_loader, strategy="params")   # the role comes from the config / ROLE env
+```
+
+```bash
+python train.py                                                   # every node in this process
+python -m torchslicer launch train.py -c run.yaml --target processes   # one process per node
+python -m torchslicer launch train.py -c run.yaml --target compose     # or k8s, baremetal
+```
+
+`deploy.topology` (`local`, `centralized`, `p2p`) in the YAML picks the topology. The same pair
+trains identically on every target. See [docs/deploy](docs/deploy/README.md).
+
 ## Distributed training (Docker)
 
 ```bash

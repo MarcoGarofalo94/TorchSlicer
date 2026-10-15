@@ -151,6 +151,21 @@ run-p2p-auto: _env ## Run P2P stack; tear down automatically on exit
 down-p2p: _env ## Stop and remove P2P stack
 	docker compose -f docker-compose.p2p.yml down
 
+# ── launch (one script + one config, any target) ──────────────────────────────
+#
+# SCRIPT=path  CONFIG=path  TARGET=local|processes|compose|k8s|baremetal
+# Renders or starts the run; see docs/deploy/README.md. Examples:
+#   make launch SCRIPT=examples/run_anywhere/train.py CONFIG=experiments/run_anywhere_p2p.yaml
+#   make launch SCRIPT=... CONFIG=... TARGET=k8s
+
+TARGET ?= processes
+PYTHON ?= python3
+
+.PHONY: launch
+launch: ## Start/render SCRIPT with CONFIG on TARGET (local|processes|compose|k8s|baremetal)
+	@test -n "$(SCRIPT)" -a -n "$(CONFIG)" || (echo "Error: SCRIPT and CONFIG are required"; exit 1)
+	$(PYTHON) -m torchslicer launch $(SCRIPT) -c $(CONFIG) --target $(TARGET) $(LAUNCH_ARGS)
+
 # ── tracing demo ──────────────────────────────────────────────────────────────
 #
 # Runs a self-contained 2-worker ResNet-18 training with Phoenix.

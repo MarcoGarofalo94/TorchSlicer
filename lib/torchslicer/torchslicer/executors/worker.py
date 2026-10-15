@@ -1446,6 +1446,9 @@ def start_worker(port: int = 0, *, host: str = "[::]", address: str | None = Non
     """
     cfg = run_config or RunConfig.load()
     servicer = (servicer_class or WorkerServicer)()
+    if cfg.network.device and cfg.network.device != "auto":
+        # the servicer resolved DEVICE from the env; an explicit config device wins
+        servicer.device = torch.device(resolve_device(cfg.network.device))
     servicer._tensor_transport   = cfg.transport.tensor.strip().lower()
     servicer._tensor_port_offset = int(cfg.transport.tensor_port_offset)
     servicer._persistent         = bool(cfg.network.worker_persistent)
