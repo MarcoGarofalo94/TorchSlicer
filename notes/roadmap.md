@@ -98,12 +98,20 @@ shown in a Flower-based SplitFed baseline.
       matches unsplit. Research link: gap G4 in `notes/gaps.md`.
 - **M3, run anywhere**: one config gives local / compose / bare metal / k8s (StatefulSet = stable ordered DNS names,
   Job for the coordinator/driver); one deployment guide page per environment.
+  Compose and k8s are only rendered and checked for structure in M3 (no Docker/kubectl in this container);
+  running them is deferred to M7.
 - **M4, SL settings**: roles (the data owner hosts stage 0 so raw data stays local; label owner; U-shaped); `CutHook`
   (compression, quantization, noise, attack observers); built-in bytes-per-cut / client-compute / simulated-link metrics;
   multi-client sessions (sequential/parallel) with a client-weight handoff hook, no averaging in the core.
 - **M5, NAT-friendly transport**: the gradient comes back in the reply (clients need only outbound connections); optional relay.
 - **M6, baselines + paper**: `baselines/` template (config, seeds, expected numbers, CI smoke test, mean ± std over ≥3 seeds);
   seed it with vanilla SplitNN, U-shaped, SplitFed-via-Flower, and one compression/attack paper; framework paper vs SplitBud/SLPerf.
+- **M7, deployment validation on a real environment** (deferred from M3 on 2026-10-15, owner decision): this container
+  has no Docker or kubectl, so it runs in a fresh clone on a machine that has them, whenever one is available (it does
+  not have to wait for M6). Rebuild the image (`make build-cpu`/`build-gpu`), then for both topologies run
+  `launch --target compose` and `--target k8s` (kind/minikube is enough) on `examples/run_anywhere/` and check that
+  the losses equal the `processes` target's; also run the bare-metal scripts across at least two real hosts. Record
+  every bug in `notes/validation.md` as usual.
 
 ## Handoff (read this first if you are a new session)
 Last updated 2026-10-15, at the end of M3 (version 0.5.0).
@@ -153,6 +161,7 @@ Last updated 2026-10-15, at the end of M3 (version 0.5.0).
   - `ts.run` + `plan_nodes` are where a new role would be wired for deployment (one more `NodeSpec` role, env).
 - **Carried (not done in M3):**
   - Compose and k8s output never ran (no Docker/kubectl here); multi-host bare metal not tested over a real network.
+    Deferred to M7 (fresh clone on a machine with Docker and k8s).
   - The M0–M2 entry points (`examples/train/centralized/GRPC/{coordinator,worker}`, `examples/train/hf`) and the
     hand-written root `docker-compose*.yml` (fixed 4 workers; P2P compose still passes the unused `WORKER_INDEX`)
     are unchanged. They could become `ts.run` scripts plus generated compose files. The P2P/LM scripts
