@@ -60,7 +60,7 @@ shown in a Flower-based SplitFed baseline.
   seed it with vanilla SplitNN, U-shaped, SplitFed-via-Flower, and one compression/attack paper; framework paper vs SplitBud/SLPerf.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-15, at the end of M1.
+Last updated 2026-10-15, at the end of M1 (version 0.3.0; gallery of cases: `examples/split_gallery.py`).
 - **Where things stand:** M0 is done on `feat/m0-foundations`, and M1 is done on `feat/m1-split-anything`.
   **Next: M2 (P2P as a reference topology).** Create it with
   `git switch -c feat/m2-p2p feat/m1-split-anything`.
