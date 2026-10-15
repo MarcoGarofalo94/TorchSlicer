@@ -1,6 +1,7 @@
 # TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, M6 done)
 
-Goal: become the de facto framework for split learning (SL) experiments, the way Flower is for FL.
+Goal: become the de facto framework for split learning (SL) experiments, the way Flower is for FL, and
+publish it (target: MLSys, M15).
 TorchSlicer is SL-only. Averaging/FL logic stays out of the core; it plugs in through hooks and is
 shown in a Flower-based SplitFed baseline.
 
@@ -156,7 +157,7 @@ shown in a Flower-based SplitFed baseline.
 - **M3, run anywhere**: one config gives local / compose / bare metal / k8s (StatefulSet = stable ordered DNS names,
   Job for the coordinator/driver); one deployment guide page per environment.
   Compose and k8s are only rendered and checked for structure in M3 (no Docker/kubectl in this container);
-  running them is deferred to M9.
+  running them is deferred to M13.
 - **M4, SL settings**: roles (the data owner hosts stage 0 so raw data stays local; label owner; U-shaped); `CutHook`
   (compression, quantization, noise, attack observers); built-in bytes-per-cut / client-compute / simulated-link metrics;
   multi-client sessions (sequential/parallel) with a client-weight handoff hook, no averaging in the core.
@@ -206,7 +207,7 @@ shown in a Flower-based SplitFed baseline.
     - **What this milestone defends:** confidentiality, integrity and authentication of the transport, and
       authorization of RPCs.
     - **What it doesn't:** what a curious *participant* learns from cut tensors is SL privacy (noise, attacks,
-      defences). That is M8 baselines, not transport security. Say so explicitly.
+      defences). That is M11 (privacy suite), not transport security. Say so explicitly.
     - **Survey:** how comparable systems handle this (gRPC TLS/mTLS, Flower's SSL + node authentication, PyTorch
       RPC/TensorPipe, Ray TLS), with links. Literature rules apply.
   - **TLS everywhere, one config:** a `security:` section (`tls: true`, `ca`, `cert`, `key`; env vars).
@@ -251,16 +252,146 @@ shown in a Flower-based SplitFed baseline.
       - a malicious pickle in `SliceConfig` is not executed in safe mode.
   - **Cost:** TLS/mTLS/e2e overhead vs plaintext with `benchmarks/nat/`-style runs (mean ± std over 3), and the
     handshake/start-up cost.
-  - **Shape:** TLS covers the M9 real-environment runs. Two nodes on a real network with mTLS is the first
+  - **Shape:** TLS covers the M13 real-environment runs. Two nodes on a real network with mTLS is the first
     real-network check of this milestone.
-- **M8, baselines + paper**: `baselines/` template (config, seeds, expected numbers, CI smoke test, mean ± std over ≥3 seeds);
-  seed it with vanilla SplitNN, U-shaped, SplitFed-via-Flower, and one compression/attack paper; framework paper vs SplitBud/SLPerf.
-- **M9, deployment validation on a real environment** (deferred from M3 on 2026-10-15, owner decision): this container
-  has no Docker or kubectl, so it runs in a fresh clone on a machine that has them, whenever one is available (it does
-  not have to wait for M8). Rebuild the image (`make build-cpu`/`build-gpu`), then for both topologies run
-  `launch --target compose` and `--target k8s` (kind/minikube is enough) on `examples/run_anywhere/` and check that
-  the losses equal the `processes` target's; also run the bare-metal scripts across at least two real hosts. Record
-  every bug in `notes/validation.md` as usual.
+- **M8, algorithm API** (added 2026-10-15, owner review). It must come before the baselines, or every baseline
+  hard-codes engine changes.
+
+  **What exists today:**
+  - `CutHook`: what crosses a cut;
+  - `ClientSession`: `handoff` / `on_round_end`, for client-state policy and e.g. FedAvg;
+  - splitters, `TrainingCallback`, and the P2P extension points (discovery, plan, scheduling, failures).
+
+  These change *placement*, *payloads* and *client-state bookkeeping*. None of them changes the training step
+  itself: forward → loss on the last slice → full backward chain → step after every batch is fixed inside the
+  executors (`LocalExecutor`, `WorkerServicer`).
+
+  **What can't be expressed today:**
+  - local-loss / no-gradient-back SL;
+  - per-client server copies, as in SplitFed v1;
+  - server-side aggregation;
+  - client sampling or straggler policies;
+  - loss changes for label protection;
+  - gradient manipulation at the server;
+  - asynchronous updates.
+
+  **Deliverables:**
+  - **An `ts.Algorithm` interface** (Flower-Strategy-like, small) with hooks around one step, each with a
+    default equal to today's behaviour, so existing runs don't change:
+    - `client_step` / `server_step`: what each side computes and returns;
+    - `loss`: on which slice, and auxiliary losses;
+    - `backward_policy`: full chain / stop at cut *k* / local loss;
+    - `aggregate`: client and server states, per round;
+    - `select_clients`: per round;
+    - `on_round_end`.
+  - **The same algorithm object runs in the local, centralized and P2P executors.** The executors call the
+    hooks, so it is written once.
+  - **Port the existing features onto it:** vanilla, U-shaped, sequential SplitNN, SplitFed-style FedAvg
+    (`ClientSession` becomes a thin layer over it). Then implement 2 that are impossible today, to prove it:
+    - local-loss SL with a client auxiliary head and no gradient back;
+    - per-client server copies with server aggregation.
+  - **A registry and a tutorial**, "write an SL algorithm in < 100 lines", executed by `tests/test_docs.py`.
+  - **Survey first** (`notes/algorithms.md`): the SL algorithm families and what each needs from the engine:
+    vanilla, U-shaped, SplitFed v1/v2/v3, parallel SL, local-loss / asynchronous SL, CPSL, FSL, label-protection
+    schemes. Literature rules apply.
+  - **Test:** the default algorithm reproduces the current matrix bit for bit; each new algorithm matches a
+    hand-written reference loop.
+- **M9, multi-client engine** (carried from M4). Clients as real nodes, not states swapped in one process.
+  - **Clients on several machines.** Covers:
+    - a worker-side data source (a client node owns its loader);
+    - a per-batch return address on the shared server slice;
+    - an RPC to transfer client state (for handoff and aggregation);
+    - NAT'd clients by default (M6).
+  - **True parallel clients:** concurrent batches from many clients on the server.
+    - Per-client server copies, or batching across clients, chosen by the algorithm (M8).
+    - Client sampling, stragglers, dropout and late joiners, with deadlines per round.
+  - **Vertical SL:** a label party distinct from the data owner, and several feature parties (carried from M4).
+  - **Sessions with fault tolerance:** a failed client is dropped from the round instead of stopping the run
+    (carried from M4).
+  - **Test:** N client processes equal the in-process `ClientSession` for the same algorithm, and losses match.
+- **M10, data and scale simulation**:
+  - **Federated partitioners:** IID; Dirichlet(α) label skew; quantity skew; per-client feature shift.
+  - **Standard datasets:** MNIST, CIFAR-10/100, FEMNIST-like, a text/LLM fine-tuning set, tabular for vertical SL.
+    Seeded splits saved with the run, so results are comparable across papers.
+  - **Many-client simulation on one machine:** hundreds or thousands of virtual clients, with client states
+    off-device (reuse M5 paging) and a scheduler over a GPU pool.
+  - **Heterogeneity profiles:** compute speed and link bandwidth/latency per client, from the M2 capability model
+    and the M4 link model, as config.
+  - **Test:** partition statistics match their definitions; a 1000-client run fits in this container's RAM.
+- **M11, privacy: attacks, defences, leakage metrics**. SL papers are judged on this, and the core has only
+  `Recorder`.
+  - **Attacks:**
+    - label inference from returned gradients;
+    - UnSplit / model inversion from cut activations;
+    - feature-space hijacking (malicious server);
+    - for LLMs, internal-state inversion (see `notes/sota.md`).
+  - **Defences:** Gaussian/DP noise at cuts (with an accountant), NoPeek-style decorrelation loss, label
+    protection, and quantization/top-k as side effects.
+  - **Leakage metrics** in every history entry when an attack is configured: reconstruction PSNR/SSIM, label
+    accuracy, distance correlation.
+  - Attacks are `CutHook` observers or `Algorithm`s (M8), so they run in every topology.
+  - **Test:** each attack reproduces its paper's qualitative result on a small setting, and each defence lowers
+    it measurably. Negative results are recorded as such.
+- **M12, baselines + Flower interop** (was M8 "baselines + paper").
+  - **A `baselines/` template:** config, seeds, expected numbers with tolerance, a CI smoke test, mean ± std
+    over ≥3 seeds.
+  - **Seed it with the famous papers:**
+    - SplitNN (vanilla);
+    - U-shaped;
+    - SplitFed v1 and v2;
+    - one local-loss / asynchronous SL;
+    - one compression paper;
+    - one attack + defence pair (from M11);
+    - one split-LLM / LoRA fine-tuning paper.
+  - **Each reproduces the published number within the stated tolerance.** If it doesn't, record it as such,
+    with the reason.
+  - **Flower interop:** a TorchSlicer client usable as a Flower client, and Flower strategies for the
+    SplitFed aggregation. This puts SL where the FL community already works; SplitBud (`notes/sota.md`) shows
+    the demand.
+  - **A contributor guide** for adding a baseline (cf. Flower Baselines).
+- **M13, real environment and testbed** (was M9; deferred from M3 on 2026-10-15, owner decision).
+  - **Containers.** This container has no Docker or kubectl, so this runs in a fresh clone on a machine that
+    has them:
+    - rebuild the image (`make build-cpu`/`build-gpu`);
+    - for both topologies, run `launch --target compose` and `--target k8s` (kind/minikube is enough) on
+      `examples/run_anywhere/`;
+    - check that the losses equal the `processes` target's.
+  - **Bare metal** across at least two real hosts.
+  - **A small physical testbed:** a GPU server plus edge clients (e.g. Jetson / Raspberry Pi) over Wi-Fi and a
+    real NAT, with M7 TLS on. Measure on it:
+    - real bytes and real time per round;
+    - client energy if feasible;
+    - NAT/relay cost over a WAN;
+    - recovery from a real node loss.
+  - Record every bug in `notes/validation.md` as usual.
+- **M14, release readiness** (owner decisions marked; some items can happen at any time, and the owner
+  decisions should be settled before M12 invites contributors):
+  - **Merge** the milestone branches into `main` in order, and tag a 1.0 release candidate (owner).
+  - **License:** Apache-2.0 is the norm for adoption; GPL-3.0 deters industry users (owner).
+  - **Stable public API:** a list of public names, semantic versioning, and a deprecation policy.
+  - **Docs site:** tutorials, API reference, deployment guides, a gallery of examples.
+  - **CI:** the equivalence matrix as an integration test (a small subset per PR, the full run nightly; carried
+    since M0), plus GPU CI if available.
+  - **Packaging:** PyPI wheels, a Docker image on a registry, Zenodo DOI per release.
+  - **Community:** a contribution guide, issue templates, a discussion channel, a simple governance note.
+- **M15, the paper (target: MLSys)**. The evaluation is designed up front, and each earlier milestone records
+  its numbers in `notes/validation.md` as it goes.
+  - **Claims to back with measurements:**
+    1. *Generality.* Any `nn.Module` (CNNs, HF LLMs, LoRA, MoE via `pack=`) is split automatically into chains
+       of any length, with no manual partitioning, vs SplitBud/SLPerf, where the split is manual.
+    2. *Correctness.* Training is bit-identical or within 1e-5 of unsplit PyTorch in every mode (the
+       equivalence matrix), which no other SL framework shows.
+    3. *Expressiveness.* The M12 baselines take N lines each with `ts.Algorithm`, compared with their original
+       code bases and with SplitBud/SLPerf.
+    4. *Systems cost.* Overhead vs plain PyTorch; scaling with clients and with chain length;
+       capability-aware planning vs uniform on heterogeneous nodes; NAT/relay and TLS cost; recovery time
+       after a node loss; out-of-core training vs FSDP/DeepSpeed offload.
+    5. *Reality.* The same experiment in simulation and on the M13 testbed, and how far they differ.
+  - **Related work:** SplitBud, SLPerf, Flower, FedML, PySyft, pipeline-parallel systems (GPipe, Oobleck),
+    from `notes/sota.md`, only papers actually retrieved.
+  - **Artifact:** packaged for artifact evaluation, reproducing every figure from configs + seeds.
+  - **Early preview** (optional): a short workshop paper (e.g. EuroMLSys, where SplitBud appeared) once M8–M9
+    land, to stake the claim. Check the current calls and deadlines; none are recorded here.
 
 ## Handoff (read this first if you are a new session)
 Last updated 2026-10-15, M6 done (version 0.8.0).
@@ -272,8 +403,11 @@ Last updated 2026-10-15, M6 done (version 0.8.0).
   - M6 is on `feat/m6-nat` (done, not pushed).
   - **Next: M7 (security: encrypted, authenticated transport).** Create it with
     `git switch -c feat/m7-security feat/m6-nat`. Start with the threat model and survey
-    (`notes/security.md`), as M5 started with its survey. M8 is baselines + paper, and M9 is
-    deployment validation on a real environment (both renumbered on 2026-10-15).
+    (`notes/security.md`), as M5 started with its survey.
+  - **After M7** (milestones reorganized on 2026-10-15 after an owner review of what an SL standard
+    needs): M8 algorithm API → M9 multi-client engine → M10 data and scale simulation → M11 privacy
+    suite → M12 baselines + Flower interop → M13 real environment and testbed → M14 release
+    readiness → M15 the MLSys paper.
 - **Read first:**
   - this file;
   - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–7);
@@ -339,10 +473,10 @@ Last updated 2026-10-15, M6 done (version 0.8.0).
   - **No STUN/ICE hole punching.** NAT'd peers always go through the relay.
   - **No TLS or authentication** on tunnels or the relay. Any node can announce any address to a
     relay, so this is needed before untrusted deployments. This is M7's scope.
-  - **Never run across a real NAT or WAN.** This belongs with M9.
+  - **Never run across a real NAT or WAN.** This belongs with M13.
   - **A NAT'd worker's `init` waits up to 30 s** for each peer tunnel, so the "two adjacent NAT'd
     workers" error takes 30 s to appear.
-- **Carried (not done in M4):**
+- **Carried (not done in M4; now scheduled in M9, M11 and M13):**
   - **Clients on several machines.** Multi-client sessions simulate every client in the data
     owner's process (one process holds all clients' data). That is enough for experiments, but
     there are no client nodes with their own data yet. Supporting them needs a worker-side data
@@ -355,10 +489,10 @@ Last updated 2026-10-15, M6 done (version 0.8.0).
   - **Sessions and fault tolerance.** Sessions refuse `fault_tolerance.enabled`, because recovery
     would not restore every client's state. A data-owner slice failure stops the run, by design.
   - **Attack metrics.** Only an observer hook (`Recorder`) and a doc example exist. A real attack
-    (e.g. label inference from gradients, or model inversion) and a defence baseline belong to M8
+    (e.g. label inference from gradients, or model inversion) and a defence baseline belong to M11 (privacy suite) and M12 (baselines)
     (baselines: "one compression/attack paper").
   - **Earlier milestones, still open:**
-    - compose/k8s never run, and multi-host bare metal is untested (M9);
+    - compose/k8s never run, and multi-host bare metal is untested (M13);
     - the M0–M2 entry points and the hand-written root compose files are unchanged;
     - k8s discovery is always static;
     - the matrix is a script, not a CI integration test;

@@ -872,8 +872,8 @@ batch = mean of epochs 2–3. Mean ± std over 3 runs; losses are identical in e
   can announce any address to a relay, which on an untrusted network lets it intercept that
   address's calls. Needs auth before real deployments. This is milestone M7 (security).
 - **No real NAT tested.** Everything ran on loopback, where "behind NAT" means "listens on
-  nothing". A run across a real NAT (and a WAN relay) belongs with M9 (real-environment
-  validation; renumbered when security became M7).
+  nothing". A run across a real NAT (and a WAN relay) belongs with M13 (real environment
+  and testbed; renumbered in the 2026-10-15 roadmap review).
 - **The keepalive interval (20 s) is not measured** against real NAT timeouts.
 - **Router stats are approximate.** `stats` counters are incremented without a lock; they are
   diagnostics only.
