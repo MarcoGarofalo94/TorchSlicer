@@ -99,16 +99,48 @@ shown in a Flower-based SplitFed baseline.
 - **M3, run anywhere**: one config gives local / compose / bare metal / k8s (StatefulSet = stable ordered DNS names,
   Job for the coordinator/driver); one deployment guide page per environment.
   Compose and k8s are only rendered and checked for structure in M3 (no Docker/kubectl in this container);
-  running them is deferred to M7.
+  running them is deferred to M8.
 - **M4, SL settings**: roles (the data owner hosts stage 0 so raw data stays local; label owner; U-shaped); `CutHook`
   (compression, quantization, noise, attack observers); built-in bytes-per-cut / client-compute / simulated-link metrics;
   multi-client sessions (sequential/parallel) with a client-weight handoff hook, no averaging in the core.
-- **M5, NAT-friendly transport**: the gradient comes back in the reply (clients need only outbound connections); optional relay.
-- **M6, baselines + paper**: `baselines/` template (config, seeds, expected numbers, CI smoke test, mean ± std over ≥3 seeds);
+- **M5, out-of-core training on one node ("virtual memory" for slices)** (added 2026-10-15, owner request; a proof
+  of concept): train a model whose weights + optimizer state + activations do not fit in GPU memory (and, as a
+  second tier, not in RAM) by keeping slices in a slower tier and paging one in at a time. Slices are already
+  self-contained (own params, optimizer, detached cut input `SplitLayer.x`), so the plan is: forward slice by slice
+  without a graph, keeping only boundary activations; backward in reverse order, paging slice *i* in, recomputing its
+  forward from the stored boundary input, backward, optimizer step, paging out. The planner picks the cuts with the
+  existing memory caps (`balanced_cuts`, cap = GPU budget).
+  - **Step 1, survey first (before any code):** search the current technologies that solve this problem and record
+    them in `notes/offload.md`: one entry per system/paper (link/DOI, year, which tiers GPU/CPU/NVMe, what is
+    offloaded (params, grads, optimizer state, activations), how transfers overlap compute, reported throughput
+    vs. bound, license, whether it can be called from TorchSlicer). Candidates to check, not yet verified: DeepSpeed
+    ZeRO-Offload / ZeRO-Infinity, FlexGen, HF accelerate `device_map`/disk offload, PyTorch FSDP CPU offload,
+    `torch.autograd.graph.save_on_cpu`, `torch.utils.checkpoint`. Literature rules apply (only what was retrieved,
+    always a link). End with a short decision: what to reuse, what to write, and why.
+  - **Constraint, efficiency:** it must be as efficient as the hardware allows, not a naive loop. At least: pinned host
+    buffers and `non_blocking` copies; prefetch slice *i±1* on a side CUDA stream while slice *i* computes;
+    double-buffered GPU slots allocated once (no allocator churn); optimizer step where it is cheaper (GPU vs. CPU,
+    decided by measurement); GPipe micro-batches to amortize each page-in over several micro-batches. Report achieved
+    throughput as a fraction of the transfer bound (bytes moved per step / measured PCIe or disk bandwidth) and
+    explain any gap.
+  - **Constraint, reuse:** reuse what exists instead of rewriting it: TorchSlicer's own pieces (SplitLayer,
+    LocalExecutor + GPipe path, planner memory caps, profiler, equivalence harness) and, where the survey shows a
+    mature primitive (e.g. NVMe async I/O, checkpoint RNG replay), call it, as an optional extra. PyTorch stays an
+    undeclared dependency; nothing heavy becomes mandatory.
+  - **Correctness:** losses equal unsplit PyTorch (same 1e-5 matrix rule). Recompute must replay dropout RNG and must
+    not update BatchNorm running stats twice. The memory estimate must include activations (open since M2), or the
+    planner cuts slices that don't fit.
+  - **Test:** cap GPU memory (`torch.cuda.set_per_process_memory_fraction`) so a model OOMs without offload; with
+    offload it trains, matches the reference, and its peak memory is reported. Compare speed against the best
+    reused/existing tool from the survey under the same model, batch and cap (baseline, same setting).
+  - **Shape:** a local-topology option (e.g. `pipeline.offload: none|cpu|disk`); later, the same mechanism lets a
+    distributed worker hold more than its GPU fits (link to M4: a memory-poor data owner can still host slice 0).
+- **M6, NAT-friendly transport**: the gradient comes back in the reply (clients need only outbound connections); optional relay.
+- **M7, baselines + paper**: `baselines/` template (config, seeds, expected numbers, CI smoke test, mean ± std over ≥3 seeds);
   seed it with vanilla SplitNN, U-shaped, SplitFed-via-Flower, and one compression/attack paper; framework paper vs SplitBud/SLPerf.
-- **M7, deployment validation on a real environment** (deferred from M3 on 2026-10-15, owner decision): this container
+- **M8, deployment validation on a real environment** (deferred from M3 on 2026-10-15, owner decision): this container
   has no Docker or kubectl, so it runs in a fresh clone on a machine that has them, whenever one is available (it does
-  not have to wait for M6). Rebuild the image (`make build-cpu`/`build-gpu`), then for both topologies run
+  not have to wait for M7). Rebuild the image (`make build-cpu`/`build-gpu`), then for both topologies run
   `launch --target compose` and `--target k8s` (kind/minikube is enough) on `examples/run_anywhere/` and check that
   the losses equal the `processes` target's; also run the bare-metal scripts across at least two real hosts. Record
   every bug in `notes/validation.md` as usual.
@@ -118,6 +150,7 @@ Last updated 2026-10-15, at the end of M3 (version 0.5.0).
 - **Where things stand:** M0 is done on `feat/m0-foundations`, M1 on `feat/m1-split-anything`, M2 on
   `feat/m2-p2p`, and M3 on `feat/m3-run-anywhere`. **Next: M4 (SL settings).** Create it with
   `git switch -c feat/m4-sl-settings feat/m3-run-anywhere`.
+  After M4 comes M5 (out-of-core training on one node), which starts with a technology survey, not code.
 - **Read first:**
   - this file;
   - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–4);
@@ -161,7 +194,7 @@ Last updated 2026-10-15, at the end of M3 (version 0.5.0).
   - `ts.run` + `plan_nodes` are where a new role would be wired for deployment (one more `NodeSpec` role, env).
 - **Carried (not done in M3):**
   - Compose and k8s output never ran (no Docker/kubectl here); multi-host bare metal not tested over a real network.
-    Deferred to M7 (fresh clone on a machine with Docker and k8s).
+    Deferred to M8 (fresh clone on a machine with Docker and k8s).
   - The M0–M2 entry points (`examples/train/centralized/GRPC/{coordinator,worker}`, `examples/train/hf`) and the
     hand-written root `docker-compose*.yml` (fixed 4 workers; P2P compose still passes the unused `WORKER_INDEX`)
     are unchanged. They could become `ts.run` scripts plus generated compose files. The P2P/LM scripts
