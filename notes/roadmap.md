@@ -1,4 +1,4 @@
-# TorchSlicer roadmap (2026-10-14)
+# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15)
 
 Goal: become the de facto framework for split learning (SL) experiments, the way Flower is for FL.
 TorchSlicer is SL-only. Averaging/FL logic stays out of the core; it plugs in through hooks and is
@@ -11,8 +11,9 @@ shown in a Flower-based SplitFed baseline.
 4. **Community baselines**: curated, reproducible SL papers contributed via a template (cf. Flower Baselines).
 
 ## Status
-- M0 (branch `feat/m0-foundations`, not merged/pushed): done = metrics fix, persistent workers, CI, CITATION/Zenodo metadata, pyproject sync.
-  Open = license decision; untrack the stale `lib/torchslicer/build/`; enable Zenodo's GitHub integration; rebuild/push the Docker image.
+- M0 (branch `feat/m0-foundations`, not merged/pushed): **done** = metrics fix, persistent workers, CI, CITATION/Zenodo metadata, pyproject sync,
+  tied-weight / lr / init-timeout fixes, equivalence harness + `notes/validation.md`.
+  Still open (owner decisions) = license decision; untrack the stale `lib/torchslicer/build/`; enable Zenodo's GitHub integration; rebuild/push the Docker image.
 - Model x mode check (2026-10-15): DNN, CNN, ResNet-18, TinyGPT, GPT-2, Llama (+ LoRA on the 3 LMs) x
   local / GPipe / centralized gRPC+TCP / P2P gRPC+TCP, CPU (SGD, AdamW) and A100 (AdamW), compared with unsplit PyTorch
   under the same seed: all match (full record: `notes/validation.md`, harness `benchmarks/equivalence/`). The one known difference is GPipe + BatchNorm, which micro-batching causes by
@@ -20,7 +21,17 @@ shown in a Flower-based SplitFed baseline.
   Carried to M2: a crashed P2P follower hangs the driver (no failure detection); `examples/train/lm/{worker,lora_worker}`
   duplicate the P2P driver (no tied-weight support); turn the matrix harness into an integration test (+ small CI subset).
 
-## Milestones (one `feat/m<k>-<slug>` branch each, from `main`)
+## Branching: incremental, one branch per milestone
+- Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
+  from `main`. The chain is `main` → `feat/m0-foundations` → `feat/m1-split-anything` → `feat/m2-...` and so on.
+  `main` stays untouched until the owner decides to merge, which happens in order (M0 first).
+- One agent session owns one milestone. When it finishes: the full test suite passes, the "Status" and "Handoff"
+  sections here are updated, issues and fixes are recorded in `notes/validation.md`, and everything is committed on the
+  milestone branch. Don't push, and don't merge into `main`, unless the owner asks.
+- If the previous milestone branch gets new commits after the next one forked from it, rebase or merge them forward
+  and say so in the commit message.
+
+## Milestones
 - **M0, foundations**: workers reusable across runs (end-of-run shutdown optional); CI running the tests on every PR;
   `CITATION.cff` + Zenodo metadata; merge `fix/local-epoch-metrics`; license decision (GPL-3.0 vs Apache-2.0, owner's call).
 - **M1, split anything**: named cuts; param/FLOPs/profiled strategies; tutorial "write your own cutting strategy";
@@ -36,6 +47,48 @@ shown in a Flower-based SplitFed baseline.
 - **M5, NAT-friendly transport**: the gradient comes back in the reply (clients need only outbound connections); optional relay.
 - **M6, baselines + paper**: `baselines/` template (config, seeds, expected numbers, CI smoke test, mean ± std over ≥3 seeds);
   seed it with vanilla SplitNN, U-shaped, SplitFed-via-Flower, and one compression/attack paper; framework paper vs SplitBud/SLPerf.
+
+## Handoff (read this first if you are a new session)
+Last updated 2026-10-15, at the end of M0.
+- **Where things stand:** M0 is done on `feat/m0-foundations`. **Next: M1.** Create
+  `git switch -c feat/m1-split-anything feat/m0-foundations`.
+- **Read first:**
+  - this file;
+  - `notes/validation.md` (how correctness is checked, and every bug found so far);
+  - `CLAUDE.md` (layout, commands, architecture).
+  - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not for framework milestones.
+- **Every change must keep:**
+  - `.venv/bin/python -m pytest tests/` green (48 tests at the end of M0);
+  - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about 15 min on CPU;
+    pass a model name for a quick check). Set `MATRIX_DEVICE=cuda` for the GPU, and
+    `MATRIX_OPT='{"name":"AdamW","params":{"lr":0.001,"weight_decay":0.01}}'` for AdamW. A change to splitting
+    must not change any loss.
+- **Record as you go:** each bug found or behaviour changed goes into `notes/validation.md`, with the symptom, root
+  cause, fix, cost and test, in the same commit as the fix. Note the pre-fix numbers *before* rerunning, because logs
+  get overwritten. A paper on TorchSlicer will be written from these notes.
+- **Environment:**
+  - Git commits: the container has no git identity, so commit with `git -c user.name=... -c user.email=...`. Ask the
+    owner for the values if your memory doesn't have them.
+  - Downloads: HF hub and dataset downloads are blocked. Use random-init HF configs and synthetic data, as in
+    `benchmarks/equivalence/tsmodels.py`.
+  - gRPC stubs: regenerating them needs grpcio-tools 1.64.0 (so the gencode matches the declared minimum), not the
+    venv's newer one.
+  - Don't commit the owner's untracked files at the repo root (`*.prompt.md`, `prompt*.txt`, `results/`,
+    `sota_check.md`) or their `.gitignore` change.
+- **Facts for M1 (verified in code, 2026-10-15):**
+  - `ModelGraph.from_module()` (`core/model_graph.py`) traces with a *shallow* fx tracer: direct children of the root
+    are leaves. So ResNet-18 becomes about 10 nodes (`layer1`..`layer4` are atomic), and cut granularity is limited to
+    top-level children.
+  - If tracing fails, it **silently** falls back to `from_sequential()`, which treats children as a chain. That gives
+    a wrong graph for non-sequential models, with no error. This is the "clear fx-failure error" item.
+  - `strategies/`: `BaseSplitter` (`split`, `validate`), a name registry, and `uniform` as the only splitter (it
+    balances layer *count*). `validate()` requires exactly one tensor to cross each boundary, so skip connections
+    can't straddle a cut.
+  - `ts.slice(model, strategy=..., n=..., pack=...)`; `pack=` skips tracing (`ModelGraph.from_stages`).
+  - Tied parameters across cuts are handled (`core/tied.py`), so new splitters don't need to care, as long as
+    partitions are lists of graph-node indices.
+- **Open owner decisions** (don't decide these alone): license GPL-3.0 vs Apache-2.0; untracking the stale
+  `lib/torchslicer/build/`; when to merge into `main` and push; Zenodo/GitHub integration; rebuilding the Docker image.
 
 ## Known facts this is based on (verified in code, 2026-10-14)
 - Centralized: the coordinator holds no layers and sends raw inputs to W0 → raw data leaves the data owner (fixed by M4 roles).
