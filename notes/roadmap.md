@@ -1,4 +1,4 @@
-# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, end of M3)
+# TorchSlicer roadmap (created 2026-10-14, updated 2026-10-15, end of M4)
 
 Goal: become the de facto framework for split learning (SL) experiments, the way Flower is for FL.
 TorchSlicer is SL-only. Averaging/FL logic stays out of the core; it plugs in through hooks and is
@@ -65,6 +65,31 @@ shown in a Flower-based SplitFed baseline.
   **Deviation from the plan:** k8s workers are an Indexed Job, not a StatefulSet. Same stable ordered
   DNS names, but a finite run completes instead of its workers being restarted forever (rationale in
   `docs/deploy/k8s.md`).
+
+- M4 (branch `feat/m4-sl-settings`, forked from M3's tip, not merged/pushed): **done** =
+  SL settings in `torchslicer/sl/`. Tutorial: `docs/tutorials/sl_settings.md`. Example:
+  `examples/sl/train.py` with `experiments/sl_{u_shaped_p2p,splitfed_local}.yaml`.
+  - **Roles:** the *data owner* is the process holding the data (local process, coordinator,
+    driver). `sl.setting` decides what it hosts in-process: `pipeline` hosts none (centralized
+    default), `vanilla` hosts slice 0 (P2P default), `u_shaped` hosts slice 0 and the last slice,
+    so labels never leave either. The P2P driver's in-process hosting moved into
+    `DistributedExecutor`, so a centralized coordinator can be the data owner too. The tail slice
+    is served on `sl.tail_port`.
+  - **`CutHook`:** encode/decode for activations and gradients, one method per side of a cut.
+    Built-ins: Float16/BFloat16, Quantize 1–8 bits, TopK, GaussianNoise, Recorder (attack
+    observer), Chain. Payloads are packed so real bytes go on the wire. Config `sl.cut_hooks`.
+  - **Metrics in every history entry:** bytes per cut and direction, raw inputs/labels sent,
+    bytes crossing the data owner's boundary, compute per slice (client/server), and simulated
+    link time (`sl.link_*`). Local and distributed counts are identical.
+  - **`ts.ClientSession`:** `sequential` (handoff copy/keep/callable) or `parallel`
+    (`on_round_end`, e.g. FedAvg in user code; the core never averages). It swaps client-slice
+    states between batches.
+
+  Checked: every setting, hook and session matches local (and unsplit without lossy hooks) in
+  both topologies and both transports, including real OS processes. Bugs fixed: validation.md
+  issues 16–17 (uint8 inputs crashed centralized workers; the last worker leaked late labels).
+  Version 0.6.0. **Deviation from the plan:** sessions simulate all clients in the data owner's
+  process (see Carried).
 
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
@@ -146,72 +171,101 @@ shown in a Flower-based SplitFed baseline.
   every bug in `notes/validation.md` as usual.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-15, at the end of M3 (version 0.5.0).
-- **Where things stand:** M0 is done on `feat/m0-foundations`, M1 on `feat/m1-split-anything`, M2 on
-  `feat/m2-p2p`, and M3 on `feat/m3-run-anywhere`. **Next: M4 (SL settings).** Create it with
-  `git switch -c feat/m4-sl-settings feat/m3-run-anywhere`.
-  After M4 comes M5 (out-of-core training on one node), which starts with a technology survey, not code.
+Last updated 2026-10-15, at the end of M4 (version 0.6.0).
+- **Where things stand:**
+  - Done, one branch per milestone: M0 on `feat/m0-foundations`, M1 on `feat/m1-split-anything`,
+    M2 on `feat/m2-p2p`, M3 on `feat/m3-run-anywhere`, M4 on `feat/m4-sl-settings`.
+  - **Next: M5 (out-of-core training on one node).** Create it with
+    `git switch -c feat/m5-offload feat/m4-sl-settings`.
+  - M5 **starts with the technology survey** in `notes/offload.md` (see the M5 entry above).
+    Don't write code before the survey and its decision.
 - **Read first:**
   - this file;
-  - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–4);
-  - `CLAUDE.md` (layout, commands, architecture, including P2P, planning and run-anywhere);
-  - `docs/tutorials/p2p.md` and `docs/deploy/README.md`.
-  - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not for framework milestones.
+  - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–5);
+  - `CLAUDE.md` (layout, commands, architecture, including P2P, planning, run-anywhere and SL
+    settings);
+  - `docs/tutorials/p2p.md`, `docs/tutorials/sl_settings.md` and `docs/deploy/README.md`.
+  - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not
+    for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (142 tests at the end of M3, about 60 s);
-  - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about 15 min on CPU;
-    pass a model name for a quick check). Set `MATRIX_DEVICE=cuda` for the GPU, and
-    `MATRIX_OPT='{"name":"AdamW","params":{"lr":0.001,"weight_decay":0.01}}'` for AdamW. A change to splitting
-    must not change any loss. Every mode is compared at 1e-5 against full-precision losses.
-- **Record as you go:** each bug found or behaviour changed goes into `notes/validation.md`, with the symptom, root
-  cause, fix, cost and test, in the same commit as the fix. Note the pre-fix numbers *before* rerunning, because logs
-  get overwritten. A paper on TorchSlicer will be written from these notes.
+  - `.venv/bin/python -m pytest tests/` green (196 tests at the end of M4, about 2 min);
+  - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about
+    15 min on CPU; pass a model name for a quick check).
+    - Set `MATRIX_DEVICE=cuda` for the GPU, and
+      `MATRIX_OPT='{"name":"AdamW","params":{"lr":0.001,"weight_decay":0.01}}'` for AdamW.
+    - A change to splitting must not change any loss. Every mode is compared at 1e-5 against
+      full-precision losses.
+- **Record as you go:** each bug found or behaviour changed goes into `notes/validation.md`, with
+  the symptom, root cause, fix, cost and test, in the same commit as the fix. Note the pre-fix
+  numbers *before* rerunning, because logs get overwritten. A paper on TorchSlicer will be written
+  from these notes.
 - **Environment:**
-  - Git commits: the container has no git identity, so commit with `git -c user.name=... -c user.email=...`. Ask the
-    owner for the values if your memory doesn't have them.
-  - Downloads: HF hub and dataset downloads are blocked. Use random-init HF configs and synthetic data, as in
-    `benchmarks/equivalence/tsmodels.py`.
-  - No Docker and no kubectl in this container: compose/k8s output can be rendered and checked, not run.
-    The host has a GPU, so `DEVICE`/`network.device: auto` means CUDA here. Pin `cpu` when comparing against a CPU reference.
-  - gRPC stubs: regenerating them needs grpcio-tools 1.64.0 (so the gencode matches the declared minimum). It has no
-    wheel for the venv's Python 3.13. What worked in M2: `pip download --only-binary=:all: --python-version 3.12
-    --platform manylinux2014_x86_64 grpcio-tools==1.64.0 -d wheels`, unzip the wheels into a directory, and run
-    `PYTHONPATH=<dir> /usr/bin/python3.12 -m grpc_tools.protoc ...` (the command in `CLAUDE.md`). Regenerating the
-    unchanged protos this way gives byte-identical files. (M3 changed no proto.)
-  - The `torchslicer` console script needs a reinstall of the editable package; `python -m torchslicer` works without it.
-  - Don't commit the owner's untracked files at the repo root (`*.prompt.md`, `prompt*.txt`, `results/`,
-    `sota_check.md`) or their `.gitignore` change. Launcher output goes to `runs/deploy/` (ignored).
-- **Facts for M4 (verified in code, 2026-10-15):**
-  - Naming: `ROLE` / `deploy.role` already means the *deployment* role (coordinator, worker, driver, follower,
-    all). M4's SL roles (data owner, label owner) are a different axis. Give them their own name (e.g. `sl_role`
-    or per-slice ownership in the plan) so they don't overload `ROLE`.
-  - Data flow today: centralized: the coordinator sends **raw inputs to worker 0** and labels to the last worker
-    (`DistributedExecutor._send_batch`). P2P: the driver keeps inputs and slice 0 in-process and sends labels to the
-    last worker. Neither keeps labels on the data owner (no U-shaped). `first_slice` (declared capability) already
-    pins a worker to slice 0, which is the hook for "the data owner hosts stage 0".
-  - Every slice boundary carries exactly one tensor (`BaseSplitter.validate`). U-shaped needs the last slice (head
-    + loss) back on the data owner, i.e. one node holding two non-adjacent slices; the executors assume node i holds slice i.
-  - `ts.run` + `plan_nodes` are where a new role would be wired for deployment (one more `NodeSpec` role, env).
-- **Carried (not done in M3):**
-  - Compose and k8s output never ran (no Docker/kubectl here); multi-host bare metal not tested over a real network.
-    Deferred to M8 (fresh clone on a machine with Docker and k8s).
-  - The M0–M2 entry points (`examples/train/centralized/GRPC/{coordinator,worker}`, `examples/train/hf`) and the
-    hand-written root `docker-compose*.yml` (fixed 4 workers; P2P compose still passes the unused `WORKER_INDEX`)
-    are unchanged. They could become `ts.run` scripts plus generated compose files. The P2P/LM scripts
-    (`ts.run_p2p`) already work with the launcher, since `run_p2p` reads `ROLE`.
-  - On k8s, discovery is always static (pod DNS order). A long-lived worker pool (StatefulSet + registration) is
-    documented but not generated.
-  - From M2: the matrix is still a script (not a CI integration test); the memory estimate ignores activations; one
-    matmul number for speed; `uniform` ignores `valid_cuts()`; recovery reloads the last *epoch* checkpoint.
-- **Open owner decisions** (don't decide these alone): license GPL-3.0 vs Apache-2.0; untracking the stale
-  `lib/torchslicer/build/`; when to merge into `main` and push (M0 first, then M1, M2, M3); Zenodo/GitHub
-  integration; rebuilding the Docker image (needed since M2: new protos and RPCs; generated compose/k8s use
-  `deploy.image`).
+  - Git commits: the container has no git identity, so commit with
+    `git -c user.name=... -c user.email=...`. Ask the owner for the values if your memory doesn't
+    have them.
+  - Downloads: HF hub and dataset downloads are blocked. Use random-init HF configs and synthetic
+    data, as in `benchmarks/equivalence/tsmodels.py`. `pip download` works.
+  - No Docker and no kubectl in this container: compose/k8s output can be rendered and checked,
+    not run. The host has a GPU, so `DEVICE`/`network.device: auto` means CUDA here. Pin `cpu`
+    when comparing against a CPU reference.
+  - gRPC stubs: regenerating them needs grpcio-tools 1.64.0 (so the gencode matches the declared
+    minimum). It has no wheel for the venv's Python 3.13. What worked in M2 and M4:
+    1. `pip download --only-binary=:all: --python-version 3.12 --platform manylinux2014_x86_64
+       grpcio-tools==1.64.0 -d wheels`;
+    2. unzip the wheels into a directory;
+    3. run `PYTHONPATH=<dir> /usr/bin/python3.12 -m grpc_tools.protoc ...` (the command in
+       `CLAUDE.md`).
+
+    Unchanged protos regenerate byte-identical this way.
+  - The `torchslicer` console script needs a reinstall of the editable package;
+    `python -m torchslicer` works without it.
+  - Don't commit the owner's untracked files at the repo root (`*.prompt.md`, `prompt*.txt`,
+    `results/`, `sota_check.md`) or their `.gitignore` change. Launcher output goes to
+    `runs/deploy/` (ignored).
+- **Facts for M5 (verified in code, 2026-10-15):**
+  - `LocalExecutor` already runs one `SplitLayer` per slice, each with its own optimizer and a
+    detached cut input (`SplitLayer.x`).
+  - `_standard_batch` and `_gpipe_batch` run the cuts through `_cut_forward`/`_cut_backward` (hooks
+    + byte counting) and time each slice (`_clock`, `CommMeter.add_compute`). An offload path must
+    keep calling them, so its metrics stay comparable.
+  - The memory caps in planning (`balanced_cuts`, `NodeInfo.memory_cap_mb`) count parameters, not
+    activations or optimizer state. M5 needs the full estimate.
+  - Compute timing synchronizes CUDA after each phase on CUDA devices (validation.md round 5,
+    "Behaviour changes"). Offload overlap measurements must account for it, or make it optional.
+- **Carried (not done in M4):**
+  - **Clients on several machines.** Multi-client sessions simulate every client in the data
+    owner's process (one process holds all clients' data). That is enough for experiments, but
+    there are no client nodes with their own data yet. Supporting them needs a worker-side data
+    source, a per-batch return address on the shared server slice, and a client-state transfer
+    RPC.
+  - **Parallel mode.** The server consumes clients' batches one at a time. There are no per-client
+    server copies and no batching across clients.
+  - **Labels on another party.** Vertical SL (a label party that is not the data owner) is not
+    supported. Every setting assumes the data owner holds inputs and labels.
+  - **Sessions and fault tolerance.** Sessions refuse `fault_tolerance.enabled`, because recovery
+    would not restore every client's state. A data-owner slice failure stops the run, by design.
+  - **Attack metrics.** Only an observer hook (`Recorder`) and a doc example exist. A real attack
+    (e.g. label inference from gradients, or model inversion) and a defence baseline belong to M7
+    (baselines: "one compression/attack paper").
+  - **Earlier milestones, still open:**
+    - compose/k8s never run, and multi-host bare metal is untested (M8);
+    - the M0–M2 entry points and the hand-written root compose files are unchanged;
+    - k8s discovery is always static;
+    - the matrix is a script, not a CI integration test;
+    - one matmul number for speed;
+    - `uniform` ignores `valid_cuts()`;
+    - recovery reloads the last *epoch* checkpoint.
+- **Open owner decisions** (don't decide these alone):
+  - license: GPL-3.0 or Apache-2.0;
+  - whether to untrack the stale `lib/torchslicer/build/`;
+  - when to merge into `main` and push (in order: M0, M1, M2, M3, M4);
+  - Zenodo/GitHub integration;
+  - rebuilding the Docker image (needed since M2; M4 changed the protos again).
 
 ## Known facts this is based on (verified in code, 2026-10-14)
-- Centralized: the coordinator holds no layers and sends raw inputs to W0 → raw data leaves the data owner (fixed by M4 roles).
+- Centralized: the coordinator holds no layers and sends raw inputs to W0 → raw data leaves the data owner (fixed by M4 roles). (Since M4: still the default, `sl.setting: pipeline`; with `vanilla`/`u_shaped` the coordinator hosts the client slices.)
 - P2P: the driver is worker 0 plus an embedded coordinator; it's an example script with no heartbeats/recovery. (Since M2: `ts.P2PExecutor`, with heartbeats and recovery.)
 - Workers exit after every run: `DistributedExecutor.teardown()` sends `shutdown` to all of them, idle ones included.
 - A centralized worker exits(1) if it can't register within ~30 attempts × 3 s.
-- No U-shaped / multi-client / SplitFed in the library. (Since M1, the built-in splitters are uniform, params, flops, profiled and named cuts.)
+- No U-shaped / multi-client / SplitFed in the library. (Since M4: `u_shaped`, `ts.ClientSession`; SplitFed's averaging is a user hook, `on_round_end`.) (Since M1, the built-in splitters are uniform, params, flops, profiled and named cuts.)
 - SplitBud (Flower 1.9 fork, 2-tier, manual split, outbound-only clients) and SLPerf (MPI, manual split): see `sota.md`.

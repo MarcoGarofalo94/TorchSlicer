@@ -3,7 +3,8 @@
 In the P2P topology there is no coordinator process. The **driver** (worker 0) holds the
 data and slice 0, plans the split, sends every other slice to a **follower**, and drives
 training. Activations and gradients go from peer to peer. Raw inputs never leave the
-driver, and labels go only to the last worker.
+driver, and labels go only to the last worker. With `sl.setting: u_shaped` the driver hosts
+the last slice too, so the labels never leave it either (`docs/tutorials/sl_settings.md`).
 
 The driver is `ts.P2PExecutor`, a `DistributedExecutor` whose worker 0 runs in-process. The
 followers are plain TorchSlicer workers. Everything else (worker code, gRPC/TCP transport,

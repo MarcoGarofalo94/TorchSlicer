@@ -10,7 +10,7 @@ authors:
   - family-names: Garofalo
     given-names: Marco
     email: garofalomarco58@gmail.com
-version: 0.5.0
+version: 0.6.0
 license: GPL-3.0-or-later
 repository-code: "https://github.com/MarcoGarofalo94/TorchSlicer"
 url: "https://github.com/MarcoGarofalo94/TorchSlicer"

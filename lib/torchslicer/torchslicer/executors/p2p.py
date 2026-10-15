@@ -19,21 +19,16 @@ heartbeats, recovery, run logging). The steps you can replace are documented in
 - **failure handling**: heartbeats raise ``WorkerFailureError``; ``recover()`` re-plans
   over the survivors. The driver's own slice can't be moved to a follower, since that
   would send raw data off the driver, so its failure ends the run.
+
+Hosting the data owner's slices in-process is shared with the centralized
+coordinator (``DistributedExecutor`` with ``sl.setting`` vanilla / u_shaped); in P2P
+it is always on.
 """
 
-import torch
-
 from ..config import RunConfig
-from ..discovery.base import NodeInfo
 from ..discovery.static import StaticDiscovery
 from ..monitor.process_logger import get_logger
-from .distributed import DistributedExecutor, _LocalStub, _CoordinatorServicer
-from .worker import WorkerServicer, resolve_device, get_available_memory_mb
-
-try:
-    from torchslicer.transport.grpc.worker import worker_service_pb2_grpc
-except ImportError:  # grpc missing: DistributedExecutor.__init__ raises a clear error
-    pass
+from .distributed import DistributedExecutor
 
 _LOG = get_logger("torchslicer.p2p")
 
@@ -50,8 +45,12 @@ class P2PExecutor(DistributedExecutor):
                   ``network.worker_address``, else the first peer.
         bind_addr: Local bind address (default ``[::]:<port of address>``).
         discovery: A ``BaseDiscovery`` returning the followers, replacing ``peers``.
-        run_config: ``RunConfig`` (transport, fault tolerance, logging, ...).
-        device:   Device for the driver's own slice (default ``network.device``).
+        run_config: ``RunConfig`` (transport, fault tolerance, logging, ``sl``, ...).
+        device:   Device for the driver's own slices (default ``network.device``).
+
+    The driver is the data owner: it hosts slice 0 (``sl.setting`` vanilla, the
+    default) or slice 0 and the last slice (``u_shaped``; the last one is served on
+    ``sl.tail_port``, default the driver's port + 2), so followers host the others.
 
     Example::
 
@@ -61,6 +60,9 @@ class P2PExecutor(DistributedExecutor):
     """
 
     executor_name = "p2p"
+    topology      = "p2p"
+    _local_tag    = "driver"
+    _owner_name   = "P2P driver"
 
     def __init__(self, peers=None, *, address: str | None = None, bind_addr: str | None = None,
                  discovery=None, run_config: RunConfig | None = None, device: str | None = None):
@@ -73,70 +75,8 @@ class P2PExecutor(DistributedExecutor):
         if discovery is None:
             discovery = StaticDiscovery([p for p in peers if p != address])
         super().__init__(discovery=discovery, coordinator_addr=address,
-                         coordinator_bind_addr=bind_addr, run_config=cfg)
+                         coordinator_bind_addr=bind_addr, run_config=cfg, device=device)
         self.address = address
-
-        # the driver's own worker: same servicer as every follower, called in-process
-        self.local = WorkerServicer()
-        self.local.device = torch.device(resolve_device(device or cfg.network.device))
-        self.local._tensor_transport   = cfg.transport.tensor.strip().lower()
-        self.local._tensor_port_offset = int(cfg.transport.tensor_port_offset)
-        self.local._persistent = True   # teardown must not stop the shared gRPC server
-        self.local.declared = {
-            "compute_gflops": float(cfg.network.worker_compute_gflops),
-            "max_memory_mb":  int(cfg.network.worker_max_memory_mb),
-            "first_slice":    True,      # it holds the data
-            "tags":           ["driver", *cfg.network.worker_tags],
-        }
-        self.local.local_coordinator = _LocalStub(_CoordinatorServicer(self))
-
-    # ── topology steps ─────────────────────────────────────────────────────────
-
-    def _add_servicers(self, server) -> None:
-        # followers reach the driver's slice (gradients back to slice 0) on this server
-        worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(self.local, server)
-
-    def _start_server(self, n: int) -> None:
-        super()._start_server(n)
-        port = int(self.address.rsplit(":", 1)[-1])
-        if self.local._tensor_server is None:
-            self.local._tensor_stop.clear()
-            self.local.start_tensor_server(port + self.local._tensor_port_offset)
-
-    def _discover(self, n: int) -> list:
-        followers = super()._discover(n - 1) if n > 1 else []
-        dev = str(self.local.device)
-        driver = NodeInfo(node_id=self.address, address=self.address, device=dev,
-                          memory_mb=get_available_memory_mb(dev), tags=["driver"],
-                          first_slice=True)
-        return [driver, *followers]
-
-    def _order_nodes(self) -> None:
-        # the driver holds the data, so it always keeps slice 0
-        for nd in self._nodes[1:]:
-            if nd.first_slice:
-                _LOG.warning("follower %s declares first_slice; in P2P the driver holds slice 0",
-                             nd.address)
-
-    def _make_proxy(self, i: int, node):
-        proxy = super()._make_proxy(i, node)
-        if i == 0:
-            proxy.local = self.local
-        return proxy
-
-    # ── lifecycle ──────────────────────────────────────────────────────────────
-
-    def recover(self, last_good_epoch: int) -> None:
-        if 0 in self._failed_workers:
-            raise RuntimeError(
-                "P2P driver's own slice failed "
-                f"({self._failure_reason.get(0, 'see the log')}); it holds the data, so its "
-                "slice can't move to a follower. The run stops.")
-        super().recover(last_good_epoch)
-
-    def teardown(self) -> None:
-        super().teardown()
-        self.local.stop_tensor_server()
 
 
 def _advertised(cfg: RunConfig) -> str | None:
@@ -156,7 +96,9 @@ def run_p2p(model_fn, data_fn, *, port: int | None = None, is_driver: bool | Non
     follower serves its slice until the driver shuts it down and
     returns ``[]``. The driver calls ``model_fn()`` and ``data_fn()`` (followers never
     do: they get only their slice), slices the model over ``discovery.peers`` (env
-    ``WORKER_PEERS``, driver first) and trains with ``P2PExecutor``.
+    ``WORKER_PEERS``, driver first) and trains with ``P2PExecutor``. With
+    ``sl.setting: u_shaped`` the driver hosts the last slice too, so the model is cut
+    into ``len(followers) + 2`` slices.
 
     ``slice_kwargs`` go to ``ts.slice`` (``strategy``, ``cuts``, ``expand``, ``pack``,
     ``example_input``). ``run_config`` defaults to ``RunConfig.load()`` (env
@@ -194,8 +136,11 @@ def run_p2p(model_fn, data_fn, *, port: int | None = None, is_driver: bool | Non
         followers = peers[1:]   # the driver's entry is spelled differently (e.g. alias)
     executor = P2PExecutor(peers=followers, address=address, bind_addr=f"[::]:{port}",
                            run_config=cfg)
-    sliced = ts_slice(model_fn(), n=len(followers) + 1, executor=executor, **slice_kwargs)
+    sliced = ts_slice(model_fn(), n=len(followers) + executor.hosted_slices, executor=executor,
+                      **slice_kwargs)
     _LOG.info("p2p driver start run_id=%s\n%s", cfg.run_id, sliced.summary())
-    history = sliced.train(data_fn(), run_config=cfg, verbose=verbose, callbacks=callbacks)
+    from ..sl.clients import data_for_run
+    history = sliced.train(data_for_run(cfg, data_fn), run_config=cfg, verbose=verbose,
+                           callbacks=callbacks)
     _LOG.info("p2p driver complete run_id=%s", cfg.run_id)
     return history

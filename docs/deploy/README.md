@@ -30,8 +30,11 @@ role says:
 `all` (the default when `ROLE` is unset) runs **every node in this process**. Workers or followers
 start on loopback with `ts.start_worker` and the run goes through the real gRPC/TCP stack. This
 makes it a faithful local simulation of the distributed run, and it is what `python train.py`
-does with no environment set. The number of slices is `discovery.n_workers`; in P2P the driver
-holds one of them.
+does with no environment set. The number of slices is `discovery.n_workers`. The coordinator or
+driver is the data owner, and it hosts its share of the slices in-process (`sl.setting`):
+none for `pipeline` (the centralized default), slice 0 for `vanilla` (the P2P default), slice 0
+and the last slice for `u_shaped`. There is one worker or follower per remaining slice, and the
+launcher counts nodes the same way. See `docs/tutorials/sl_settings.md`.
 
 ## The launcher
 

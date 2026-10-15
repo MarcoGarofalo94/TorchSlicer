@@ -25,7 +25,7 @@ import sys
 import time
 
 from ..config import RunConfig
-from .nodes import NodeSpec, coordinator_port, node_names, plan_nodes
+from .nodes import NodeSpec, coordinator_port, node_names, plan_nodes, tail_slice
 from .runner import free_port
 
 TARGETS = ("local", "processes", "compose", "k8s", "baremetal")
@@ -103,7 +103,8 @@ def run_processes(script: str, config_path: str, cfg: RunConfig, *, out: str,
     offset = int(cfg.transport.tensor_port_offset) if tcp else 0
     names = node_names(cfg)
     ports = [free_port(offset) for _ in names]
-    nodes = plan_nodes(cfg, ["127.0.0.1"] * len(names), ports, config_path=config_path)
+    nodes = plan_nodes(cfg, ["127.0.0.1"] * len(names), ports, config_path=config_path,
+                       tail_port=free_port(offset) if tail_slice(cfg) else None)
     if nodes[0].role == "coordinator":
         nodes[0].env["COORDINATOR_BIND_ADDRESS"] = nodes[0].address   # loopback only
     os.makedirs(out, exist_ok=True)
@@ -224,11 +225,17 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
     tcp = cfg.transport.tensor.strip().lower() == "tcp"
     offset = int(cfg.transport.tensor_port_offset)
 
-    def ports_of(port):
+    def ports_of(port, tail: int | None = None):
         ps = [{"name": "grpc", "port": port, "targetPort": port}]
         if tcp:
             ps.append({"name": "tensor", "port": port + offset, "targetPort": port + offset})
+        if tail:   # u_shaped: the driving node's last slice (followers send to it)
+            ps.append({"name": "tail", "port": tail, "targetPort": tail})
+            if tcp:
+                ps.append({"name": "tail-tensor", "port": tail + offset, "targetPort": tail + offset})
         return ps
+
+    lead_tail = int(nodes[0].env["SL_TAIL_PORT"]) if "SL_TAIL_PORT" in nodes[0].env else None
 
     def container(nd: NodeSpec, env: dict) -> dict:
         c = {
@@ -238,7 +245,7 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
             "command": [python, script],
             "env": [{"name": k, "value": v} for k, v in env.items()],
             "ports": [{"containerPort": p["targetPort"], "name": p["name"]}
-                      for p in ports_of(nd.port)],
+                      for p in ports_of(nd.port, lead_tail if nd is nodes[0] else None)],
             "volumeMounts": [{"name": "config", "mountPath": _CONFIG_DIR}],
         }
         if cfg.deploy.gpus:
@@ -266,7 +273,7 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
     lead_labels = {"app.kubernetes.io/name": cfg.deploy.name, "torchslicer/node": lead_name}
     docs.append({
         "apiVersion": "v1", "kind": "Service", "metadata": meta(lead),
-        "spec": {"selector": lead_labels, "ports": ports_of(lead_port)},
+        "spec": {"selector": lead_labels, "ports": ports_of(lead_port, lead_tail)},
     })
     k = len(nodes) - 1
     if k:
@@ -312,7 +319,14 @@ def render_baremetal(cfg: RunConfig, script: str, config_path: str, hosts: list[
         base = coordinator_port(cfg) if role == "coordinator" else int(cfg.network.worker_port)
         ports.append(base + step * used.get((h, base), 0))
         used[(h, base)] = used.get((h, base), 0) + 1
-    nodes = plan_nodes(cfg, hosts, ports, config_path=config_path)
+    tail = None
+    if tail_slice(cfg) and not cfg.sl.tail_port:
+        # the next free slot after every worker port on the driving node's host
+        taken = {p + d for h, p in zip(hosts, ports) if h == hosts[0] for d in range(step)}
+        tail = ports[0] + 2
+        while any(tail + d in taken for d in range(step)):
+            tail += step
+    nodes = plan_nodes(cfg, hosts, ports, config_path=config_path, tail_port=tail)
     paths = []
     for nd in nodes:
         lines = ["#!/bin/sh", f"# {nd.name} ({nd.role}) on {nd.host}", "set -e",

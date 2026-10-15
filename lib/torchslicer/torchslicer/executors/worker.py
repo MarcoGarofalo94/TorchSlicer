@@ -19,6 +19,7 @@ from torch import nn, optim
 from ..config import RunConfig
 from ..core.split_layer import SplitLayer
 from ..core.tied import optimizer_parameters, retie
+from ..sl.hooks import CutContext, pack_payload, unpack_payload, tensor_nbytes
 
 _UNSET = object()  # sentinel: distinguish "not provided" from explicit None
 from ..monitor import tracer as _tracer
@@ -93,6 +94,9 @@ def _init_dtype_maps():
         (worker_service_pb2.FLOAT64,  torch.float64),
         (worker_service_pb2.INT64,    torch.int64),
         (worker_service_pb2.INT32,    torch.int32),
+        (worker_service_pb2.UINT8,    torch.uint8),
+        (worker_service_pb2.INT8,     torch.int8),
+        (worker_service_pb2.BOOL,     torch.bool),
     ]
     for proto_t, torch_t in mapping:
         _DTYPE_MAP[proto_t]      = torch_t
@@ -538,6 +542,17 @@ class WorkerServicer(
         self._tied_token:  str  = ""
         self._tied_grads:  dict = {}   # (group, batch_id) → [grad from each replica]
 
+        # cut hooks on this slice's input cut (index - 1) and output cut (index)
+        self._hooks:    dict = {}
+        self._n_slices: int  = 0
+        self._reset_comm()
+
+    def _reset_comm(self):
+        """Communication sent and compute time since the last epoch read (get_stats)."""
+        self._comm = {"bytes_fwd": 0, "bytes_bwd": 0, "raw_bytes_fwd": 0, "raw_bytes_bwd": 0,
+                      "msgs_fwd": 0, "msgs_bwd": 0}
+        self._compute_s = 0.0
+
     # ── init ───────────────────────────────────────────────────────────────────
 
     def init(self, request, context):
@@ -555,6 +570,9 @@ class WorkerServicer(
             self.is_last = request.is_last
             self._run_id       = request.run_id
             self._worker_index = request.worker_index
+            self._n_slices     = request.n_slices
+            self._hooks = (torch.load(io.BytesIO(request.cut_hooks), weights_only=False)
+                           if request.cut_hooks else {})
 
             if request.is_last and request.HasField("criterion"):
                 crit_extra = (
@@ -839,6 +857,8 @@ class WorkerServicer(
         summary = self._profiler.epoch_summary(epoch)
         records = self._profiler.batch_records()
         self._profiler.reset_epoch()
+        comm, compute_s = self._comm, self._compute_s
+        self._reset_comm()
 
         def _phase_stats(name: str):
             return worker_service_pb2.PhaseStats(
@@ -882,6 +902,8 @@ class WorkerServicer(
             n_batches    = summary.get("n_batches", 0),
             batches      = batch_stats,
             fatal_error  = (self._fatal_error or {}).get("message", ""),
+            compute_ms   = compute_s * 1e3,
+            **comm,
         )
 
     # ── forward / backward RPCs (fire-and-forget) ──────────────────────────────
@@ -895,6 +917,34 @@ class WorkerServicer(
         generation = self._generation
         self._pool.submit(_tracer.propagate_to_thread(self._backward), request, generation)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
+
+    def _take_label(self, batch_id: int, label: torch.Tensor, generation: int) -> None:
+        """A label for the last slice: run the loss now if the activation is already
+        here, else keep the label until it arrives."""
+        with self._lock:
+            self._ensure_generation(generation, "forward_last", batch_id)
+            cached = self._outputs.pop(batch_id, None)
+            if cached is None:
+                self._labels[batch_id] = label
+        if cached is not None:
+            out, x_ref = cached
+            self._run_backward_last(batch_id, out, x_ref, label, generation)
+
+    def submit_label(self, batch_id: int, label: torch.Tensor) -> None:
+        """In-process counterpart of ``forward(ForwardRequest(label=...))`` for the last
+        slice: a U-shaped data owner keeps its labels without serializing them."""
+        generation = self._generation
+
+        def _run():
+            try:
+                self._ensure_generation(generation, "forward_last", batch_id)
+                self._take_label(batch_id, label.to(self.device), generation)
+            except _StaleWorkError as e:
+                _LOG.info("%s", e)
+            except Exception as e:
+                self._report_fatal_error("label", batch_id, e)
+
+        self._pool.submit(_tracer.propagate_to_thread(_run))
 
     def submit_input(self, batch_id: int, tensor: torch.Tensor, aux: dict | None = None) -> None:
         """In-process counterpart of ``forward(ForwardRequest(input=...))`` for the first
@@ -917,6 +967,57 @@ class WorkerServicer(
                 self._report_fatal_error("forward", batch_id, e)
 
         self._pool.submit(_tracer.propagate_to_thread(_run))
+
+    # ── cuts: hooks, byte counting, compute time ──────────────────────────────
+
+    def _clock(self) -> float:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        import time
+        return time.perf_counter()
+
+    def _ctx(self, cut: int, direction: str, batch_id: int) -> CutContext:
+        return CutContext(cut, direction, batch_id, self._n_slices)
+
+    def _encode_out(self, batch_id: int, out: torch.Tensor) -> torch.Tensor:
+        """The tensor sent to the next slice (output cut = this slice's index)."""
+        raw = tensor_nbytes(out)
+        hook = self._hooks.get(self._worker_index)
+        wire = out if hook is None else pack_payload(
+            hook.encode(out, self._ctx(self._worker_index, "forward", batch_id)))
+        self._comm["bytes_fwd"] += tensor_nbytes(wire)
+        self._comm["raw_bytes_fwd"] += raw
+        self._comm["msgs_fwd"] += 1
+        return wire
+
+    def _encode_grad(self, batch_id: int, grad: torch.Tensor) -> torch.Tensor:
+        """The tensor sent to the previous slice (input cut = index - 1)."""
+        cut = self._worker_index - 1
+        raw = tensor_nbytes(grad)
+        hook = self._hooks.get(cut)
+        wire = grad if hook is None else pack_payload(
+            hook.encode_grad(grad, self._ctx(cut, "backward", batch_id)))
+        self._comm["bytes_bwd"] += tensor_nbytes(wire)
+        self._comm["raw_bytes_bwd"] += raw
+        self._comm["msgs_bwd"] += 1
+        return wire
+
+    def _decode_in(self, batch_id: int, tensor_cpu: torch.Tensor) -> torch.Tensor:
+        """An activation from the previous slice, on this device (hooks decoded)."""
+        cut = self._worker_index - 1
+        hook = self._hooks.get(cut) if cut >= 0 else None
+        if hook is None:
+            return tensor_cpu.to(self.device)
+        return hook.decode(unpack_payload(tensor_cpu, self.device),
+                           self._ctx(cut, "forward", batch_id))
+
+    def _decode_grad(self, batch_id: int, tensor_cpu: torch.Tensor) -> torch.Tensor:
+        """A gradient from the next slice, on this device (hooks decoded)."""
+        hook = self._hooks.get(self._worker_index)
+        if hook is None:
+            return tensor_cpu.to(self.device)
+        return hook.decode_grad(unpack_payload(tensor_cpu, self.device),
+                                self._ctx(self._worker_index, "backward", batch_id))
 
     # ── internal forward ───────────────────────────────────────────────────────
 
@@ -964,7 +1065,7 @@ class WorkerServicer(
                 source="input",
                 device=str(self.device),
             ):
-                tensor = tensor_cpu.to(self.device)
+                tensor = self._decode_in(batch_id, tensor_cpu)
             # Unpack aux inputs (multimodal models — sent to first worker only)
             aux = {}
             if request.aux_inputs:
@@ -1007,7 +1108,7 @@ class WorkerServicer(
                 source="input_tcp",
                 device=str(self.device),
             ):
-                tensor = tensor_cpu.to(self.device)
+                tensor = self._decode_in(batch_id, tensor_cpu)
             self._run_forward_stage(batch_id, tensor, generation, aux={})
         except _StaleWorkError as e:
             _LOG.info("%s", e)
@@ -1025,9 +1126,11 @@ class WorkerServicer(
             is_last=self.is_last,
             input_shape=str(tuple(tensor.shape)),
         ) as s:
+            t0 = self._clock()
             with self._profiler.phase("forward"):
                 out = self.layer(tensor, **aux) if aux else self.layer(tensor)
                 x_ref = self.layer.x
+            self._compute_s += self._clock() - t0
             if s:
                 s.set_attribute("output_shape", str(tuple(out.shape)))
 
@@ -1052,6 +1155,7 @@ class WorkerServicer(
         self._profiler.mark_idle_start("bwd")
 
     def _send_forward_peer(self, batch_id: int, out: torch.Tensor) -> None:
+        out = self._encode_out(batch_id, out)
         try:
             if self._tensor_transport == "tcp" and self._next_tensor is not None:
                 with _tracer.span(
@@ -1103,13 +1207,7 @@ class WorkerServicer(
                     device=str(self.device),
                 ):
                     label = label_cpu.to(self.device)
-                with self._lock:
-                    self._ensure_generation(generation, "forward_last", batch_id)
-                    self._labels[batch_id] = label
-                    cached = self._outputs.pop(batch_id, None)
-                if cached is not None:
-                    out, x_ref = cached
-                    self._run_backward_last(batch_id, out, x_ref, label, generation)
+                self._take_label(batch_id, label, generation)
             else:
                 with _tracer.span(
                     "torchslicer.tensor.deserialize",
@@ -1125,7 +1223,7 @@ class WorkerServicer(
                     source="input_last",
                     device=str(self.device),
                 ):
-                    tensor = tensor_cpu.to(self.device)
+                    tensor = self._decode_in(batch_id, tensor_cpu)
                 with _tracer.span(
                     "torchslicer.worker.forward",
                     batch_id=batch_id,
@@ -1133,9 +1231,11 @@ class WorkerServicer(
                     is_last=True,
                     input_shape=str(tuple(tensor.shape)),
                 ):
+                    t0 = self._clock()
                     with self._profiler.phase("forward"):
                         out   = self.layer(tensor)
                         x_ref = self.layer.x
+                    self._compute_s += self._clock() - t0
 
                 with self._lock:
                     self._ensure_generation(generation, "forward_last", batch_id)
@@ -1176,7 +1276,7 @@ class WorkerServicer(
                 source="gradient",
                 device=str(self.device),
             ):
-                grad_in = grad_cpu.to(self.device)
+                grad_in = self._decode_grad(batch_id, grad_cpu)
             self._run_backward_stage(batch_id, grad_in, is_last_micro, generation)
         except _StaleWorkError as e:
             _LOG.info("%s", e)
@@ -1199,7 +1299,7 @@ class WorkerServicer(
                 source="gradient_tcp",
                 device=str(self.device),
             ):
-                grad_in = grad_cpu.to(self.device)
+                grad_in = self._decode_grad(batch_id, grad_cpu)
             self._run_backward_stage(batch_id, grad_in, is_last_micro, generation)
         except _StaleWorkError as e:
             _LOG.info("%s", e)
@@ -1218,7 +1318,10 @@ class WorkerServicer(
             return
 
         out, x_ref = cached
+        if grad_in.dtype != out.dtype:
+            grad_in = grad_in.to(out.dtype)
 
+        t0 = self._clock()
         with _tracer.span(
             "torchslicer.worker.backward",
             kind="TOOL",
@@ -1237,6 +1340,7 @@ class WorkerServicer(
             if is_last_micro:
                 with self._profiler.phase("optimizer"):
                     self._optimize(batch_id)
+        self._compute_s += self._clock() - t0
 
         del out
         self._send_backward(batch_id, grad, is_last_micro, generation)
@@ -1250,6 +1354,7 @@ class WorkerServicer(
             is_last_micro = (n_micro <= 1) or (batch_id % n_micro == n_micro - 1)
             full_batch_id = batch_id // n_micro if n_micro > 1 else batch_id
 
+            t0 = self._clock()
             loss_unscaled = self.loss_fn(out, label)
             loss          = loss_unscaled / n_micro
 
@@ -1290,6 +1395,7 @@ class WorkerServicer(
                 if is_last_micro:
                     with self._profiler.phase("optimizer"):
                         self._optimize(batch_id)
+            self._compute_s += self._clock() - t0
 
             del out, label, loss, loss_unscaled
             self._send_backward(batch_id, grad, is_last_micro, generation)
@@ -1305,6 +1411,7 @@ class WorkerServicer(
         if generation is not None:
             self._ensure_generation(generation, "send_backward", batch_id)
         if self._prev_stub or self._prev_tensor:
+            grad = self._encode_grad(batch_id, grad)
             with self._profiler.phase("send_bwd"):
                 try:
                     if self._tensor_transport == "tcp" and self._prev_tensor is not None:

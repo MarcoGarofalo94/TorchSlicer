@@ -226,6 +226,44 @@ class DeployConfig:
 
 
 @dataclass
+class SLConfig:
+    """Split-learning setting (see ``torchslicer/sl/`` and docs/tutorials/sl_settings.md).
+
+    Fields:
+        setting:   "" (default: "pipeline" for centralized, else "vanilla") |
+                   "pipeline" (the data owner hosts no slice; raw inputs and labels
+                   leave it) | "vanilla" (it hosts slice 0; labels leave it) |
+                   "u_shaped" (it hosts slice 0 and the last slice; nothing but cut
+                   tensors leaves it)  (env: SL_SETTING)
+        cut_hooks: ``[{cut: 0 | "all", name: "quantize", params: {bits: 8}}, ...]``
+                   (built-in names: float16, bfloat16, quantize, topk,
+                   gaussian_noise, recorder; ``ts.register_hook`` adds more)
+        link_bandwidth_mbps, link_latency_ms: a link model for the simulated
+                   communication time in the metrics (0 = off); nothing is slowed
+                   down (env: SL_LINK_BANDWIDTH_MBPS, SL_LINK_LATENCY_MS)
+        tail_port: u_shaped, distributed: port of the data owner's last slice
+                   (0 = the data owner's port + 2; its TCP listener is at
+                   tail_port + transport.tensor_port_offset)  (env: SL_TAIL_PORT)
+        clients:   number of clients for ``ts.run``: > 1 means ``data_fn()``
+                   returns one loader per client  (env: SL_CLIENTS)
+        client_mode: "sequential" | "parallel"  (env: SL_CLIENT_MODE)
+        handoff:   sequential sessions: "copy" | "keep"  (env: SL_HANDOFF)
+    """
+    setting:             str   = ""
+    cut_hooks:           list  = field(default_factory=list)
+    link_bandwidth_mbps: float = 0.0
+    link_latency_ms:     float = 0.0
+    tail_port:           int   = 0
+    clients:             int   = 1
+    client_mode:         str   = "sequential"
+    handoff:             str   = "copy"
+
+    def __post_init__(self):
+        if self.cut_hooks is None:
+            self.cut_hooks = []
+
+
+@dataclass
 class RunConfig:
     run_id:          str                  = field(default_factory=_default_run_id)
     training:        TrainingConfig       = field(default_factory=TrainingConfig)
@@ -240,6 +278,7 @@ class RunConfig:
     network:         NetworkConfig        = field(default_factory=NetworkConfig)
     planning:        PlanningConfig       = field(default_factory=PlanningConfig)
     deploy:          DeployConfig         = field(default_factory=DeployConfig)
+    sl:              SLConfig             = field(default_factory=SLConfig)
 
     # ── factory: flat Python API ──────────────────────────────────────────────
 
@@ -453,6 +492,14 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     # ── deploy ─────────────────────────────────────────────────────────────────
     ("TOPOLOGY", lambda cfg, v: setattr(cfg.deploy, "topology", v.strip().lower())),
     ("ROLE",     lambda cfg, v: setattr(cfg.deploy, "role",     v.strip().lower())),
+    # ── split learning ─────────────────────────────────────────────────────────
+    ("SL_SETTING",             lambda cfg, v: setattr(cfg.sl, "setting",             v.strip().lower())),
+    ("SL_LINK_BANDWIDTH_MBPS", lambda cfg, v: setattr(cfg.sl, "link_bandwidth_mbps", float(v))),
+    ("SL_LINK_LATENCY_MS",     lambda cfg, v: setattr(cfg.sl, "link_latency_ms",     float(v))),
+    ("SL_TAIL_PORT",           lambda cfg, v: setattr(cfg.sl, "tail_port",           int(v))),
+    ("SL_CLIENTS",             lambda cfg, v: setattr(cfg.sl, "clients",             int(v))),
+    ("SL_CLIENT_MODE",         lambda cfg, v: setattr(cfg.sl, "client_mode",         v.strip().lower())),
+    ("SL_HANDOFF",             lambda cfg, v: setattr(cfg.sl, "handoff",             v.strip().lower())),
 )
 
 

@@ -505,3 +505,118 @@ Full CPU/SGD matrix rerun on the final M3 code, compared with M2's `results_cpu_
 **53/54 cells pass.** The failing cell is still ResNet-18 + GPipe (BatchNorm, by design, max|Δ| = 7.7e-2 as before).
 All 63 loss lists (references and every mode) are **bit-identical to M2**: the readiness wait, the `start_worker`
 device fix and `run_p2p`'s role lookup change no loss. Not rerun: CPU AdamW and A100 AdamW (same code paths).
+
+## Round 5 (M4 "SL settings", 2026-10-15, branch `feat/m4-sl-settings`)
+
+M4 adds split-learning settings on top of the slice chain (`torchslicer/sl/`, tutorial
+`docs/tutorials/sl_settings.md`):
+
+- **Roles (`sl.setting`).** The *data owner* is the process that holds the data: the local
+  process, the centralized coordinator, or the P2P driver. The setting decides which slices it
+  hosts **in-process**:
+  - `pipeline`: none (the centralized default, unchanged);
+  - `vanilla`: slice 0 (the P2P default);
+  - `u_shaped`: slice 0 and the last slice.
+
+  The in-process hosting that the P2P driver had is now in `DistributedExecutor`, so a
+  centralized coordinator can host slices too. The last slice gets its own gRPC server on
+  `sl.tail_port`. `P2PExecutor` is now only defaults.
+- **Cut hooks.** Each hook has `encode`/`decode` for activations and `encode_grad`/`decode_grad`
+  for gradients, one method per side of a cut. Built in: `Float16`, `BFloat16`, `Quantize` (1/2/4/8
+  bits, bit-packed), `TopK`, `GaussianNoise`, `Recorder`, `Chain`. A hook's payload is packed into
+  one uint8 tensor, so real bytes go on the wire. Workers get their hooks in `SliceConfig`.
+- **Metrics.** Every history entry and `metrics.jsonl` epoch row now carries:
+  - `bytes_fwd`/`bytes_bwd` per cut, plus `bytes_input`, `bytes_label`, `bytes_client`,
+    `raw_bytes_total`;
+  - `compute_s` per slice, and client/server sums;
+  - `sim_comm_s`/`sim_client_comm_s` for a configured link.
+
+  Workers count what they send and return it in `get_stats`.
+- **Multi-client sessions.** `ts.ClientSession` runs `sequential` (with a handoff `copy`/`keep`/
+  callable) or `parallel` (with `on_round_end`, where FedAvg can plug in). It swaps the client
+  slices' states between batches. This needs the client slices to be in-process, and the core
+  never averages.
+
+**How it was checked.** `tests/test_sl.py` has 53 tests, about 50 s. The model is a 3-slice MLP:
+batch 16, 4 batches, SGD with momentum, 2 epochs, CPU.
+
+- **Settings.** Each one trains exactly like unsplit PyTorch (within 1e-6) in every topology. The
+  combinations tested are centralized pipeline/vanilla/u_shaped, P2P vanilla/u_shaped, gRPC and
+  TCP, and `--target processes` (real OS processes) for P2P u_shaped + TCP and centralized vanilla.
+  For each run, the byte metrics measured by the workers are identical, key by key, to what
+  `LocalExecutor` counts for the same setting.
+- **Byte counts.** The bytes are the closed-form values. Per cut: 4 × 16 × 16 × 4 B. Labels:
+  4 × 16 × 8 B, only when they leave. A quantized payload has its exact packed size.
+- **Hooks.** Distributed runs give the same losses (within 1e-6) and the same bytes as local runs.
+  This holds with GPipe too. `GaussianNoise` is seeded per (seed, cut, batch, direction), so it is
+  the same in every topology and leaves the global RNG alone.
+- **Sessions.**
+  - Sequential with `copy` handoff is bit-identical to one client on the concatenated data.
+  - Parallel with one client is bit-identical to plain training.
+  - Parallel with FedAvg at round end leaves equal client states.
+  - Distributed sessions (centralized vanilla, P2P u_shaped; sequential and parallel) match local
+    within 1e-6.
+- **Privacy claim.** With vanilla, no worker ever receives a raw-input tensor, only cut
+  activations. With u_shaped, no worker receives a label. A spy servicer checks both.
+- **Recovery.** When a follower dies in a 4-slice u_shaped P2P run, the survivors re-plan to 3
+  slices, and the driver still hosts the first and the last.
+
+`examples/sl/train.py` is the end-to-end example, with `experiments/sl_u_shaped_p2p.yaml` (u_shaped,
+8-bit cut 0, link model) and `experiments/sl_splitfed_local.yaml` (4 clients, parallel, FedAvg).
+
+### 16. uint8 inputs crashed centralized workers (correctness; latent since M0)
+
+- **Symptom:** on M3, a centralized run with uint8 inputs (e.g. raw image bytes) failed in its first
+  batch: `WorkerFailureError: Worker 0 ... forward: shape '[8, 8]' is invalid for input of size 16`.
+- **Root cause:** the coordinator's dtype table (`distributed._init_dtype_maps`) and the proto
+  `DType` enum had no uint8. `_serialize_tensor` therefore labelled the uint8 buffer FLOAT32, and the
+  worker read 64 bytes as 16 floats. P2P never hit this, because its driver feeds slice 0 in-process.
+- **Fix:** `DType` gained `UINT8`, `INT8` and `BOOL` (M4 needs UINT8 for packed hook payloads anyway).
+  Both sides map them.
+- **Verified by:** `test_coordinator_sends_uint8_inputs` (losses equal the local run; `bytes_input`
+  = 1 byte per value).
+
+### 17. The last worker kept every label that arrived after its activation (memory, silent)
+
+- **Symptom:** in `_forward_last`, a label that found its activation already waiting was used for the
+  loss *and* stored in `_labels`, and nothing ever removed it. To reproduce, the label send was
+  delayed past the activation. On M3, 4 batches left `labels left on the last worker: [4]`; on M4
+  it is `[0]`. The loss is identical (1.437963). The dict grows by one label per such batch, for
+  the whole run.
+- **Root cause:** the label branch stored the label before checking for a cached output.
+- **Fix:** `WorkerServicer._take_label` stores the label only when the activation hasn't arrived.
+  It is shared by the gRPC path and by the new in-process `submit_label` (u_shaped).
+- **Verified by:** `test_late_labels_are_not_kept_on_the_last_worker`.
+
+### Behaviour changes
+
+- **Proto.** New `DType` values (UINT8, INT8, BOOL), `SliceConfig.cut_hooks`/`n_slices` (17, 18),
+  and `WorkerStatsResponse` communication fields (16–22). Workers must run M4 code. The Docker image
+  needs a rebuild (it already needed one since M2). The coordinator stubs are unchanged
+  (regenerated byte-identical with grpcio-tools 1.64.0).
+- **Stats call.** The coordinator now calls `get_stats` on every worker once per epoch, even at
+  `profile.verbosity: 0`. That call returns and resets the communication counters and, as before,
+  the profiling stats. Liveness probes (`epoch=-1`) still reset nothing.
+- **Compute time.** It is measured on every slice, every batch (perf_counter). On CUDA there is a
+  synchronize at the end of each forward/backward phase. The next send would synchronize anyway,
+  except after the optimizer step, so the cost is about one optimizer step per batch that can no
+  longer overlap with the gradient copy.
+- **History entries.** Distributed history entries now carry the SL metrics. Before, they held only
+  `loss`.
+- **Data-owner failure message.** "P2P driver's own slice failed" is kept for P2P. Centralized with
+  vanilla/u_shaped says "the data owner (coordinator)'s own slice failed".
+- **Node counts.** `discovery.n_workers` is the number of slices in both topologies. The data owner
+  hosts its share, so a centralized vanilla run on 3 slices has 2 workers, and P2P u_shaped on 3
+  slices has 1 follower. The launcher, `ts.run` and `run_p2p` count the same way. With u_shaped,
+  rendered k8s exposes the tail port(s), bare metal gives it a free slot, and `processes` gives it
+  a free port.
+- **Version.** 0.6.0; new config section `sl:` and env vars `SL_*`.
+
+### Round 5 matrix (no-regression check)
+
+The full CPU/SGD matrix was rerun on the final M4 code and compared with M3's `results_cpu_SGD.json`
+(kept aside). **53/54 cells pass.** The failing cell is still ResNet-18 + GPipe (BatchNorm, by
+design, max|Δ| = 7.7e-2 as before). All 63 loss lists (references and every mode) are
+**bit-identical to M3**. Moving the data owner's hosting into `DistributedExecutor`, the always-on
+byte counting and compute timing, and the per-epoch `get_stats` change no loss. Not rerun: CPU
+AdamW and A100 AdamW (same code paths). Test suite: 196 passed.

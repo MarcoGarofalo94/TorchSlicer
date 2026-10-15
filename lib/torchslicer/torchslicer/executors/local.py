@@ -13,8 +13,29 @@ from ..monitor.profiler import WorkerProfiler
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
 from ..monitor.run_logger import RunLogger
 from ..monitor.callback import TrainingCallback
+from ..sl.hooks import CutContext, resolve_cut_hooks, payload_nbytes, tensor_nbytes
+from ..sl.roles import Placement, resolve_setting
+from ..sl.metrics import CommMeter
+from ..sl.clients import ClientSession, SplitLayerClientState
 
 _LOG = get_logger("torchslicer.local")
+
+def _detach_payload(payload):
+    if isinstance(payload, torch.Tensor):
+        return payload.detach()
+    return [t.detach() for t in payload]
+
+
+def check_session_ties(tied_groups, placement) -> None:
+    """Client states are swapped per client; a parameter tied across a client and a
+    server slice would then be shared by every client, so it is refused."""
+    for g in tied_groups:
+        sides = {placement.is_client(p) for p in g.members}
+        if len(sides) > 1:
+            raise ValueError("multi-client sessions don't support parameters tied across a "
+                             "client slice and a server slice (e.g. tied embeddings with "
+                             "u_shaped); untie them or change the cuts")
+
 
 def _unpack_inputs(inputs):
     """Unpack batch inputs into ``(main_tensor, aux_dict)``.
@@ -50,6 +71,11 @@ class LocalExecutor(BaseExecutor):
         self._run_logger: RunLogger              = None
         self._callbacks:  list[TrainingCallback] = []
         self._profilers:  list[WorkerProfiler]   = []  # one per partition
+        self._hooks: dict = {}
+        self._placement: Placement = None
+        self._meter: CommMeter = None
+        self._link = (0.0, 0.0)
+        self._sync = None
 
     def setup(
         self,
@@ -63,7 +89,10 @@ class LocalExecutor(BaseExecutor):
         callbacks: list = None,
         model_name: str = "unknown",
         strategy_name: str = "unknown",
+        cut_hooks=None,
     ) -> None:
+        """``cut_hooks``: ``ts.slice(cut_hooks=)`` (see ``torchslicer.sl.hooks``); the
+        config's ``sl`` section adds hooks, the setting and the link model."""
         layers = model_graph.get_layers()
         n = len(partitions)
         self.split_layers = []
@@ -88,8 +117,15 @@ class LocalExecutor(BaseExecutor):
         self.criterion = getattr(nn, criterion_cfg["name"])(**criterion_cfg["params"])
         self._n_micro  = max(1, n_micro_batches)
 
-        # Initialise profilers (one per partition) and RunLogger
+        # Split-learning setting: where each slice would run, hooks on the cuts, metrics
         cfg = run_config
+        sl_cfg = cfg.sl if cfg else None
+        self._placement = Placement(resolve_setting(sl_cfg.setting if sl_cfg else "", "local"), n)
+        self._hooks = resolve_cut_hooks(cut_hooks, n, sl_cfg.cut_hooks if sl_cfg else None)
+        self._meter = CommMeter(n)
+        self._link = ((sl_cfg.link_bandwidth_mbps, sl_cfg.link_latency_ms) if sl_cfg else (0.0, 0.0))
+
+        # Initialise profilers (one per partition) and RunLogger
         if cfg:
             configure_process_logging(cfg.logging.level)
         verbosity = cfg.profile.verbosity if cfg else 0
@@ -103,6 +139,8 @@ class LocalExecutor(BaseExecutor):
             WorkerProfiler(verbosity=verbosity, memory=memory, device=device)
             for _ in range(n)
         ]
+        self._sync = ((lambda: torch.cuda.synchronize(device))
+                      if device is not None and device.type == "cuda" else None)
 
         if cfg and cfg.logging.enabled:
             run_dir = os.path.join(cfg.logging.dir, cfg.run_id)
@@ -129,6 +167,18 @@ class LocalExecutor(BaseExecutor):
         total_loss = 0.0
         n_batches  = 0
         n_total    = len(data_loader)
+        session    = data_loader if isinstance(data_loader, ClientSession) else None
+        if session is not None:
+            clients = self._placement.client_slices
+            if not clients:
+                raise ValueError("a multi-client session needs client slices: set sl.setting "
+                                 "to vanilla or u_shaped (pipeline hosts none on the data owner)")
+            check_session_ties(self.tied_groups, self._placement)
+            adapter = SplitLayerClientState({i: self.split_layers[i] for i in clients})
+            batches = session.batches(adapter, epoch)
+        else:
+            batches = ((None, b) for b in data_loader)
+        self._meter.reset()
 
         for cb in self._callbacks:
             try:
@@ -139,7 +189,7 @@ class LocalExecutor(BaseExecutor):
         epoch_t0 = time.perf_counter()
 
         with tracer.span("torchslicer.epoch", epoch=epoch) as epoch_span:
-            for inputs, labels in data_loader:
+            for client, (inputs, labels) in batches:
                 batch_id = epoch * n_total + n_batches
                 _shape = (str(tuple(inputs.shape)) if isinstance(inputs, torch.Tensor)
                           else "multimodal")
@@ -169,9 +219,10 @@ class LocalExecutor(BaseExecutor):
                         batch_span.set_attribute("loss", loss_val)
 
                 if self._run_logger:
+                    extra = {"client": client} if client is not None else {}
                     self._run_logger.log(
                         step=batch_id, epoch=epoch, batch=n_batches,
-                        loss=round(loss_val, 6), phase="batch",
+                        loss=round(loss_val, 6), phase="batch", **extra,
                     )
 
                 if verbose:
@@ -187,6 +238,8 @@ class LocalExecutor(BaseExecutor):
 
         epoch_duration_s = time.perf_counter() - epoch_t0
         avg = total_loss / n_batches if n_batches > 0 else 0.0
+        if session is not None:
+            session.finish(adapter)
         if verbose:
             suffix = f"/{total_epochs}" if total_epochs else ""
             _LOG.info("epoch complete epoch=%s%s avg_loss=%.4f", epoch, suffix, avg)
@@ -198,6 +251,7 @@ class LocalExecutor(BaseExecutor):
             "loss":       round(avg, 6),
             "duration_s": round(epoch_duration_s, 3),
             "phase":      "epoch",
+            **self._meter.summary(self._placement, *self._link),
         }
         for cb in self._callbacks:
             try:
@@ -232,6 +286,49 @@ class LocalExecutor(BaseExecutor):
 
         return epoch_metrics
 
+    # ── cuts: hooks and byte counting ──────────────────────────────────────────
+
+    def _clock(self) -> float:
+        if self._sync is not None:
+            self._sync()
+        return time.perf_counter()
+
+    def _cut_forward(self, cut: int, x, batch_id: int):
+        """What slice ``cut + 1`` receives from slice ``cut`` (hooks applied, bytes counted)."""
+        raw = tensor_nbytes(x)
+        hook = self._hooks.get(cut)
+        if hook is None:
+            self._meter.add_fwd(cut, raw, raw)
+            return x
+        ctx = CutContext(cut, "forward", batch_id, len(self.split_layers))
+        payload = _detach_payload(hook.encode(x, ctx))
+        self._meter.add_fwd(cut, payload_nbytes(payload), raw)
+        return hook.decode(payload, ctx)
+
+    def _cut_backward(self, cut: int, g, out, batch_id: int):
+        """The gradient slice ``cut`` backpropagates through ``out``, from ``g`` sent by
+        slice ``cut + 1``."""
+        if g is None:
+            return None
+        raw = tensor_nbytes(g)
+        hook = self._hooks.get(cut)
+        if hook is None:
+            self._meter.add_bwd(cut, raw, raw)
+            return g
+        ctx = CutContext(cut, "backward", batch_id, len(self.split_layers))
+        payload = _detach_payload(hook.encode_grad(g, ctx))
+        self._meter.add_bwd(cut, payload_nbytes(payload), raw)
+        g = hook.decode_grad(payload, ctx)
+        return g.to(out.dtype) if g.dtype != out.dtype else g
+
+    def _count_io(self, main, aux: dict, labels, msgs: int = 1) -> None:
+        """Raw inputs / labels that would leave the data owner (``sl.setting``)."""
+        if self._placement.inputs_leave:
+            self._meter.add_input(tensor_nbytes(main) + sum(tensor_nbytes(v) for v in aux.values()), msgs)
+        if self._placement.labels_leave:
+            self._meter.add_label(tensor_nbytes(labels), msgs)
+        self._meter.batches += 1
+
     # ── standard (non-GPipe) batch ─────────────────────────────────────────────
 
     def _standard_batch(self, inputs, labels, batch_id: int) -> float:
@@ -240,23 +337,29 @@ class LocalExecutor(BaseExecutor):
         main   = main.to(device)
         labels = labels.to(device)
         aux    = {k: v.to(device) for k, v in aux.items()}
+        self._count_io(main, aux, labels)
 
         # forward
         outputs = []
         x = main
         for i, sl in enumerate(self.split_layers):
+            if i > 0:
+                x = self._cut_forward(i - 1, x, batch_id)
             with tracer.span(
                 "torchslicer.partition.forward",
                 partition=i,
                 batch_id=batch_id,
                 input_shape=str(tuple(x.shape)),
             ) as fwd_span:
+                t0 = self._clock()
                 with self._profilers[i].phase("forward"):
                     x = sl(x, **aux) if (i == 0 and aux) else sl(x)
+                self._meter.add_compute(i, self._clock() - t0)
                 if fwd_span:
                     fwd_span.set_attribute("output_shape", str(tuple(x.shape)))
             outputs.append(x)
 
+        t0 = self._clock()
         loss = self.criterion(outputs[-1], labels)
 
         # backward — pop MoE aux loss BEFORE backward (same graph, would fail after)
@@ -268,8 +371,11 @@ class LocalExecutor(BaseExecutor):
                 grad = self.split_layers[-1].backward(loss=total_loss)
             with self._profilers[-1].phase("optimizer"):
                 self.split_layers[-1].optimize()
+        self._meter.add_compute(len(self.split_layers) - 1, self._clock() - t0)
 
         for i in range(len(self.split_layers) - 2, -1, -1):
+            grad = self._cut_backward(i, grad, outputs[i], batch_id)
+            t0 = self._clock()
             with tracer.span("torchslicer.partition.backward", partition=i, batch_id=batch_id):
                 with self._profilers[i].phase("backward"):
                     moe = self.split_layers[i].pop_moe_aux_loss()
@@ -283,6 +389,7 @@ class LocalExecutor(BaseExecutor):
                         grad = self.split_layers[i].backward(prev_g=grad, out=outputs[i])
                 with self._profilers[i].phase("optimizer"):
                     self.split_layers[i].optimize()
+            self._meter.add_compute(i, self._clock() - t0)
 
         return loss.item()
 
@@ -308,6 +415,7 @@ class LocalExecutor(BaseExecutor):
         n_sl = len(self.split_layers)
         micro_mains  = main.chunk(M)
         micro_labels = labels.chunk(M)
+        self._count_io(main, aux, labels, msgs=len(micro_mains))
         # Chunk aux tensors that share the batch dimension; broadcast scalars/constants
         micro_aux = [
             {k: v.chunk(M)[m] if v.dim() > 0 and v.shape[0] == main.shape[0] else v
@@ -326,14 +434,18 @@ class LocalExecutor(BaseExecutor):
             refs: list[torch.Tensor] = []
             x = micro_mains[m]
             for i, sl in enumerate(self.split_layers):
+                if i > 0:
+                    x = self._cut_forward(i - 1, x, batch_id * M + m)
                 with tracer.span(
                     "torchslicer.partition.forward",
                     partition=i,
                     batch_id=batch_id * M + m,
                     input_shape=str(tuple(x.shape)),
                 ):
+                    t0 = self._clock()
                     with self._profilers[i].phase("forward"):
                         x = sl(x, **micro_aux[m]) if (i == 0 and micro_aux[m]) else sl(x)
+                    self._meter.add_compute(i, self._clock() - t0)
                 refs.append(sl.x)
                 outs.append(x)
             micro_outs.append(outs)
@@ -344,6 +456,7 @@ class LocalExecutor(BaseExecutor):
         # Step 2: backward all micro-batches, accumulate gradients
         total_loss = 0.0
         for m in range(M):
+            t0 = self._clock()
             loss_m = self.criterion(micro_outs[m][-1], micro_labels[m])
             total_loss += loss_m.item()
             scaled = loss_m / M
@@ -357,23 +470,28 @@ class LocalExecutor(BaseExecutor):
                              partition=n_sl - 1, batch_id=batch_id * M + m):
                 with self._profilers[-1].phase("backward"):
                     scaled.backward()
+            self._meter.add_compute(n_sl - 1, self._clock() - t0)
 
             for i in range(n_sl - 2, -1, -1):
+                g = self._cut_backward(i, x_refs[m][i + 1].grad, micro_outs[m][i], batch_id * M + m)
+                t0 = self._clock()
                 with tracer.span("torchslicer.partition.backward",
                                  partition=i, batch_id=batch_id * M + m):
                     with self._profilers[i].phase("backward"):
                         moe_i = micro_moe[m][i]
                         if moe_i is not None:
-                            micro_outs[m][i].backward(x_refs[m][i + 1].grad,
-                                                      retain_graph=True)
+                            micro_outs[m][i].backward(g, retain_graph=True)
                             (moe_i / M).backward()
                         else:
-                            micro_outs[m][i].backward(x_refs[m][i + 1].grad)
+                            micro_outs[m][i].backward(g)
+                self._meter.add_compute(i, self._clock() - t0)
 
         # Step 3: optimizer
         for i, sl in enumerate(self.split_layers):
+            t0 = self._clock()
             with self._profilers[i].phase("optimizer"):
                 sl.optimize()
+            self._meter.add_compute(i, self._clock() - t0)
 
         return total_loss / M
 

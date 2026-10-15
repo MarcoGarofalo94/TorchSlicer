@@ -56,6 +56,15 @@ def resolve_role(cfg: RunConfig) -> tuple[str, str]:
     return topology, role
 
 
+def hosted_slices(cfg: RunConfig, topology: str, n: int) -> int:
+    """Slices the driving node hosts in-process (``sl.setting``): 0 for pipeline, 1 for
+    vanilla, 2 for u_shaped. The other ``n - hosted`` slices go to workers/followers."""
+    from ..sl.roles import Placement, resolve_setting
+    if topology == "local":
+        return n
+    return len(Placement(resolve_setting(cfg.sl.setting, topology), n).client_slices)
+
+
 def run(model_fn, data_fn, *, run_config: RunConfig | None = None, role: str | None = None,
         verbose: bool = True, callbacks: list | None = None, **slice_kwargs) -> list:
     """Run this process as its node of the experiment; return the training history on
@@ -65,8 +74,11 @@ def run(model_fn, data_fn, *, run_config: RunConfig | None = None, role: str | N
     followers receive their slice. ``slice_kwargs`` go to ``ts.slice`` (``strategy``,
     ``cuts``, ``expand``, ``pack``, ``example_input``). ``run_config`` defaults to
     ``RunConfig.load()`` (env ``EXPERIMENT_CONFIG`` + env overrides); ``role``
-    overrides ``deploy.role``. The number of slices is ``discovery.n_workers``
-    (in P2P the driver holds one of them).
+    overrides ``deploy.role``. The number of slices is ``discovery.n_workers``;
+    the data owner (coordinator / driver) hosts ``sl.setting``'s share of them
+    in-process (pipeline: none, vanilla: slice 0, u_shaped: slice 0 and the last) and
+    workers / followers the rest. With ``sl.clients`` > 1, ``data_fn()`` returns one
+    loader per client (a ``ts.ClientSession``).
     """
     from ..monitor import tracer
     from ..monitor.process_logger import configure as configure_process_logging
@@ -86,9 +98,11 @@ def run(model_fn, data_fn, *, run_config: RunConfig | None = None, role: str | N
         from .. import slice as ts_slice
         from ..executors.worker import resolve_device
         # network.device means the same thing as on a worker ("auto": cuda if present)
+        from ..sl.clients import data_for_run
         model = model_fn().to(torch.device(resolve_device(cfg.network.device)))
         sliced = ts_slice(model, n=n, **slice_kwargs)
-        return sliced.train(data_fn(), run_config=cfg, verbose=verbose, callbacks=callbacks)
+        return sliced.train(data_for_run(cfg, data_fn), run_config=cfg, verbose=verbose,
+                            callbacks=callbacks)
     if role in ("worker", "follower"):
         return _serve(cfg, topology)
     if role == "all":
@@ -118,12 +132,14 @@ def _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> 
     from .. import slice as ts_slice
     from ..discovery import CoordinatorDiscovery, StaticDiscovery
     from ..executors.distributed import DistributedExecutor
+    from ..sl.clients import data_for_run
 
     bind = cfg.network.coordinator_bind_address
     port = int(bind.rsplit(":", 1)[-1])
+    remote = n - hosted_slices(cfg, "centralized", n)
     if cfg.discovery.backend == "static":
-        if len(cfg.discovery.peers) < n:
-            raise ValueError(f"discovery.backend=static needs {n} discovery.peers "
+        if len(cfg.discovery.peers) < remote:
+            raise ValueError(f"discovery.backend=static needs {remote} discovery.peers "
                              f"(env WORKER_PEERS), got {cfg.discovery.peers}")
         discovery = StaticDiscovery(peers=list(cfg.discovery.peers))
     else:
@@ -134,7 +150,8 @@ def _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> 
                                    coordinator_bind_addr=bind, run_config=cfg)
     sliced = ts_slice(model_fn(), n=n, executor=executor, **slice_kwargs)
     _LOG.info("coordinator start run_id=%s\n%s", cfg.run_id, sliced.summary())
-    return sliced.train(data_fn(), run_config=cfg, verbose=verbose, callbacks=callbacks)
+    return sliced.train(data_for_run(cfg, data_fn), run_config=cfg, verbose=verbose,
+                        callbacks=callbacks)
 
 
 def _drive(cfg, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> list:
@@ -151,7 +168,10 @@ def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwar
     cfg = copy.deepcopy(cfg)
     tcp = cfg.transport.tensor.strip().lower() == "tcp"
     offset = int(cfg.transport.tensor_port_offset)
-    n_workers = n if topology == "centralized" else n - 1
+    n_workers = n - hosted_slices(cfg, topology, n)
+    if (cfg.sl.setting or "").strip().lower().replace("-", "_") in ("u_shaped", "ushaped") \
+            and not cfg.sl.tail_port:
+        cfg.sl.tail_port = free_port(offset if tcp else 0)   # the data owner's last slice
     workers = []
     try:
         for _ in range(n_workers):

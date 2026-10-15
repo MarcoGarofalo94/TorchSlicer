@@ -25,6 +25,9 @@ enum DType {
     FLOAT64 = 3;
     INT64   = 4;
     INT32   = 5;
+    UINT8   = 6;  // packed cut-hook payloads (torchslicer.sl.hooks.pack_payload)
+    INT8    = 7;
+    BOOL    = 8;
 }
 
 message Tensor {
@@ -76,6 +79,8 @@ message SliceConfig {
     repeated PredecessorList predecessors = 14; // intra-partition DAG; one entry per layer
     repeated TiedParam tied        = 15; // parameters shared with other layers (tied weights)
     string  init_token             = 16; // unique per init round; tied messages from other rounds are dropped
+    bytes   cut_hooks              = 17; // torch.save({cut: CutHook}) for this slice's input/output cuts
+    uint32  n_slices               = 18; // number of slices in the run (cut hooks' context)
 }
 
 // A parameter reachable under several names, possibly on several workers.
@@ -164,6 +169,15 @@ message WorkerStatsResponse {
     // non-empty if this worker hit a fatal runtime error (lets the coordinator
     // confirm a failure report with the reported worker itself)
     string fatal_error = 15;
+    // communication sent by this worker since the last epoch read (always counted):
+    // payload bytes on the wire (after cut hooks) and before encoding, per direction
+    uint64 bytes_fwd     = 16;  // activations to the next slice
+    uint64 bytes_bwd     = 17;  // gradients to the previous slice
+    uint64 raw_bytes_fwd = 18;
+    uint64 raw_bytes_bwd = 19;
+    uint64 msgs_fwd      = 20;
+    uint64 msgs_bwd      = 21;
+    double compute_ms    = 22;  // forward + backward + optimizer wall time of this slice
 }
 
 // ── tied parameters ───────────────────────────────────────────────────────────

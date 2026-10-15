@@ -15,7 +15,8 @@ from ..core.tied import find_tied_parameters
 
 from .base import BaseExecutor
 from .startup import init_worker_with_retry
-from .worker import _TensorPeerClient, _tensor_addr, measure_link
+from .worker import (_TensorPeerClient, _tensor_addr, measure_link, WorkerServicer,
+                     resolve_device, get_available_memory_mb)
 from ..monitor import tracer
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
 from ..monitor.run_logger import RunLogger
@@ -25,6 +26,11 @@ from ..config import RunConfig, CheckpointConfig
 from ..retry import RetryPolicy
 from ..strategies.base import Partition
 from ..strategies.uniform import UniformSplitter
+from ..core.tied import find_tied_parameters as _find_ties
+from ..sl.hooks import resolve_cut_hooks, tensor_nbytes
+from ..sl.roles import Placement, resolve_setting
+from ..sl.metrics import CommMeter
+from ..sl.clients import ClientSession, SplitLayerClientState
 
 try:
     import grpc
@@ -76,6 +82,9 @@ def _init_dtype_maps():
         (torch.float64,  worker_service_pb2.FLOAT64),
         (torch.int64,    worker_service_pb2.INT64),
         (torch.int32,    worker_service_pb2.INT32),
+        (torch.uint8,    worker_service_pb2.UINT8),
+        (torch.int8,     worker_service_pb2.INT8),
+        (torch.bool,     worker_service_pb2.BOOL),
     ]
     for torch_t, proto_t in mapping:
         _TORCH_TO_DTYPE[torch_t] = proto_t
@@ -302,6 +311,9 @@ class DistributedExecutor(BaseExecutor):
     """
 
     executor_name = "distributed"   # recorded in the run manifest
+    topology      = "centralized"   # default SL setting: pipeline (see sl/roles.py)
+    _local_tag    = "data_owner"    # tag of the slices this process hosts
+    _owner_name   = "the data owner (coordinator)"
 
     def __init__(
         self,
@@ -309,7 +321,11 @@ class DistributedExecutor(BaseExecutor):
         coordinator_addr: str,
         coordinator_bind_addr: str | None = None,
         run_config: RunConfig = None,
+        *,
+        device: str | None = None,
     ):
+        """``device``: device of the slices this process hosts as the data owner
+        (``sl.setting`` vanilla / u_shaped); default ``network.device``."""
         if not _GRPC_AVAILABLE:
             raise ImportError(
                 "grpcio is required for DistributedExecutor. "
@@ -355,6 +371,22 @@ class DistributedExecutor(BaseExecutor):
         self._stored_crit_cfg = None
         self._ft_checkpoint_dir: str = ""
 
+        # Split-learning setting: the slices the data owner (this process) hosts
+        # in-process: slice 0 ("front", served on the coordinator's gRPC server) for
+        # vanilla / u_shaped, plus the last slice ("tail", own server) for u_shaped.
+        cfg = self._run_config
+        self._setting = resolve_setting(cfg.sl.setting, self.topology)
+        self.local = (self._new_local_servicer(True, [self._local_tag], device)
+                      if self._setting != "pipeline" else None)
+        self._tail = (self._new_local_servicer(False, [self._local_tag, "tail"], device)
+                      if self._setting == "u_shaped" else None)
+        self._tail_server = None
+        self._local: dict = {}        # slice index -> in-process WorkerServicer
+        self._placement: Placement = None
+        self._cut_hooks_spec = None
+        self._hooks: dict = {}
+        self._meter: CommMeter = None
+
     # ── BaseExecutor interface ─────────────────────────────────────────────────
 
     def setup(
@@ -370,13 +402,20 @@ class DistributedExecutor(BaseExecutor):
         strategy_name: str = "unknown",
         run_config=None,  # ignored — DistributedExecutor uses constructor-injected RunConfig
         planner=None,
+        cut_hooks=None,
     ) -> None:
         """``planner(nodes) -> partitions`` (from ``SlicedModel``) re-plans the split for
         the discovered nodes, in slice order, once their capabilities are known; it is
-        also used by ``recover()``. Without it, ``partitions`` are used as given."""
+        also used by ``recover()``. Without it, ``partitions`` are used as given.
+        ``cut_hooks``: ``ts.slice(cut_hooks=)``, added to the config's ``sl.cut_hooks``."""
         layers = model_graph.get_layers()
         n = len(partitions)
         self._planner = planner
+        self._placement = Placement(self._setting, n)
+        self._cut_hooks_spec = cut_hooks
+        self._hooks = resolve_cut_hooks(cut_hooks, n, self._run_config.sl.cut_hooks)
+        self._meter = CommMeter(n)
+        self._local = {i: srv for i, (srv, _) in self._hosted(n).items()}
         self._n_micro = max(1, n_micro_batches)
         self._callbacks = list(callbacks or [])
         self._model_name = model_name
@@ -469,6 +508,13 @@ class DistributedExecutor(BaseExecutor):
         total_loss       = 0.0
         n_batches        = 0
         n_total          = len(data_loader)
+        session          = data_loader if isinstance(data_loader, ClientSession) else None
+        if session is not None:
+            adapter = self._session_adapter()
+            batches = session.batches(adapter, epoch)
+        else:
+            batches = ((None, b) for b in data_loader)
+        self._meter.reset()
 
         # Coordinator-side timing accumulators
         data_load_total_ms = 0.0
@@ -485,7 +531,7 @@ class DistributedExecutor(BaseExecutor):
 
         with tracer.span("torchslicer.epoch", kind="CHAIN", epoch=epoch, n_workers=len(self._proxies)):
             iter_t0 = time.perf_counter()
-            for inputs, labels in data_loader:
+            for client, (inputs, labels) in batches:
                 data_load_total_ms += (time.perf_counter() - iter_t0) * 1000.0
 
                 batch_id = epoch * n_total + n_batches
@@ -554,9 +600,10 @@ class DistributedExecutor(BaseExecutor):
                 n_batches  += 1
 
                 if self._run_logger:
+                    extra = {"client": client} if client is not None else {}
                     self._run_logger.log(
                         step=batch_id, epoch=epoch, batch=n_batches,
-                        loss=round(loss, 6), phase="batch",
+                        loss=round(loss, 6), phase="batch", **extra,
                     )
 
                 if verbose:
@@ -574,6 +621,13 @@ class DistributedExecutor(BaseExecutor):
 
         epoch_duration_s = time.perf_counter() - epoch_t0
         avg = total_loss / n_batches if n_batches > 0 else 0.0
+        if session is not None:
+            session.finish(adapter)
+        # one get_stats per worker: communication + compute (always), profiling (verbosity)
+        stats = self._epoch_stats(epoch)
+        self._add_worker_comm(stats)
+        sl_metrics = self._meter.summary(self._placement, self._run_config.sl.link_bandwidth_mbps,
+                                         self._run_config.sl.link_latency_ms)
         if verbose:
             suffix = f"/{total_epochs}" if total_epochs else ""
             _LOG.info(
@@ -591,6 +645,7 @@ class DistributedExecutor(BaseExecutor):
             "loss":       round(avg, 6),
             "duration_s": round(epoch_duration_s, 3),
             "phase":      "epoch",
+            **sl_metrics,
         }
         for cb in self._callbacks:
             try:
@@ -619,13 +674,12 @@ class DistributedExecutor(BaseExecutor):
                     phase="coordinator_epoch",
                 )
 
-            # Collect per-worker profiling stats
+            # Per-worker profiling stats
             if self._run_config.profile.verbosity >= 1:
-                worker_stats = self._collect_worker_stats(epoch)
-                for ws in worker_stats:
+                for ws in self._worker_stats_rows(stats, epoch):
                     self._run_logger.log(**ws)
 
-        return {"loss": avg}
+        return {"loss": avg, **sl_metrics}
 
     def reinit(
         self,
@@ -699,6 +753,12 @@ class DistributedExecutor(BaseExecutor):
         if self._grpc_server:
             self._grpc_server.stop(grace=2)
             self._grpc_server = None
+        if self._tail_server:
+            self._tail_server.stop(grace=1)
+            self._tail_server = None
+        for srv in (self.local, self._tail):
+            if srv is not None:
+                srv.stop_tensor_server()
         self._proxies.clear()
 
         if ckpt.enabled:
@@ -958,11 +1018,20 @@ class DistributedExecutor(BaseExecutor):
         self._stop_heartbeats()
         cfg = self._run_config
 
+        lost_local = sorted(i for i in self._failed_workers
+                            if i < len(self._proxies) and self._proxies[i].local is not None)
+        if lost_local:
+            raise RuntimeError(
+                f"{self._owner_name}'s own slice failed (slice {lost_local[0]}: "
+                f"{self._failure_reason.get(lost_local[0], 'see the log')}); it holds the data "
+                "(and with u_shaped the labels), so its slices can't move to another node. "
+                "The run stops.")
         alive = [(i, p) for i, p in enumerate(self._proxies)
                  if i not in self._failed_workers]
         n_alive = len(alive)
         if n_alive == 0:
             raise RuntimeError("[recovery] all workers failed — cannot continue")
+        self._placement = Placement(self._setting, n_alive)   # u_shaped needs >= 3
 
         _LOG.warning(
             "recovery reslicing failed_workers=%s survivors=%s addresses=%s",
@@ -986,6 +1055,10 @@ class DistributedExecutor(BaseExecutor):
         self._proxies = [proxy                 for _,     proxy in alive]
         for new_i, proxy in enumerate(self._proxies):
             proxy.worker_index = new_i
+        self._local = {i: p.local for i, p in enumerate(self._proxies) if p.local is not None}
+        self._hooks = resolve_cut_hooks(self._cut_hooks_spec, n_alive, cfg.sl.cut_hooks,
+                                        drop_missing=True)
+        self._meter = CommMeter(n_alive)
         if cfg.planning.measure_links:
             self._measure_links()   # survivors have new neighbours
 
@@ -1033,12 +1106,109 @@ class DistributedExecutor(BaseExecutor):
         self._grpc_server.add_insecure_port(bind_addr)
         self._grpc_server.start()
         _LOG.info("gRPC server started bind_addr=%s run_id=%s", bind_addr, self._run_id)
+        offset = int(self._run_config.transport.tensor_port_offset)
+        if self.local is not None and self.local._tensor_server is None:
+            self.local._tensor_stop.clear()
+            self.local.start_tensor_server(self._bind_port() + offset)
+        if self._tail is not None and self._tail_server is None:
+            port = self._tail_port()
+            self._tail_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10),
+                                            options=_GRPC_OPTS)
+            worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(self._tail, self._tail_server)
+            self._tail_server.add_insecure_port(f"{self._bind_host()}:{port}")
+            self._tail_server.start()
+            self._tail._tensor_stop.clear()
+            self._tail.start_tensor_server(port + offset)
+            _LOG.info("u_shaped tail slice served address=%s", self._tail_address())
 
     def _add_servicers(self, server) -> None:
-        """Hook: extra services on the coordinator's gRPC server."""
+        """Hook: extra services on the coordinator's gRPC server. The data owner's slice 0
+        is served here (other slices reach it: gradients come back to slice 0)."""
+        if self.local is not None:
+            worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(self.local, server)
+
+    # ── slices hosted in this process (the data owner's) ───────────────────────
+
+    def _new_local_servicer(self, first_slice: bool, tags: list, device=None):
+        cfg = self._run_config
+        srv = WorkerServicer()
+        srv.device = torch.device(resolve_device(device or cfg.network.device))
+        srv._tensor_transport   = cfg.transport.tensor.strip().lower()
+        srv._tensor_port_offset = int(cfg.transport.tensor_port_offset)
+        srv._persistent = True   # teardown must not stop the shared gRPC server
+        srv.declared = {
+            "compute_gflops": float(cfg.network.worker_compute_gflops),
+            "max_memory_mb":  int(cfg.network.worker_max_memory_mb),
+            "first_slice":    first_slice,
+            "tags":           [*tags, *cfg.network.worker_tags],
+        }
+        srv.local_coordinator = _LocalStub(_CoordinatorServicer(self))
+        return srv
+
+    def _bind_port(self) -> int:
+        return int((self.coordinator_bind_addr or self.coordinator_addr).rsplit(":", 1)[-1])
+
+    def _bind_host(self) -> str:
+        if self.coordinator_bind_addr:
+            return self.coordinator_bind_addr.rsplit(":", 1)[0]
+        return "[::]"
+
+    def _tail_port(self) -> int:
+        return int(self._run_config.sl.tail_port) or self._bind_port() + 2
+
+    def _tail_address(self) -> str:
+        return f"{self.coordinator_addr.rsplit(':', 1)[0]}:{self._tail_port()}"
+
+    @property
+    def hosted_slices(self) -> int:
+        """How many slices this process hosts (0, 1, or 2 for u_shaped): a run on
+        ``n`` slices needs ``n - hosted_slices`` remote workers."""
+        return (self.local is not None) + (self._tail is not None)
+
+    def _hosted(self, n: int) -> dict:
+        """``{slice index: (servicer, address)}`` for the slices hosted in this process."""
+        out = {}
+        if self.local is not None:
+            out[0] = (self.local, self.coordinator_addr)
+        if self._tail is not None:
+            out[n - 1] = (self._tail, self._tail_address())
+        return out
+
+    def _session_adapter(self):
+        """Client-state swapping for a multi-client session: over the client slices,
+        which this process hosts (so swapping needs no network)."""
+        if not self._placement.client_slices:
+            raise ValueError("a multi-client session needs the data owner to host the client "
+                             "slices: set sl.setting to vanilla or u_shaped")
+        if self._run_config.fault_tolerance.enabled:
+            raise ValueError("multi-client sessions don't support fault_tolerance.enabled "
+                             "(recovery would not restore every client's state)")
+        from .local import check_session_ties
+        layers = self._stored_layers
+        check_session_ties(_find_ties([[layers[j] for j in p.layer_indices] for p in self.partitions]),
+                           self._placement)
+        return SplitLayerClientState({i: self._local[i].layer for i in self._placement.client_slices})
 
     def _discover(self, n: int) -> list:
-        """The ``n`` nodes to run on, in slice order (slice i goes to node i)."""
+        """The ``n`` nodes to run on, in slice order (slice i goes to node i): the slices
+        this process hosts, and ``n`` minus those discovered remote workers."""
+        hosted = self._hosted(n)
+        remote = self._discover_remote(n - len(hosted)) if n > len(hosted) else []
+        it = iter(remote)
+        nodes = []
+        for i in range(n):
+            if i not in hosted:
+                nodes.append(next(it))
+                continue
+            srv, addr = hosted[i]
+            dev = str(srv.device)
+            nodes.append(NodeInfo(node_id=addr, address=addr, device=dev,
+                                  memory_mb=get_available_memory_mb(dev),
+                                  tags=list(srv.declared["tags"]), first_slice=(i == 0)))
+        return nodes
+
+    def _discover_remote(self, n: int) -> list:
+        """``n`` remote workers from the discovery backend, in discovery order."""
         cfg = self._run_config
         tag_filter = cfg.discovery.tag_filter or []
         filter_str = f" with tags {tag_filter}" if tag_filter else ""
@@ -1094,7 +1264,14 @@ class DistributedExecutor(BaseExecutor):
 
     def _order_nodes(self) -> None:
         """Slice order: a node declaring ``first_slice`` (e.g. the data owner) goes first;
-        the others keep discovery order."""
+        the others keep discovery order. When this process hosts slice 0 (it is the data
+        owner), it keeps it."""
+        if self.local is not None:
+            for nd, proxy in zip(self._nodes[1:], self._proxies[1:]):
+                if nd.first_slice and proxy.local is None:
+                    _LOG.warning("worker %s declares first_slice, but this %s holds the data "
+                                 "and slice 0", nd.address, self.executor_name)
+            return
         firsts = [i for i, nd in enumerate(self._nodes) if nd.first_slice]
         if len(firsts) > 1:
             raise ValueError("more than one worker declares first_slice: "
@@ -1134,7 +1311,8 @@ class DistributedExecutor(BaseExecutor):
             )
 
     def _make_proxy(self, i: int, node) -> "_WorkerProxy":
-        return _WorkerProxy(name=node.node_id, address=node.address, worker_index=i)
+        return _WorkerProxy(name=node.node_id, address=node.address, worker_index=i,
+                            local=self._local.get(i))
 
     def _init_slices(self, layers: list, partitions: list, phase: str,
                      checkpoint_paths: dict | None = None) -> None:
@@ -1149,6 +1327,10 @@ class DistributedExecutor(BaseExecutor):
         for i, (proxy, partition) in enumerate(zip(self._proxies, partitions)):
             is_last = (i == n - 1)
             partition_layers = [layers[j] for j in partition.layer_indices]
+            hooks = {c: self._hooks[c] for c in (i - 1, i) if c in self._hooks}
+            hook_buf = io.BytesIO()
+            if hooks:
+                torch.save(hooks, hook_buf)
             pred_proto = [
                 worker_service_pb2.PredecessorList(indices=list(p))
                 for p in (partition.predecessors or [[] for _ in partition_layers])
@@ -1170,6 +1352,8 @@ class DistributedExecutor(BaseExecutor):
                 predecessors       = pred_proto,
                 tied               = tied[i],
                 init_token         = init_token,
+                cut_hooks          = hook_buf.getvalue(),
+                n_slices           = n,
             )
             res = self._init_worker(proxy, slice_cfg, phase=phase)
             _LOG.info(
@@ -1210,17 +1394,45 @@ class DistributedExecutor(BaseExecutor):
             except Exception as e:
                 _LOG.warning("idle worker shutdown failed address=%s error=%s", nd.address, e)
 
-    def _collect_worker_stats(self, epoch: int) -> list:
-        """Pull profiling stats from all workers after an epoch."""
-        results = []
-        verbosity = self._run_config.profile.verbosity
+    def _epoch_stats(self, epoch: int) -> list:
+        """One ``get_stats`` per worker after an epoch (``None`` where it failed). It
+        returns, and resets, the worker's communication counters and profiling stats."""
+        out = []
         for proxy in self._proxies:
             try:
-                resp = proxy.stub().get_stats(worker_service_pb2.GetStatsRequest(
+                out.append(proxy.stub().get_stats(worker_service_pb2.GetStatsRequest(
                     run_id    = self._run_id,
                     epoch     = epoch,
-                    verbosity = verbosity,
-                ))
+                    verbosity = self._run_config.profile.verbosity,
+                ), timeout=30.0))
+            except Exception as e:
+                out.append(None)
+                _LOG.warning("get_stats failed worker=%s address=%s error=%s", proxy.name, proxy.address, e)
+        return out
+
+    def _add_worker_comm(self, stats: list) -> None:
+        """Bytes each slice sent across its cuts, and its compute time, into the meter."""
+        n = len(stats)
+        for i, resp in enumerate(stats):
+            if resp is None:
+                continue
+            if i < n - 1:
+                self._meter.add_fwd(i, resp.bytes_fwd, resp.raw_bytes_fwd, resp.msgs_fwd)
+            if i > 0:
+                self._meter.add_bwd(i - 1, resp.bytes_bwd, resp.raw_bytes_bwd, resp.msgs_bwd)
+            self._meter.add_compute(i, resp.compute_ms / 1e3)
+
+    def _collect_worker_stats(self, epoch: int) -> list:
+        """Pull profiling stats from all workers after an epoch (rows for metrics.jsonl)."""
+        return self._worker_stats_rows(self._epoch_stats(epoch), epoch)
+
+    def _worker_stats_rows(self, stats: list, epoch: int) -> list:
+        results = []
+        verbosity = self._run_config.profile.verbosity
+        for proxy, resp in zip(self._proxies, stats):
+            if resp is None:
+                continue
+            try:
                 entry = self._worker_stats_to_dict(resp, epoch)
                 results.append(entry)
                 # At verbosity=3, also emit per-batch rows
@@ -1339,11 +1551,26 @@ class DistributedExecutor(BaseExecutor):
             json.dump(payload, handle, indent=2)
         _LOG.info("checkpoint layout saved path=%s epoch=%s", path, epoch)
 
+    def _send_label(self, batch_id: int, label: torch.Tensor) -> None:
+        """Labels go to the last slice: over the network (counted), or in-process when the
+        data owner hosts it (u_shaped)."""
+        last = self._proxies[-1]
+        if last.local is not None:
+            last.local.submit_label(batch_id, label)
+            return
+        self._meter.add_label(tensor_nbytes(label))
+        with tracer.span("torchslicer.coordinator.label_send", batch_id=batch_id, transport="grpc"):
+            last.stub().forward(worker_service_pb2.ForwardRequest(
+                batch_id=batch_id,
+                label=_serialize_tensor(label),
+            ))
+
     def _send_input_to_first_worker(self, batch_id: int, tensor: torch.Tensor, aux: dict) -> None:
         """Send the forward input tensor to worker0, using TCP when available and no aux inputs."""
         if self._proxies[0].local is not None:
             self._proxies[0].local.submit_input(batch_id, tensor, aux)
             return
+        self._meter.add_input(tensor_nbytes(tensor) + sum(tensor_nbytes(v) for v in aux.values()))
         tcp_client = self._proxies[0]._tensor_client
         if tcp_client is not None and not aux:
             with tracer.span("torchslicer.coordinator.input_send", batch_id=batch_id, transport="tcp"):
@@ -1371,16 +1598,9 @@ class DistributedExecutor(BaseExecutor):
             ]
             for m in range(M):
                 mbid = batch_id * M + m
-                with tracer.span("torchslicer.coordinator.label_send", batch_id=mbid, transport="grpc"):
-                    self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
-                        batch_id=mbid,
-                        label=_serialize_tensor(micro_labels[m]),
-                    ))
+                self._send_label(mbid, micro_labels[m])
                 self._send_input_to_first_worker(mbid, micro_mains[m], micro_aux[m])
         else:
-            with tracer.span("torchslicer.coordinator.label_send", batch_id=batch_id, transport="grpc"):
-                self._proxies[-1].stub().forward(worker_service_pb2.ForwardRequest(
-                    batch_id=batch_id,
-                    label=_serialize_tensor(labels),
-                ))
+            self._send_label(batch_id, labels)
             self._send_input_to_first_worker(batch_id, main, aux)
+        self._meter.batches += 1

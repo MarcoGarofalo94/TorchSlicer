@@ -21,7 +21,7 @@ so code changes need no rebuild.
   driving node's exit code. It stops the other services too.
 - The hand-written `docker-compose*.yml` files at the repo root (fixed 4 workers, the M0–M2
   examples, `make run-centralized` / `make run-p2p`) still work. The generated file is the
-  same layout with exactly `discovery.n_workers` nodes.
+  same layout, with one node per slice the coordinator/driver doesn't host (`sl.setting`).
 
 Not tested in this repository's CI: this container has no Docker. The services' env and
 commands are the ones `--target processes` runs and checks.

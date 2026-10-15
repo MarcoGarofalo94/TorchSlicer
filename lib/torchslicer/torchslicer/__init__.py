@@ -1,4 +1,4 @@
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __author__ = 'Marco Garofalo'
 
 from .core.slicer import Slicer
@@ -23,7 +23,7 @@ from .config import (
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
     StartupConfig, TransportConfig,
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
-    NetworkConfig, PlanningConfig, DeployConfig,
+    NetworkConfig, PlanningConfig, DeployConfig, SLConfig,
 )
 from .monitor import TrainingCallback, RunLogger
 from .core.stages import (
@@ -36,6 +36,11 @@ from .core.stages import (
 )
 from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
 from .deploy import run
+from . import sl
+from .sl import (
+    CutHook, CutContext, Float16, BFloat16, Quantize, TopK, GaussianNoise, Recorder, Chain,
+    register_hook, ClientSession, Placement,
+)
 
 
 def peft_unwrap(model) -> "nn.Module":
@@ -87,13 +92,14 @@ def _accepts_nodes(splitter) -> bool:
 class SlicedModel:
     def __init__(self, graph, partitions, executor,
                  model_name: str = "unknown", strategy_name: str = "unknown",
-                 splitter=None):
+                 splitter=None, cut_hooks=None):
         self.graph          = graph
         self.partitions     = partitions
         self.executor       = executor
         self._model_name    = model_name
         self._strategy_name = strategy_name
         self._splitter      = splitter
+        self.cut_hooks      = cut_hooks
 
     def plan(self, nodes) -> list:
         """Partitions for these workers (``NodeInfo`` list, in slice order).
@@ -150,6 +156,9 @@ class SlicedModel:
     ) -> list:
         """Train the sliced model.
 
+        ``data_loader`` yields ``(inputs, labels)``; a ``ts.ClientSession`` trains
+        several clients (data owners) against the shared server slices.
+
         When ``run_config`` is supplied all training parameters default to the
         values in the config; explicit kwargs override individual fields::
 
@@ -177,8 +186,12 @@ class SlicedModel:
 
         n_micro = resolved_n_micro if resolved_use_gpipe else 1
         import inspect
-        extra = ({"planner": self.plan}
-                 if "planner" in inspect.signature(self.executor.setup).parameters else {})
+        accepted = inspect.signature(self.executor.setup).parameters
+        extra = {"planner": self.plan} if "planner" in accepted else {}
+        if "cut_hooks" in accepted:
+            extra["cut_hooks"] = self.cut_hooks
+        elif self.cut_hooks:
+            raise ValueError(f"{type(self.executor).__name__} does not support cut_hooks")
         self.executor.setup(
             self.graph,
             self.partitions,
@@ -234,7 +247,7 @@ def trace(model, expand=None, pack=None) -> ModelGraph:
 
 
 def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
-          cuts=None, expand=None, example_input=None) -> SlicedModel:
+          cuts=None, expand=None, example_input=None, cut_hooks=None) -> SlicedModel:
     """Slice a model into ``n`` partitions for distributed training.
 
     Args:
@@ -277,6 +290,11 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
         example_input: An input batch, for strategies that measure the model
                   (``"flops"``, ``"profiled"``). They run on a copy, so the
                   model's weights, buffers and RNG state are not changed.
+        cut_hooks: What crosses the cuts: a ``ts.CutHook`` (every cut), or
+                  ``{cut: hook}`` with cut ``k`` = between slice ``k`` and ``k+1``,
+                  e.g. ``{0: ts.Quantize(bits=8)}``. Built in: ``Float16``,
+                  ``BFloat16``, ``Quantize``, ``TopK``, ``GaussianNoise``,
+                  ``Recorder``, ``Chain``. See docs/tutorials/sl_settings.md.
 
     Serialization constraint
     ------------------------
@@ -314,4 +332,5 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
         model_name=type(model).__name__,
         strategy_name=strategy_name,
         splitter=splitter,
+        cut_hooks=cut_hooks,
     )

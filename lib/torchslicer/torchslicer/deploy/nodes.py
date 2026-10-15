@@ -9,7 +9,7 @@ Every node runs the same script with ``ts.run``; its env says which node it is.
 from dataclasses import dataclass, field
 
 from ..config import RunConfig
-from .runner import resolve_role
+from .runner import hosted_slices, resolve_role
 
 
 @dataclass
@@ -31,17 +31,28 @@ class NodeSpec:
 
 
 def node_names(cfg: RunConfig) -> list[tuple[str, str]]:
-    """``(name, role)`` of every node, the driving one first."""
+    """``(name, role)`` of every node, the driving one first. ``discovery.n_workers`` is
+    the number of slices; the driving node hosts ``sl.setting``'s share of them
+    (``hosted_slices``) and there is one worker/follower per remaining slice."""
     topology, _ = resolve_role(_without_role(cfg))
     n = int(cfg.discovery.n_workers)
     if topology == "local":
         raise ValueError("deploy.topology is local: there is nothing to deploy "
                          "(set centralized or p2p)")
-    if topology == "centralized":
-        return [("coordinator", "coordinator")] + [(f"worker-{i}", "worker") for i in range(n)]
-    if n < 1:
+    if topology == "p2p" and n < 1:
         raise ValueError("p2p needs discovery.n_workers >= 1 (the driver holds one slice)")
-    return [("driver", "driver")] + [(f"follower-{i}", "follower") for i in range(n - 1)]
+    k = n - hosted_slices(cfg, topology, n)
+    if topology == "centralized":
+        return [("coordinator", "coordinator")] + [(f"worker-{i}", "worker") for i in range(k)]
+    return [("driver", "driver")] + [(f"follower-{i}", "follower") for i in range(k)]
+
+
+def tail_slice(cfg: RunConfig) -> bool:
+    """The driving node also hosts the last slice (``sl.setting: u_shaped``), served on
+    its own port (``sl.tail_port``, default the driving node's port + 2)."""
+    from ..sl.roles import resolve_setting
+    topology, _ = resolve_role(_without_role(cfg))
+    return topology != "local" and resolve_setting(cfg.sl.setting, topology) == "u_shaped"
 
 
 def coordinator_port(cfg: RunConfig) -> int:
@@ -49,11 +60,14 @@ def coordinator_port(cfg: RunConfig) -> int:
 
 
 def plan_nodes(cfg: RunConfig, hosts: list[str], ports: list[int], *,
-               config_path: str | None = None, discovery: str | None = None) -> list[NodeSpec]:
+               config_path: str | None = None, discovery: str | None = None,
+               tail_port: int | None = None) -> list[NodeSpec]:
     """The nodes of this run, at ``hosts[i]:ports[i]`` (in ``node_names`` order).
 
     ``discovery`` overrides ``discovery.backend`` for centralized runs ("static":
     the coordinator gets the worker list; "coordinator": workers register).
+    ``tail_port``: u_shaped, the driving node's port for the last slice (env
+    ``SL_TAIL_PORT``); default ``sl.tail_port`` or its port + 2.
     """
     topology, _ = resolve_role(_without_role(cfg))
     names = node_names(cfg)
@@ -88,6 +102,8 @@ def plan_nodes(cfg: RunConfig, hosts: list[str], ports: list[int], *,
                 nd.env["COORDINATOR_ADDRESS"] = lead.address
         if nd.role == "driver":
             nd.env["WORKER_PEERS"] = ",".join(x.address for x in nodes)
+    if tail_slice(cfg):
+        lead.env["SL_TAIL_PORT"] = str(tail_port or cfg.sl.tail_port or lead.port + 2)
     return nodes
 
 
