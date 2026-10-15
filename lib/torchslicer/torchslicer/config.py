@@ -128,6 +128,9 @@ class FaultToleranceConfig:
     # a reachable worker that reports no fatal error is kept (the report was
     # false, e.g. one worker naming another).  False = trust every report.
     verify_reports:       bool  = True
+    # Heartbeats run even when ``enabled`` is False: a dead worker then fails the run
+    # with WorkerFailureError instead of leaving the driver waiting forever.
+    detect_failures:      bool  = True
 
 
 @dataclass
@@ -375,6 +378,7 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("HEARTBEAT_TIMEOUT",       lambda cfg, v: setattr(cfg.fault_tolerance, "ping_timeout_s",       float(v))),
     ("FAULT_MAX_RETRIES",       lambda cfg, v: setattr(cfg.fault_tolerance, "max_retries",          int(v))),
     ("VERIFY_FAILURE_REPORTS",  lambda cfg, v: setattr(cfg.fault_tolerance, "verify_reports",       _parse_bool(v))),
+    ("DETECT_FAILURES",         lambda cfg, v: setattr(cfg.fault_tolerance, "detect_failures",      _parse_bool(v))),
     # ── network ────────────────────────────────────────────────────────────────
     ("DEVICE",                   lambda cfg, v: setattr(cfg.network, "device",                   v)),
     ("COORDINATOR_ADDRESS",      lambda cfg, v: setattr(cfg.network, "coordinator_address",      v)),

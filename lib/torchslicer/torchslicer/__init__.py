@@ -14,7 +14,8 @@ from .strategies.registry import (
 from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
 from .executors.distributed import DistributedExecutor, WorkerFailureError
-from .executors.worker import resolve_device, run_worker, WorkerServicer
+from .executors.p2p import P2PExecutor, run_p2p
+from .executors.worker import resolve_device, run_worker, start_worker, WorkerHandle, WorkerServicer
 from .transport.base import BaseTransport
 from .discovery import BaseDiscovery, NodeInfo, AnnounceResult
 from .discovery import CoordinatorDiscovery, announce_to_coordinator, StaticDiscovery

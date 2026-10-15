@@ -228,6 +228,18 @@ class _CoordinatorServicer(
 
 # ── worker proxy ───────────────────────────────────────────────────────────────
 
+class _LocalStub:
+    """Calls a servicer in this process with a gRPC stub's signature (no serialization
+    of the call, no network). Used for the P2P driver's own worker and coordinator."""
+
+    def __init__(self, servicer):
+        self._servicer = servicer
+
+    def __getattr__(self, name):
+        method = getattr(self._servicer, name)
+        return lambda request, timeout=None, **_: method(request, None)
+
+
 @dataclass
 class _WorkerProxy:
     name:         str
@@ -235,8 +247,12 @@ class _WorkerProxy:
     worker_index: int
     _stub:          object = field(default=None, repr=False)
     _tensor_client: object = field(default=None, repr=False)
+    local:          object = field(default=None, repr=False)   # in-process WorkerServicer
 
     def connect(self, tensor_transport: str = "grpc", tensor_port_offset: int = 1):
+        if self.local is not None:
+            self._stub = _LocalStub(self.local)
+            return
         self._stub = worker_service_pb2_grpc.WorkerServiceStub(_channel(self.address))
         if tensor_transport == "tcp":
             self._tensor_client = _TensorPeerClient(
@@ -281,6 +297,8 @@ class DistributedExecutor(BaseExecutor):
             coordinator_addr="coordinator:50054",
         )
     """
+
+    executor_name = "distributed"   # recorded in the run manifest
 
     def __init__(
         self,
@@ -358,41 +376,12 @@ class DistributedExecutor(BaseExecutor):
 
         # Start embedded coordinator gRPC server FIRST so the Register endpoint
         # is available before discover() blocks waiting for registrations.
-        self._grpc_server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=max(4, n)), options=_GRPC_OPTS
-        )
-        coordinator_service_pb2_grpc.add_CoordinatorServiceServicer_to_server(
-            _CoordinatorServicer(self), self._grpc_server
-        )
-        bind_addr = self.coordinator_bind_addr
-        if not bind_addr:
-            port = self.coordinator_addr.split(":")[-1]
-            bind_addr = f"[::]:{port}"
-        self._grpc_server.add_insecure_port(bind_addr)
-        self._grpc_server.start()
-        _LOG.info("gRPC server started bind_addr=%s run_id=%s", bind_addr, self._run_id)
-
-        # Wait for workers to register (CoordinatorDiscovery) or use static list
-        tag_filter = cfg.discovery.tag_filter or []
-        filter_str = f" with tags {tag_filter}" if tag_filter else ""
-        _LOG.info(
-            "waiting for workers expected=%s discovery=%s timeout_s=%.1f%s",
-            n,
-            type(self._discovery).__name__,
-            cfg.discovery.timeout,
-            filter_str,
-        )
-        discover_kwargs = {"expected": n, "timeout": cfg.discovery.timeout}
-        if tag_filter and hasattr(self._discovery, "discover"):
-            discover_kwargs["tag_filter"] = tag_filter
-        self._nodes = self._discovery.discover(**discover_kwargs)
+        self._start_server(n)
+        self._nodes = self._discover(n)
         _LOG.info("workers ready count=%s addresses=%s", n, [nd.address for nd in self._nodes])
 
         # Build proxies from discovered node list (addresses come from workers themselves)
-        self._proxies = [
-            _WorkerProxy(name=nd.node_id, address=nd.address, worker_index=i)
-            for i, nd in enumerate(self._nodes)
-        ]
+        self._proxies = [self._make_proxy(i, nd) for i, nd in enumerate(self._nodes)]
         for proxy in self._proxies:
             proxy.connect(
                 tensor_transport=cfg.transport.tensor,
@@ -404,7 +393,7 @@ class DistributedExecutor(BaseExecutor):
             run_dir = os.path.join(cfg.logging.dir, self._run_id)
             self._run_logger = RunLogger(run_id=self._run_id, run_dir=run_dir)
             layer_names = [type(l).__name__ for l in layers]
-            self._run_logger.record_executor("distributed")
+            self._run_logger.record_executor(self.executor_name)
             self._run_logger.record_config(cfg)
             self._run_logger.record_model(model_name, layer_names,
                                           node_names=model_graph.names(), expand=model_graph.expand)
@@ -425,53 +414,21 @@ class DistributedExecutor(BaseExecutor):
         self._stored_opt_cfg  = opt_cfg
         self._stored_crit_cfg = crit_cfg
 
-        tied = build_tied_configs(
-            [[layers[j] for j in p.layer_indices] for p in partitions],
-            [proxy.address for proxy in self._proxies])
-        init_token = uuid.uuid4().hex
-        for i, proxy in enumerate(self._proxies):
-            is_last = (i == n - 1)
-            partition_layers = [layers[j] for j in partitions[i].layer_indices]
-            pred_proto = [
-                worker_service_pb2.PredecessorList(indices=list(p))
-                for p in (partitions[i].predecessors or [[] for _ in partition_layers])
-            ]
-            slice_cfg = worker_service_pb2.SliceConfig(
-                layers             = _build_layer_configs(partition_layers),
-                optimizer          = opt_cfg,
-                criterion          = crit_cfg if is_last else None,
-                is_last            = is_last,
-                prev_worker        = self._proxies[i - 1].address if i > 0 else "",
-                next_worker        = self._proxies[i + 1].address if i < n - 1 else "",
-                coordinator        = self.coordinator_addr,
-                n_micro            = self._n_micro,
-                run_id             = self._run_id,
-                checkpoint_path    = checkpoint_paths.get(i, ""),
-                worker_index       = i,
-                profile_verbosity  = cfg.profile.verbosity,
-                profile_memory     = cfg.profile.memory,
-                predecessors       = pred_proto,
-                tied               = tied[i],
-                init_token         = init_token,
-            )
-            res = self._init_worker(proxy, slice_cfg, phase="init")
-            _LOG.info(
-                "worker init complete worker=%s address=%s hostname=%s message=%s",
-                proxy.name,
-                proxy.address,
-                res.hostname,
-                res.message,
-            )
+        self._init_slices(layers, partitions, phase="init", checkpoint_paths=checkpoint_paths)
 
-        # Start heartbeat threads if fault tolerance is enabled
+        # Failure detection (heartbeats) runs unless disabled; recovery only with
+        # fault_tolerance.enabled. Without recovery a dead worker fails the run
+        # (WorkerFailureError) instead of hanging it.
         ft = cfg.fault_tolerance
         if ft.enabled:
             self._max_fault_retries = ft.max_retries
+        if ft.enabled or ft.detect_failures:
             self._start_heartbeats(ft.heartbeat_interval_s, ft.ping_timeout_s)
             _LOG.info(
-                "fault tolerance enabled heartbeat_interval_s=%.1f ping_timeout_s=%.1f",
+                "failure detection on heartbeat_interval_s=%.1f ping_timeout_s=%.1f recovery=%s",
                 ft.heartbeat_interval_s,
                 ft.ping_timeout_s,
+                ft.enabled,
             )
 
         # Notify callbacks that training is about to begin
@@ -671,46 +628,12 @@ class DistributedExecutor(BaseExecutor):
         self._strategy_name = strategy_name
         cfg = self._run_config
 
-        opt_cfg  = _build_optimizer_config(optimizer_cfg)
-        crit_cfg = _build_criterion_config(criterion_cfg)
-
-        tied = build_tied_configs(
-            [[layers[j] for j in p.layer_indices] for p in partitions],
-            [proxy.address for proxy in self._proxies])
-        init_token = uuid.uuid4().hex
-        for i, proxy in enumerate(self._proxies):
-            is_last = (i == n - 1)
-            partition_layers = [layers[j] for j in partitions[i].layer_indices]
-            pred_proto = [
-                worker_service_pb2.PredecessorList(indices=list(p))
-                for p in (partitions[i].predecessors or [[] for _ in partition_layers])
-            ]
-            slice_cfg = worker_service_pb2.SliceConfig(
-                layers             = _build_layer_configs(partition_layers),
-                optimizer          = opt_cfg,
-                criterion          = crit_cfg if is_last else None,
-                is_last            = is_last,
-                prev_worker        = self._proxies[i - 1].address if i > 0 else "",
-                next_worker        = self._proxies[i + 1].address if i < n - 1 else "",
-                coordinator        = self.coordinator_addr,
-                n_micro            = self._n_micro,
-                run_id             = self._run_id,
-                checkpoint_path    = "",
-                worker_index       = i,
-                profile_verbosity  = cfg.profile.verbosity,
-                profile_memory     = cfg.profile.memory,
-                predecessors       = pred_proto,
-                tied               = tied[i],
-                init_token         = init_token,
-            )
-            res = self._init_worker(proxy, slice_cfg, phase="reinit")
-            _LOG.info(
-                "worker reinit complete worker=%s address=%s hostname=%s message=%s",
-                proxy.name,
-                proxy.address,
-                res.hostname,
-                res.message,
-            )
+        self._stored_opt_cfg  = _build_optimizer_config(optimizer_cfg)
+        self._stored_crit_cfg = _build_criterion_config(criterion_cfg)
+        self._stored_model_graph       = model_graph
+        self._stored_layers            = layers
+        self._stored_partition_indices = [list(p.layer_indices) for p in partitions]
+        self._init_slices(layers, partitions, phase="reinit")
 
         _LOG.info("reinit complete workers=%s model=%s", n, model_name)
 
@@ -1035,37 +958,7 @@ class DistributedExecutor(BaseExecutor):
         self._stored_partition_indices = [list(p.layer_indices) for p in partitions]
 
         # Send new SliceConfig to each survivor (reinit wires up new prev/next stubs)
-        tied = build_tied_configs(
-            [[all_layers[j] for j in p.layer_indices] for p in partitions],
-            [proxy.address for proxy in self._proxies])
-        init_token = uuid.uuid4().hex
-        for new_i, (proxy, partition) in enumerate(zip(self._proxies, partitions)):
-            is_last  = (new_i == n_alive - 1)
-            partition_layers = [all_layers[j] for j in partition.layer_indices]
-            pred_proto = [
-                worker_service_pb2.PredecessorList(indices=list(p))
-                for p in partition.predecessors
-            ]
-            slice_cfg = worker_service_pb2.SliceConfig(
-                layers            = _build_layer_configs(partition_layers),
-                optimizer         = self._stored_opt_cfg,
-                criterion         = self._stored_crit_cfg if is_last else None,
-                is_last           = is_last,
-                prev_worker       = self._proxies[new_i - 1].address if new_i > 0 else "",
-                next_worker       = self._proxies[new_i + 1].address if new_i < n_alive - 1 else "",
-                coordinator       = self.coordinator_addr,
-                n_micro           = self._n_micro,
-                run_id            = self._run_id,
-                checkpoint_path   = "",
-                worker_index      = new_i,
-                profile_verbosity = cfg.profile.verbosity,
-                profile_memory    = cfg.profile.memory,
-                predecessors      = pred_proto,
-                tied              = tied[new_i],
-                init_token        = init_token,
-            )
-            res = self._init_worker(proxy, slice_cfg, phase="recovery")
-            _LOG.info("recovery reinit complete worker=%s address=%s message=%s", new_i, proxy.address, res.message)
+        self._init_slices(all_layers, partitions, phase="recovery")
 
         # Reset failure state
         self._failed_workers.clear()
@@ -1075,10 +968,97 @@ class DistributedExecutor(BaseExecutor):
 
         # Restart heartbeats
         ft = cfg.fault_tolerance
-        if ft.enabled:
+        if ft.enabled or ft.detect_failures:
             self._start_heartbeats(ft.heartbeat_interval_s, ft.ping_timeout_s)
 
         _LOG.info("recovery complete active_workers=%s", n_alive)
+
+    # ── topology steps (overridden by P2PExecutor) ─────────────────────────────
+
+    def _start_server(self, n: int) -> None:
+        """Start the gRPC server hosting the CoordinatorService."""
+        self._grpc_server = grpc.server(
+            futures.ThreadPoolExecutor(max_workers=max(4, n)), options=_GRPC_OPTS
+        )
+        coordinator_service_pb2_grpc.add_CoordinatorServiceServicer_to_server(
+            _CoordinatorServicer(self), self._grpc_server
+        )
+        self._add_servicers(self._grpc_server)
+        bind_addr = self.coordinator_bind_addr
+        if not bind_addr:
+            port = self.coordinator_addr.split(":")[-1]
+            bind_addr = f"[::]:{port}"
+        self._grpc_server.add_insecure_port(bind_addr)
+        self._grpc_server.start()
+        _LOG.info("gRPC server started bind_addr=%s run_id=%s", bind_addr, self._run_id)
+
+    def _add_servicers(self, server) -> None:
+        """Hook: extra services on the coordinator's gRPC server."""
+
+    def _discover(self, n: int) -> list:
+        """The ``n`` nodes to run on, in slice order (slice i goes to node i)."""
+        cfg = self._run_config
+        tag_filter = cfg.discovery.tag_filter or []
+        filter_str = f" with tags {tag_filter}" if tag_filter else ""
+        _LOG.info(
+            "waiting for workers expected=%s discovery=%s timeout_s=%.1f%s",
+            n,
+            type(self._discovery).__name__,
+            cfg.discovery.timeout,
+            filter_str,
+        )
+        discover_kwargs = {"expected": n, "timeout": cfg.discovery.timeout}
+        if tag_filter:
+            discover_kwargs["tag_filter"] = tag_filter
+        return self._discovery.discover(**discover_kwargs)
+
+    def _make_proxy(self, i: int, node) -> "_WorkerProxy":
+        return _WorkerProxy(name=node.node_id, address=node.address, worker_index=i)
+
+    def _init_slices(self, layers: list, partitions: list, phase: str,
+                     checkpoint_paths: dict | None = None) -> None:
+        """Send each proxy its ``SliceConfig`` (slice i → proxy i) and wait for every ack."""
+        cfg = self._run_config
+        n = len(self._proxies)
+        checkpoint_paths = checkpoint_paths or {}
+        tied = build_tied_configs(
+            [[layers[j] for j in p.layer_indices] for p in partitions],
+            [proxy.address for proxy in self._proxies])
+        init_token = uuid.uuid4().hex
+        for i, (proxy, partition) in enumerate(zip(self._proxies, partitions)):
+            is_last = (i == n - 1)
+            partition_layers = [layers[j] for j in partition.layer_indices]
+            pred_proto = [
+                worker_service_pb2.PredecessorList(indices=list(p))
+                for p in (partition.predecessors or [[] for _ in partition_layers])
+            ]
+            slice_cfg = worker_service_pb2.SliceConfig(
+                layers             = _build_layer_configs(partition_layers),
+                optimizer          = self._stored_opt_cfg,
+                criterion          = self._stored_crit_cfg if is_last else None,
+                is_last            = is_last,
+                prev_worker        = self._proxies[i - 1].address if i > 0 else "",
+                next_worker        = self._proxies[i + 1].address if i < n - 1 else "",
+                coordinator        = self.coordinator_addr,
+                n_micro            = self._n_micro,
+                run_id             = self._run_id,
+                checkpoint_path    = checkpoint_paths.get(i, ""),
+                worker_index       = i,
+                profile_verbosity  = cfg.profile.verbosity,
+                profile_memory     = cfg.profile.memory,
+                predecessors       = pred_proto,
+                tied               = tied[i],
+                init_token         = init_token,
+            )
+            res = self._init_worker(proxy, slice_cfg, phase=phase)
+            _LOG.info(
+                "worker %s complete worker=%s address=%s hostname=%s message=%s",
+                phase,
+                i,
+                proxy.address,
+                res.hostname,
+                res.message,
+            )
 
     # ── internal ───────────────────────────────────────────────────────────────
 
@@ -1240,6 +1220,9 @@ class DistributedExecutor(BaseExecutor):
 
     def _send_input_to_first_worker(self, batch_id: int, tensor: torch.Tensor, aux: dict) -> None:
         """Send the forward input tensor to worker0, using TCP when available and no aux inputs."""
+        if self._proxies[0].local is not None:
+            self._proxies[0].local.submit_input(batch_id, tensor, aux)
+            return
         tcp_client = self._proxies[0]._tensor_client
         if tcp_client is not None and not aux:
             with tracer.span("torchslicer.coordinator.input_send", batch_id=batch_id, transport="tcp"):

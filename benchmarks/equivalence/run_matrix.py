@@ -6,7 +6,6 @@ A full run (no model args) writes results/results_<device>_<opt>.json; see notes
 """
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -100,8 +99,7 @@ def p2p(name, transport):
         driver.wait(TIMEOUT)
     finally:
         _stop([driver, *followers])
-    found = re.findall(r"epoch complete epoch=\d+ avg_loss=([\d.]+)", Path(log).read_text())
-    return [float(v) for v in found] or None
+    return _json_losses(log)
 
 
 MODES = {
@@ -134,8 +132,7 @@ if __name__ == "__main__":
                 got = fn(name)
             except subprocess.TimeoutExpired:
                 got = None
-            # p2p logs avg_loss with 4 decimals
-            v = verdict(ref, got, 1e-4 if mode.startswith("p2p") else 1e-5) if ref else "FAIL (no reference)"
+            v = verdict(ref, got, 1e-5) if ref else "FAIL (no reference)"
             row[mode] = {"losses": got, "verdict": v}
             print(f"{name:9s} {mode:13s} {v:24s} {time.time() - t0:5.1f}s  {got}", flush=True)
         results[name] = row

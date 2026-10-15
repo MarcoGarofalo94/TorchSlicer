@@ -3,6 +3,7 @@
 Drives examples/train/p2p/worker/main.py with the matrix model/data (its
 build_model / get_dataset / get_pack hooks).
 """
+import json
 import sys
 
 import torch
@@ -17,4 +18,6 @@ p2p.build_model = lambda: model
 p2p.get_dataset = lambda *a, **k: M.loader(name)
 p2p.get_pack = lambda: pack
 sys.argv = [sys.argv[0], port]
-p2p.serve()
+history = p2p.serve()
+if history:   # driver
+    print(json.dumps({"losses": [e["loss"] for e in history]}), flush=True)

@@ -301,3 +301,60 @@ and over in-process gRPC workers. Not rerun: CPU AdamW and A100 AdamW. The code 
   measured. Heterogeneous workers need per-worker scaling.
 - `uniform` still ignores `valid_cuts()` (kept to leave existing partitions unchanged), so it
   can fail validation on fine-grained graphs where a cost strategy would succeed.
+
+## Round 3 (M2 "P2P as a reference topology", 2026-10-15, branch `feat/m2-p2p`)
+
+M2 moved P2P from the 694-line example script into the library (`ts.P2PExecutor`, `ts.run_p2p`).
+The driver is a `DistributedExecutor` subclass whose worker 0 is an in-process `WorkerServicer`,
+called directly (no loopback RPC, no serialization of the batch), with an in-process coordinator.
+Everything else (servicer, transports, tied weights, heartbeats, recovery, run logging) is shared
+with the centralized topology. The examples `examples/train/p2p/worker`, `examples/train/lm/worker`
+and `examples/train/lm/lora_worker` now hold only a model, its data and a `ts.run_p2p(...)` call
+(694 / 660 / 729 → 75 / 190 / 263 lines), so the LM examples gained tied-weight support and every
+splitting option (`strategy`, `cuts`, `expand`).
+
+**P2P equivalence is now checked bit-exactly.** The old harness parsed the driver's log, which
+printed the epoch loss with 4 decimals, so P2P cells were compared at 1e-4. `run_p2p.py` now prints
+the full-precision history like `run_central.py`, and every mode uses the same 1e-5 tolerance. On
+the M2 code, DNN, TinyGPT and GPT-2 (tied weights) give max|Δ| = 0 against the unsplit reference
+in `p2p-grpc` and `p2p-tcp` (CPU/SGD, A100 container, logs `benchmarks/equivalence/logs`).
+
+### 9. Heartbeats wiped the workers' profiling stats (correctness of metrics, silent)
+
+- **Symptom:** with `fault_tolerance.enabled`, `worker_epoch` rows (`profile.verbosity ≥ 1`)
+  covered only the batches since the last heartbeat, not the epoch.
+- **Root cause:** the heartbeat and the failure-report check call `get_stats(epoch=-1)` as a
+  liveness probe, and `get_stats` always ends with `profiler.reset_epoch()`.
+- **Fix:** `get_stats` with `epoch < 0` is a pure liveness probe: it returns `fatal_error` and
+  touches nothing. Heartbeats now run in every distributed run (issue 10), so without this
+  fix every run's profiling would have been truncated.
+- **Verified by:** `tests/test_p2p.py::test_liveness_probe_does_not_reset_profiler_stats`
+  (fails on the M1 code: `forward.count` = 0 after one probe, 1 after the fix).
+
+### 10. A dead worker hung the driver/coordinator (robustness; carried from M0)
+
+- **Symptom:** if a worker that is not the last one dies, the driver waits for `batch_done`
+  forever. Reproduced on the M2 code with detection off (equivalent to M1): a 3-node P2P run
+  where follower 1 stops after epoch 1 was still waiting when killed after 30 s. The same holds
+  for the centralized topology unless `fault_tolerance.enabled`. If the *last* worker dies,
+  sending it the labels fails, and the run ended with a raw `grpc.RpcError` after 5 s.
+- **Root cause:** heartbeats, the only way to notice a crashed process, ran only with
+  `fault_tolerance.enabled`, and the P2P example had none at all.
+- **Fix:** new `fault_tolerance.detect_failures` (default true, env `DETECT_FAILURES`):
+  heartbeats always run, and a dead worker raises `WorkerFailureError` (recovery still needs
+  `enabled`). P2P inherits this, and `recover()` re-plans over the survivors. The driver's own
+  slice is never moved to a follower, since that would send raw data off the driver, so a
+  failure on the driver's slice ends the run with a clear error.
+- **Cost:** one tiny `get_stats` RPC per worker every `heartbeat_interval_s` (5 s).
+- **Verified by:** `test_p2p_dead_follower_fails_the_run_instead_of_hanging[0|1]` (≈1 s),
+  `test_centralized_dead_worker_fails_the_run_instead_of_hanging`,
+  `test_p2p_recovers_from_a_dead_follower`, `test_p2p_driver_slice_failure_stops_the_run`.
+
+### Behaviour changes
+
+- Raw inputs stay on the P2P driver: `test_p2p_driver_keeps_raw_inputs` checks that follower 1
+  only ever receives 16-dim activations, never the 8-dim inputs.
+- `P2PExecutor` accepts its peer list with or without its own address, and drops it, because the
+  driver is always worker 0.
+- The run manifest records `executor: p2p` for P2P runs (was `distributed` in the library, `p2p` in
+  the old script).

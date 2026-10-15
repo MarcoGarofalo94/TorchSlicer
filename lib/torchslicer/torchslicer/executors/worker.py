@@ -261,8 +261,8 @@ class _TensorPeerClient:
             self._sock = None
 
 
-def resolve_device() -> str:
-    """Resolve the target device from the DEVICE environment variable.
+def resolve_device(value: str | None = None) -> str:
+    """Resolve the target device from ``value``, else the DEVICE environment variable.
 
     DEVICE=auto  (default) — use ``cuda`` if available, else ``mps`` if
                              available, else ``cpu``
@@ -273,7 +273,7 @@ def resolve_device() -> str:
     DEVICE=cpu             — always use CPU regardless of hardware
     """
     import os
-    val = os.environ.get("DEVICE", "auto").lower().strip()
+    val = (value or os.environ.get("DEVICE", "auto")).lower().strip()
 
     def _mps_available() -> bool:
         return (
@@ -364,6 +364,9 @@ class WorkerServicer(
         self._tensor_server = None
         self._tensor_stop = threading.Event()
         self._tensor_threads: list[threading.Thread] = []
+        # In-process coordinator (P2P driver): called directly instead of over gRPC.
+        # Anything with the CoordinatorService stub methods works.
+        self.local_coordinator = None
 
         self._tied_cond = threading.Condition()
         self._reset_state()
@@ -541,7 +544,9 @@ class WorkerServicer(
                 else:
                     self._prev_stub = worker_service_pb2_grpc.WorkerServiceStub(
                         _channel(self.prev_worker))
-            if self.coordinator:
+            if self.local_coordinator is not None:
+                self._coord_stub = self.local_coordinator
+            elif self.coordinator:
                 self._coord_stub = coordinator_service_pb2_grpc.CoordinatorServiceStub(
                     _channel(self.coordinator))
 
@@ -739,6 +744,14 @@ class WorkerServicer(
 
     def get_stats(self, request, context):
         epoch   = request.epoch
+        if epoch < 0:
+            # liveness probe (heartbeats, failure-report checks): read nothing, reset nothing
+            return worker_service_pb2.WorkerStatsResponse(
+                worker_index = self._worker_index,
+                run_id       = self._run_id,
+                epoch        = epoch,
+                fatal_error  = (self._fatal_error or {}).get("message", ""),
+            )
         summary = self._profiler.epoch_summary(epoch)
         records = self._profiler.batch_records()
         self._profiler.reset_epoch()
@@ -798,6 +811,28 @@ class WorkerServicer(
         generation = self._generation
         self._pool.submit(_tracer.propagate_to_thread(self._backward), request, generation)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
+
+    def submit_input(self, batch_id: int, tensor: torch.Tensor, aux: dict | None = None) -> None:
+        """In-process counterpart of ``forward(ForwardRequest(input=...))`` for the first
+        slice: the P2P driver feeds its own slice without serializing the batch."""
+        generation = self._generation
+
+        def _run():
+            try:
+                self._ensure_generation(generation, "forward", batch_id)
+                self._before_runtime_phase("forward", batch_id)
+                self._profiler.begin_batch(batch_id)
+                self._profiler.mark_idle_end("fwd")
+                self._run_forward_stage(batch_id, tensor.to(self.device), generation,
+                                        aux={k: v.to(self.device) for k, v in (aux or {}).items()})
+            except _StaleWorkError as e:
+                _LOG.info("%s", e)
+            except _PeerUnavailableError as e:
+                _LOG.warning("%s", e)
+            except Exception as e:
+                self._report_fatal_error("forward", batch_id, e)
+
+        self._pool.submit(_tracer.propagate_to_thread(_run))
 
     # ── internal forward ───────────────────────────────────────────────────────
 
@@ -1296,7 +1331,54 @@ class WorkerServicer(
         ]
 
 
-# ── run_worker ─────────────────────────────────────────────────────────────────
+# ── start_worker / run_worker ──────────────────────────────────────────────────
+
+class WorkerHandle:
+    """A worker started in this process by :func:`start_worker`."""
+
+    def __init__(self, servicer, server, address: str):
+        self.servicer = servicer
+        self.server   = server
+        self.address  = address
+
+    def stop(self, grace: float = 0) -> None:
+        self.servicer.stop_tensor_server()
+        self.server.stop(grace)
+
+
+def start_worker(port: int = 0, *, host: str = "[::]", address: str | None = None,
+                 run_config: RunConfig | None = None, servicer_class=None,
+                 grpc_workers: int = 10) -> WorkerHandle:
+    """Start a worker's gRPC (and, with ``transport.tensor: tcp``, TCP tensor) server in
+    this process and return without blocking. It registers with no one: a coordinator
+    or P2P driver must know its address (``StaticDiscovery``). ``run_worker`` is the
+    blocking entry point built on it.
+
+    ``port=0`` picks a free port (gRPC only; TCP needs a fixed ``port + offset``).
+    Handy for local simulations, tests and the tutorials::
+
+        followers = [ts.start_worker(host="127.0.0.1") for _ in range(2)]
+        peers = [w.address for w in followers]
+    """
+    cfg = run_config or RunConfig.load()
+    servicer = (servicer_class or WorkerServicer)()
+    servicer._tensor_transport   = cfg.transport.tensor.strip().lower()
+    servicer._tensor_port_offset = int(cfg.transport.tensor_port_offset)
+    servicer._persistent         = bool(cfg.network.worker_persistent)
+    if port == 0 and servicer._tensor_transport == "tcp":
+        raise ValueError("start_worker(port=0) is gRPC-only: the TCP tensor port is port + offset")
+
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=grpc_workers), options=_GRPC_OPTS)
+    worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(servicer, server)
+    port = server.add_insecure_port(f"{host}:{port}")
+    server.start()
+    servicer.set_server(server)
+    servicer.start_tensor_server(port + servicer._tensor_port_offset)
+    if address is None:
+        address = f"127.0.0.1:{port}" if host in ("127.0.0.1", "localhost") else f"{_HOSTNAME}:{port}"
+    return WorkerHandle(servicer, server, address)
+
+
 
 def run_worker(
     port=None,
@@ -1388,25 +1470,9 @@ def run_worker(
     tags = list(cfg.network.worker_tags)
 
     # ── build servicer + gRPC server ────────────────────────────────────────
-    tensor_transport    = cfg.transport.tensor.strip().lower()
-    tensor_port_offset  = int(cfg.transport.tensor_port_offset)
-
-    if servicer_class is None:
-        servicer_class = WorkerServicer
-    servicer = servicer_class()
-    servicer._tensor_transport = tensor_transport
-    servicer._tensor_port_offset = tensor_port_offset
-    servicer._persistent = bool(cfg.network.worker_persistent)
-
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=grpc_workers),
-        options=_GRPC_OPTS,
-    )
-    worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(servicer, server)
-    server.add_insecure_port(f"[::]:{port}")
-    server.start()
-    servicer.set_server(server)
-    servicer.start_tensor_server(port + servicer._tensor_port_offset)
+    handle   = start_worker(port, run_config=cfg, servicer_class=servicer_class,
+                            grpc_workers=grpc_workers)
+    servicer, server = handle.servicer, handle.server
     tag_str = f"  tags=[{', '.join(tags)}]" if tags else ""
     _LOG.info("worker started port=%s hostname=%s device=%s%s", port, _HOSTNAME, resolved_device, tag_str)
 
