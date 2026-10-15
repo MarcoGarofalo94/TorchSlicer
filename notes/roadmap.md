@@ -156,7 +156,7 @@ shown in a Flower-based SplitFed baseline.
 - **M3, run anywhere**: one config gives local / compose / bare metal / k8s (StatefulSet = stable ordered DNS names,
   Job for the coordinator/driver); one deployment guide page per environment.
   Compose and k8s are only rendered and checked for structure in M3 (no Docker/kubectl in this container);
-  running them is deferred to M8.
+  running them is deferred to M9.
 - **M4, SL settings**: roles (the data owner hosts stage 0 so raw data stays local; label owner; U-shaped); `CutHook`
   (compression, quantization, noise, attack observers); built-in bytes-per-cut / client-compute / simulated-link metrics;
   multi-client sessions (sequential/parallel) with a client-weight handoff hook, no averaging in the core.
@@ -193,11 +193,71 @@ shown in a Flower-based SplitFed baseline.
   - **Shape:** a local-topology option (e.g. `pipeline.offload: none|cpu|disk`); later, the same mechanism lets a
     distributed worker hold more than its GPU fits (link to M4: a memory-poor data owner can still host slice 0).
 - **M6, NAT-friendly transport**: the gradient comes back in the reply (clients need only outbound connections); optional relay.
-- **M7, baselines + paper**: `baselines/` template (config, seeds, expected numbers, CI smoke test, mean ± std over ≥3 seeds);
+- **M7, security: encrypted, authenticated transport** (added 2026-10-15, owner request; closes M6's open
+  security items). Today every channel is plaintext and unauthenticated: gRPC (`insecure_channel`), raw TCP tensors,
+  tunnels and the relay. Anyone who can reach a node can call any RPC, and `init` deserializes the slice, cut hooks
+  and optimizer/criterion params with `torch.load(weights_only=False)` (`executors/worker.py`), so **one
+  unauthenticated `init` call is remote code execution** on a worker. The relay trusts every HELLO, so a node can
+  claim another node's address and receive its calls, and it dials any target address directly (an open proxy).
+  - **Step 1, threat model first (before any code)**, in `notes/security.md`.
+    - **Assets:** raw data, labels, cut tensors, weights, the worker hosts themselves.
+    - **Attackers:** a network observer; an outsider who can reach a port; a malicious relay; a malicious or
+      curious participant node.
+    - **What this milestone defends:** confidentiality, integrity and authentication of the transport, and
+      authorization of RPCs.
+    - **What it doesn't:** what a curious *participant* learns from cut tensors is SL privacy (noise, attacks,
+      defences). That is M8 baselines, not transport security. Say so explicitly.
+    - **Survey:** how comparable systems handle this (gRPC TLS/mTLS, Flower's SSL + node authentication, PyTorch
+      RPC/TensorPipe, Ray TLS), with links. Literature rules apply.
+  - **TLS everywhere, one config:** a `security:` section (`tls: true`, `ca`, `cert`, `key`; env vars).
+    - Covers every gRPC server and channel: worker, coordinator, tail slice, relay, tunnels, registration.
+    - The raw TCP tensor transport gets `ssl`-wrapped sockets.
+    - The `Router` is the one place channels are made, so most of this lands there and in the servers'
+      `add_insecure_port`.
+    - `python -m torchslicer certs` makes a dev CA and per-node certs, so tests and `ROLE=all` stay one command.
+  - **Authentication: mTLS node identity.** The certificate CN/SAN is the node's address/name.
+    - The coordinator only accepts registrations, and workers only accept `init`/`shutdown`, from identities
+      the run trusts.
+    - The relay only routes an address to the tunnel whose certificate owns it (fixes the HELLO spoofing), and
+      only forwards to known identities (no open proxy).
+    - Lighter option for experiments: a shared per-run token (HMAC over call metadata), clearly documented as
+      weaker.
+  - **Authorization per RPC:** a small role table.
+    - `init`, `shutdown`, `save_checkpoint` and `get_stats` come from the coordinator/driver.
+    - `forward` and `backward` come from the neighbours named in the slice config.
+    - `tied_*` comes from the tied peers.
+    - Everything else is rejected with `PERMISSION_DENIED`.
+  - **Safe deserialization:** stop running arbitrary pickles from the network.
+    - Option A: `weights_only=True` plus an allow-list of module classes (`torch.serialization.add_safe_globals`).
+    - Option B: architecture by name/import path plus state dicts.
+    - Hooks and optimizer params become plain data plus a registry name.
+    - Keep `weights_only=False` only behind an explicit `security.trust_pickles` for trusted clusters. Measure
+      what breaks (HF/peft modules, `pack=` stages) before choosing.
+  - **Optional end-to-end encryption through the relay.** TLS is hop by hop, so the relay sees plaintext.
+    Optionally encrypt tunnel frame payloads per node pair (AEAD, keys bound to the mTLS identities), so the relay
+    only routes ciphertext. This is an optional extra (`cryptography`), never mandatory.
+  - **Constraints:**
+    - All of it is optional and off by default. Today's plaintext mode keeps working for local experiments.
+    - No new mandatory dependency: gRPC and `ssl` are built in.
+    - A misconfiguration fails at start with a clear message, never silently in plaintext.
+  - **Correctness and tests:**
+    - TLS/mTLS runs match plaintext losses and bytes exactly. Add equivalence matrix modes `p2p-tls`,
+      `p2p-relay-tls`.
+    - Negative tests:
+      - a wrong or absent cert is rejected;
+      - `init` from a non-coordinator gets `PERMISSION_DENIED`;
+      - `forward` from a non-neighbour is rejected;
+      - a spoofed HELLO at the relay is refused;
+      - a malicious pickle in `SliceConfig` is not executed in safe mode.
+  - **Cost:** TLS/mTLS/e2e overhead vs plaintext with `benchmarks/nat/`-style runs (mean ± std over 3), and the
+    handshake/start-up cost.
+  - **Shape:** TLS covers the M9 real-environment runs. Two nodes on a real network with mTLS is the first
+    real-network check of this milestone.
+- **M8, baselines + paper**: `baselines/` template (config, seeds, expected numbers, CI smoke test, mean ± std over ≥3 seeds);
   seed it with vanilla SplitNN, U-shaped, SplitFed-via-Flower, and one compression/attack paper; framework paper vs SplitBud/SLPerf.
-- **M8, deployment validation on a real environment** (deferred from M3 on 2026-10-15, owner decision): this container
+- **M9, deployment validation on a real environment** (deferred from M3 on 2026-10-15, owner decision): this container
   has no Docker or kubectl, so it runs in a fresh clone on a machine that has them, whenever one is available (it does
-  not have to wait for M7). Rebuild the image (`make build-cpu`/`build-gpu`), then for both topologies run
+  not have to wait for M8). Rebuild the image (`make build-cpu`/`build-gpu`), then for both topologies run
   `launch --target compose` and `--target k8s` (kind/minikube is enough) on `examples/run_anywhere/` and check that
   the losses equal the `processes` target's; also run the bare-metal scripts across at least two real hosts. Record
   every bug in `notes/validation.md` as usual.
@@ -210,8 +270,10 @@ Last updated 2026-10-15, M6 done (version 0.8.0).
     All milestone branches are pushed to `origin` (2026-10-15); `main` is unchanged.
   - M5 is on `feat/m5-offload`: implemented, with benchmarks deferred (see its Status entry).
   - M6 is on `feat/m6-nat` (done, not pushed).
-  - **Next: M7 (baselines + paper).** Create it with
-    `git switch -c feat/m7-baselines feat/m6-nat`.
+  - **Next: M7 (security: encrypted, authenticated transport).** Create it with
+    `git switch -c feat/m7-security feat/m6-nat`. Start with the threat model and survey
+    (`notes/security.md`), as M5 started with its survey. M8 is baselines + paper, and M9 is
+    deployment validation on a real environment (both renumbered on 2026-10-15).
 - **Read first:**
   - this file;
   - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–7);
@@ -276,8 +338,8 @@ Last updated 2026-10-15, M6 done (version 0.8.0).
     tunnel (+10 ms/batch in the benchmark).
   - **No STUN/ICE hole punching.** NAT'd peers always go through the relay.
   - **No TLS or authentication** on tunnels or the relay. Any node can announce any address to a
-    relay, so this is needed before untrusted deployments.
-  - **Never run across a real NAT or WAN.** This belongs with M8.
+    relay, so this is needed before untrusted deployments. This is M7's scope.
+  - **Never run across a real NAT or WAN.** This belongs with M9.
   - **A NAT'd worker's `init` waits up to 30 s** for each peer tunnel, so the "two adjacent NAT'd
     workers" error takes 30 s to appear.
 - **Carried (not done in M4):**
@@ -293,10 +355,10 @@ Last updated 2026-10-15, M6 done (version 0.8.0).
   - **Sessions and fault tolerance.** Sessions refuse `fault_tolerance.enabled`, because recovery
     would not restore every client's state. A data-owner slice failure stops the run, by design.
   - **Attack metrics.** Only an observer hook (`Recorder`) and a doc example exist. A real attack
-    (e.g. label inference from gradients, or model inversion) and a defence baseline belong to M7
+    (e.g. label inference from gradients, or model inversion) and a defence baseline belong to M8
     (baselines: "one compression/attack paper").
   - **Earlier milestones, still open:**
-    - compose/k8s never run, and multi-host bare metal is untested (M8);
+    - compose/k8s never run, and multi-host bare metal is untested (M9);
     - the M0–M2 entry points and the hand-written root compose files are unchanged;
     - k8s discovery is always static;
     - the matrix is a script, not a CI integration test;

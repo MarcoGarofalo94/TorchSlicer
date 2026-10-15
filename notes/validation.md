@@ -870,9 +870,10 @@ batch = mean of epochs 2–3. Mean ± std over 3 runs; losses are identical in e
 - **No hole punching (STUN/ICE).** Two NAT'd peers always go through the relay.
 - **No TLS or authentication.** That covers tunnels and the relay, as for every channel. Any node
   can announce any address to a relay, which on an untrusted network lets it intercept that
-  address's calls. Needs auth before real deployments.
+  address's calls. Needs auth before real deployments. This is milestone M7 (security).
 - **No real NAT tested.** Everything ran on loopback, where "behind NAT" means "listens on
-  nothing". A run across a real NAT (and a WAN relay) belongs with M8.
+  nothing". A run across a real NAT (and a WAN relay) belongs with M9 (real-environment
+  validation; renumbered when security became M7).
 - **The keepalive interval (20 s) is not measured** against real NAT timeouts.
 - **Router stats are approximate.** `stats` counters are incremented without a lock; they are
   diagnostics only.
