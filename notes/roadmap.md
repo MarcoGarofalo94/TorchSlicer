@@ -50,6 +50,18 @@ shown in a Flower-based SplitFed baseline.
 - **M2, P2P as a reference topology**: move it from `examples/train/p2p/worker/main.py` into the library, sharing the servicer
   and transport with centralized. Keep it basic, and document the extension points (discovery, plan agreement, scheduling,
   failure handling) with one worked example that replaces one of them.
+  - **Self-registration with capabilities + capability-aware planning** (added 2026-10-15, owner request), shared by
+    centralized and P2P. M4 roles and recovery build on it:
+    1. *Capability report:* extend `NodeInfo` from declared fields (device, free memory, tags) to measured ones:
+       compute speed (short micro-benchmark), bandwidth/RTT to the coordinator and neighbouring peers, and optional
+       constraints (max memory, "must hold slice 0").
+    2. *Deferred planning:* `ts.slice()` stores graph + strategy; the executor computes partitions *after* discovery and
+       passes the nodes to the strategy (`split(graph, n, nodes=...)`; old strategies ignore `nodes`).
+    3. *Heterogeneous cost strategies:* min-max of `cost / speed_j` over ordered devices (same exact DP), per-device
+       memory caps, and optionally the activation bytes at each cut divided by that link's bandwidth. Recovery re-plans
+       for the survivors with their real capabilities instead of the blind uniform split.
+    - Test: on simulated heterogeneous nodes, the plan follows their speeds and memory caps, and training still
+      matches unsplit. Research link: gap G4 in `notes/gaps.md`.
 - **M3, run anywhere**: one config gives local / compose / bare metal / k8s (StatefulSet = stable ordered DNS names,
   Job for the coordinator/driver); one deployment guide page per environment.
 - **M4, SL settings**: roles (the data owner hosts stage 0 so raw data stays local; label owner; U-shaped); `CutHook`
@@ -96,6 +108,11 @@ Last updated 2026-10-15, at the end of M1 (version 0.3.0; gallery of cases: `exa
   - Partition protocol after M1: `Partition.predecessors` may contain `-1` (a multi-input node reading the
     partition's external input). Any new driver must pass predecessors through unchanged (they're `int32` in the proto).
   - Graph nodes now have `name`, `takes_input` and `scope`. The run manifest records `node_names` and `expand`.
+  - For the capability block: registration already sends `NodeInfo{device, memory_mb, tags}`
+    (`coordinator_service.proto`; `get_available_memory_mb()` in `executors/worker.py`). It is only stored, tag-filtered
+    (`discovery/coordinator.py`) and logged in the manifest, never used for splitting. `worker_index` = registration
+    order, and slice i goes to worker i. The blocker is that `ts.slice()` computes the partitions *before* the executor
+    discovers workers (`setup()`), so planning has to move after discovery.
 - **Open owner decisions** (don't decide these alone): license GPL-3.0 vs Apache-2.0; untracking the stale
   `lib/torchslicer/build/`; when to merge into `main` and push (M0 first, then M1); Zenodo/GitHub integration; rebuilding the Docker image.
 
