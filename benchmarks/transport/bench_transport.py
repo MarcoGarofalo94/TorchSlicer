@@ -1,7 +1,8 @@
-"""TCP vs gRPC tensor transport benchmark on GPU.
+"""Tensor transport benchmark: gRPC / TCP / IPC / NCCL.
 
-Runs the same P2P split training (vanilla setting, 2 slices) with both transports
-and reports ms/batch, GB/s effective throughput, and the speedup.
+Runs the same P2P split training (vanilla setting, 2 slices) with all four
+transports and reports ms/batch, GB/s effective throughput, and the speedup
+over gRPC.
 
 Usage:
     .venv/bin/python benchmarks/transport/bench_transport.py [model ...]
@@ -12,6 +13,12 @@ Models tested (increasing activation size):
   - medium: CNN            ~  1.6 MB/cut
   - large:  wide MLP       ~  8 MB/cut
   - xlarge: Transformer    ~ 16 MB/cut
+
+Transport modes:
+  grpc  — gRPC serialisation (default; works cross-machine)
+  tcp   — raw TCP + pinned-memory async D2H (same-machine fast path)
+  ipc   — CUDA IPC zero-copy (same GPU process group; same-machine only)
+  nccl  — NCCL P2P isend/irecv (GPU-to-GPU; requires compatible CUDA)
 """
 import socket
 import statistics
@@ -174,9 +181,27 @@ def _run_once(model_fn, transport: str) -> dict:
             "bytes_mb": bytes_fwd / 1e6, "total_s": total_s}
 
 
-def bench(model_name: str, model_fn) -> dict:
+ALL_TRANSPORTS = ("grpc", "tcp", "ipc", "nccl")
+
+
+def _supported_transports() -> list[str]:
+    """Filter out transports that can't run in the current environment."""
+    supported = ["grpc", "tcp"]
+    if torch.cuda.is_available():
+        supported.append("ipc")
+        try:
+            import torch.distributed as dist  # noqa: F401
+            supported.append("nccl")
+        except ImportError:
+            pass
+    return supported
+
+
+def bench(model_name: str, model_fn, transports=None) -> dict:
+    if transports is None:
+        transports = _supported_transports()
     results = {}
-    for transport in ("grpc", "tcp"):
+    for transport in transports:
         runs = []
         for r in range(REPEATS):
             try:
@@ -197,37 +222,53 @@ def bench(model_name: str, model_fn) -> dict:
 
 def print_results(model_name: str, r: dict):
     g = r.get("grpc", {})
-    t = r.get("tcp",  {})
-    if not g or not t:
-        print(f"  {model_name}: missing results"); return
-    speedup = g["mean_ms"] / t["mean_ms"] if t["mean_ms"] > 0 else 0
+    if not g:
+        print(f"  {model_name}: missing gRPC baseline"); return
     print(f"\n{'─'*60}")
     print(f"  {model_name}  ({g['bytes_mb']:.1f} MB/cut, {DEVICE})")
-    print(f"  gRPC:  {g['mean_ms']:7.2f} ± {g['std_ms']:5.2f} ms/batch  "
-          f"({g['mean_gbps']:.2f} GB/s effective)")
-    print(f"  TCP:   {t['mean_ms']:7.2f} ± {t['std_ms']:5.2f} ms/batch  "
-          f"({t['mean_gbps']:.2f} GB/s effective)")
-    print(f"  TCP speedup: {speedup:.2f}×")
+    for label, key in [("gRPC", "grpc"), ("TCP ", "tcp"), ("IPC ", "ipc"), ("NCCL", "nccl")]:
+        t = r.get(key)
+        if not t:
+            continue
+        speedup = g["mean_ms"] / t["mean_ms"] if t["mean_ms"] > 0 else 0
+        suffix = f"  {speedup:.2f}× over gRPC" if key != "grpc" else ""
+        print(f"  {label}: {t['mean_ms']:7.2f} ± {t['std_ms']:5.2f} ms/batch  "
+              f"({t['mean_gbps']:.2f} GB/s effective){suffix}")
 
 
 if __name__ == "__main__":
-    models = sys.argv[1:] or list(MODELS.keys())
+    args = sys.argv[1:]
+    # Optional --transports flag: --transports grpc,tcp,ipc,nccl
+    transports = None
+    if "--transports" in args:
+        idx = args.index("--transports")
+        transports = args[idx + 1].split(",")
+        args = args[:idx] + args[idx + 2:]
+    if transports is None:
+        transports = _supported_transports()
+
+    models = args or list(MODELS.keys())
     print(f"Transport benchmark  device={DEVICE}  repeats={REPEATS}  "
-          f"warm-up=1 epoch  measured={EPOCHS-1} epochs")
+          f"warm-up=1 epoch  measured={EPOCHS-1} epochs  "
+          f"transports={','.join(transports)}")
     all_results = {}
     for name in models:
         if name not in MODELS:
             print(f"unknown model '{name}', choices: {list(MODELS.keys())}"); continue
         print(f"\n[{name}] running...", flush=True)
-        res = bench(name, MODELS[name])
+        res = bench(name, MODELS[name], transports=transports)
         all_results[name] = res
         print_results(name, res)
 
     print(f"\n{'═'*60}")
-    print("Summary  (TCP speedup over gRPC):")
+    print("Summary  (speedup over gRPC):")
     for name, r in all_results.items():
-        g = r.get("grpc", {}); t = r.get("tcp", {})
-        if g and t:
-            print(f"  {name:8s}  {r['grpc']['bytes_mb']:.1f} MB/cut  "
-                  f"{g['mean_ms']:.1f}ms → {t['mean_ms']:.1f}ms  "
-                  f"({g['mean_ms']/t['mean_ms']:.2f}×)")
+        g = r.get("grpc", {})
+        if not g:
+            continue
+        parts = [f"{name:8s}  {g['bytes_mb']:.1f} MB/cut  gRPC {g['mean_ms']:.1f}ms"]
+        for key in ("tcp", "ipc", "nccl"):
+            t = r.get(key)
+            if t:
+                parts.append(f"{key.upper()} {t['mean_ms']:.1f}ms ({g['mean_ms']/t['mean_ms']:.2f}×)")
+        print("  " + "  ".join(parts))

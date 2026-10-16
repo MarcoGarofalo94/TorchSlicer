@@ -117,8 +117,16 @@ class TransportConfig:
     docs/tutorials/nat.md).
 
     Fields:
-        tensor:             "grpc" | "tcp" (raw TCP for activations and gradients
-                            between directly reachable nodes)  (env: TENSOR_TRANSPORT)
+        tensor:             "grpc" | "tcp" | "ipc" | "nccl"
+                            "grpc": all tensors via gRPC (default, works everywhere)
+                            "tcp": raw TCP for activations/gradients between directly
+                              reachable nodes; falls back to gRPC through tunnels
+                            "ipc": CUDA IPC zero-copy for same-node GPU tensors; falls
+                              back to TCP/gRPC for cross-machine or CPU tensors
+                            "nccl": NCCL P2P (isend/irecv) via a ProcessGroup; best
+                              for GPU-to-GPU; requires all workers on compatible CUDA;
+                              incompatible with cut_hooks (plain tensors only)
+                            (env: TENSOR_TRANSPORT)
         tensor_port_offset: TCP listener port = gRPC port + this  (env: TENSOR_PORT_OFFSET)
         nat:                this node is behind NAT: it opens no port and only dials
                             out. It opens a tunnel to every node that sends to it, and
@@ -134,7 +142,7 @@ class TransportConfig:
         tunnel_keepalive_s: a node pings its idle tunnels this often, so NAT mappings
                             stay open (env: TUNNEL_KEEPALIVE)
     """
-    tensor:             str   = "grpc"   # "grpc" | "tcp"
+    tensor:             str   = "grpc"   # "grpc" | "tcp" | "ipc" | "nccl"
     tensor_port_offset: int   = 1
     nat:                bool  = False
     relay:              str   = ""

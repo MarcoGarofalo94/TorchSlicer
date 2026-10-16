@@ -440,6 +440,11 @@ class DistributedExecutor(BaseExecutor):
         # Start embedded coordinator gRPC server FIRST so the Register endpoint
         # is available before discover() blocks waiting for registrations.
         self._start_server(n)
+
+        # NCCL mode: start a TCPStore master here so all workers can rendezvous.
+        if cfg.transport.tensor == "nccl":
+            self._start_nccl_store(n)
+
         self._nodes = self._discover(n)
         _LOG.info("workers ready count=%s addresses=%s", n, [nd.address for nd in self._nodes])
 
@@ -1172,6 +1177,25 @@ class DistributedExecutor(BaseExecutor):
             self._tail._tensor_stop.clear()
             self._tail.start_tensor_server(port + offset)
             _LOG.info("u_shaped tail slice served address=%s", self._tail_address())
+
+    def _start_nccl_store(self, world_size: int) -> None:
+        """Start the TCPStore master that all workers rendezvous on for NCCL init."""
+        try:
+            import torch.distributed as dist
+            import datetime
+            nccl_port = self._bind_port() + 10  # _NCCL_STORE_PORT_OFFSET
+            self._nccl_store = dist.TCPStore(
+                host_name=self._bind_host(),
+                port=nccl_port,
+                world_size=world_size,
+                is_master=True,
+                timeout=datetime.timedelta(seconds=60),
+                wait_for_workers=False,
+            )
+            _LOG.info("NCCL TCPStore master started port=%s world_size=%s", nccl_port, world_size)
+        except Exception as exc:
+            _LOG.warning("NCCL TCPStore master start failed: %s", exc)
+            self._nccl_store = None
 
     def _add_servicers(self, server) -> None:
         """Hook: extra services on the coordinator's gRPC server. The data owner's slice 0

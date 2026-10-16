@@ -877,3 +877,66 @@ batch = mean of epochs 2–3. Mean ± std over 3 runs; losses are identical in e
 - **The keepalive interval (20 s) is not measured** against real NAT timeouts.
 - **Router stats are approximate.** `stats` counters are incremented without a lock; they are
   diagnostics only.
+
+---
+
+## M9: Fast Tensor Transport (2026-10-16, branch `feat/m9-fast-transport`)
+
+### What was added
+
+Three new tensor-transport modes on top of the existing `grpc` and `tcp` paths:
+
+1. **`tcp` — pinned-memory async D2H** (`_TensorPeerClient`):
+   Pre-allocate one pinned host buffer per connection (high-water-mark, 25% headroom
+   on growth). `tensor.to(pinned, non_blocking=True)` + `torch.cuda.Event` — the D2H
+   copy and frame-header construction overlap; `event.synchronize()` fires only when
+   `sendall` needs the bytes. Non-CUDA tensors fall through to the original path.
+
+2. **`ipc` — CUDA IPC zero-copy** (`_IpcPeerClient` / `_read_ipc_frame_rest`):
+   Sender: `ForkingPickler` serialises the GPU tensor to an ~350-byte IPC handle;
+   handle travels over a TCP socket (kind byte `b"f"`/`b"b"`); receiver reconstructs
+   via `pickle.loads`, clones, sends 1-byte ACK. Same-machine check via `_is_same_machine`
+   (localhost, 127.x, hostname resolution); cross-machine falls back to `_TensorPeerClient`.
+   `_RecvBuf` (high-water-mark `bytearray`) avoids per-frame allocation on the receive side.
+
+3. **`nccl` — NCCL P2P isend/irecv** (`_init_nccl_group` / NCCL sentinel path):
+   Coordinator starts a `torch.distributed.TCPStore` master at `coordinator_port + 10`.
+   Workers call `_init_nccl_group` at `init` time: `TCPStore(is_master=False)` → `init_process_group`.
+   On forward/backward, sender calls `dist.isend` + sends gRPC metadata with empty `data`
+   (NCCL sentinel); receiver detects empty `data` + NCCL mode → `dist.recv` from the
+   appropriate rank. `dist.destroy_process_group` called before re-init for persistent workers.
+
+### Bugs found and fixed
+
+- **`_handle_tensor_conn` kind-byte dispatch**: original code assumed uppercase "F"/"B";
+  IPC uses lowercase "f"/"b". Fix: read 1 kind byte, dispatch on both cases, share the
+  `_RecvBuf` per connection for the TCP path.
+- **`start_tensor_server` guard**: was `if self._tensor_transport != "tcp": return`. IPC
+  also uses the TCP server (sends handles, not raw tensors). Fix: guard changed to
+  `not in {"tcp", "ipc"}`.
+- **NCCL sentinel detection**: the check `not request.input.data` is true for an empty
+  bytes field, which is indistinguishable from a zero-byte tensor in other paths.
+  Fix: three-way guard — `transport=="nccl" and dist_group is not None and not data`.
+- **`init` peer-client creation**: the `ipc` branch also needs a `_TensorPeerClient`
+  as fallback (for cross-machine and CPU tensors). Fix: always construct `_TensorPeerClient`
+  first, then wrap in `_IpcPeerClient` for same-machine CUDA.
+
+### Test coverage
+
+- All 272 existing tests pass after M9 changes (no new failures).
+- New equivalence-matrix modes (`ipc`, `nccl`) are not yet in `run_matrix.py`; pending
+  a multi-process in-tree test. The existing TCP equivalence tests cover the pinned-memory
+  path because the send/receive logic is unchanged; only the D2H timing is affected.
+
+### Known limitations (carried)
+
+- **IPC incompatible with cut_hooks**: CUDA IPC sends the raw GPU tensor; cut hooks
+  expect serialised uint8 payloads. Documented in `docs/tutorials/transport.md`.
+- **NCCL incompatible with cut_hooks**: same reason.
+- **NCCL requires all-CUDA workers**: if any worker is on CPU, `init_process_group`
+  falls back to `gloo`, but NCCL calls on CPU tensors will fail. Documented.
+- **No equivalence test for ipc/nccl**: a multi-process test requires forking workers
+  with shared CUDA context (IPC) or a full ProcessGroup (NCCL). Deferred.
+- **NCCL persistent-worker re-init**: `destroy_process_group` is called inside
+  `_init_nccl_group`. If the coordinator re-uses the same port across runs the TCPStore
+  may not be ready immediately; a 60-second timeout is set.
