@@ -940,3 +940,13 @@ Three new tensor-transport modes on top of the existing `grpc` and `tcp` paths:
 - **NCCL persistent-worker re-init**: `destroy_process_group` is called inside
   `_init_nccl_group`. If the coordinator re-uses the same port across runs the TCPStore
   may not be ready immediately; a 60-second timeout is set.
+
+### Pinned-memory improvement: no measurable benefit on loopback (2026-10-16)
+
+A direct comparison (TCP_NO_PINNED=1 to force the old sync path) found no statistically
+significant difference between pinned-async and sync-cpu D2H across four model sizes on
+loopback. Differences ranged –6% to +6%, all within run noise. The implementation is kept
+(correct, low overhead, sound for future multi-node use) but the "1.5–2× speedup" claim
+applies to TCP vs gRPC, NOT to pinned vs sync. The roadmap target of 1.5–2× for pinned
+over bare TCP is not met in the loopback benchmark; it remains a hypothesis for
+bandwidth-limited scenarios (slow PCIe, many concurrent slices).

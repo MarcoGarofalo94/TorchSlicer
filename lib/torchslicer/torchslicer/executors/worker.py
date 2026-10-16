@@ -75,6 +75,10 @@ _IPC_REST_HEADER = struct.Struct("!IIH")    # batch_id(4I) handle_len(4I) ctx_le
 # Port offset added to the coordinator's port for the NCCL TCPStore rendezvous.
 _NCCL_STORE_PORT_OFFSET = 10
 
+# Set TCP_NO_PINNED=1 to disable pinned-memory async D2H (falls back to the old
+# synchronous .cpu().contiguous() path — useful for benchmarking the improvement).
+_TCP_NO_PINNED = os.environ.get("TCP_NO_PINNED", "0") == "1"
+
 
 class _StaleWorkError(RuntimeError):
     """Raised when queued/in-flight work belongs to a superseded worker config."""
@@ -268,7 +272,7 @@ class _TensorPeerClient:
         return self._pinned[:nbytes]
 
     def send_tensor(self, kind: bytes, batch_id: int, tensor: torch.Tensor) -> None:
-        if torch.cuda.is_available() and tensor.is_cuda:
+        if torch.cuda.is_available() and tensor.is_cuda and not _TCP_NO_PINNED:
             self._send_pinned(kind, batch_id, tensor)
         else:
             self._send_cpu(kind, batch_id, tensor)
