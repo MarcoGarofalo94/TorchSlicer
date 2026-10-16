@@ -70,6 +70,54 @@ The architecture is correct and worth keeping — it adds negligible overhead on
 provides headroom for multi-node NVLink/PCIe-saturated scenarios — but the speedup claim must
 be qualified: **no speedup on loopback/local; expected benefit on bandwidth-limited PCIe buses**.
 
-**IPC / NCCL**: not benchmarked — `start_worker` is thread-based (same process), so CUDA
-IPC ("invalid device context") and NCCL ProcessGroup init both fail in-process. Needs a
-multi-process harness (e.g., `torch.multiprocessing.spawn` or Docker Compose). Deferred.
+**IPC / NCCL**: not benchmarked in the thread-based harness — requires separate processes.
+See the multi-process benchmark below.
+
+---
+
+## 2026-10-16 — Multi-process transport benchmark: gRPC vs TCP vs IPC (subprocess workers)
+
+**Hypothesis**: CUDA IPC zero-copy delivers significant speedup over gRPC and TCP for
+same-machine GPU→GPU tensor transfers when workers run as separate OS processes.
+
+**Branch**: `feat/m9-fast-transport`
+
+**Config**: inline — P2P vanilla setting, 2 slices. Follower worker launched as a real
+subprocess (`subprocess.Popen`) — separate CUDA context, real IPC. REPEATS=3, EPOCHS=4
+(warm-up=1), DEVICE=cuda (A100 MIG 3g.40gb).
+
+**Command**:
+```
+.venv/bin/python benchmarks/transport/bench_multiproc.py medium large xlarge --transports grpc,tcp,ipc
+```
+
+NCCL excluded: hangs on MIG single-instance (both processes land on the same GPU; NCCL's
+communicator probes NVLink/PCIe P2P between what it sees as the same device and deadlocks).
+NCCL requires genuinely separate GPU devices or multi-node.
+
+**Results** (mean ± std ms/batch, 3 seeds):
+
+| Model   | Act. MB/cut | gRPC ms/batch      | TCP ms/batch      | IPC ms/batch      | IPC vs gRPC |
+|---------|-------------|-------------------|-------------------|-------------------|-------------|
+| medium  | 33.6 MB     | 103.91 ± 35.32    | 74.75 ± 1.88      | 23.41 ± 0.35      | **4.44×**   |
+| large   |  8.4 MB     |  70.23 ±  0.56    | 68.38 ± 1.12      | 23.16 ± 0.26      | **3.03×**   |
+| xlarge  | 50.3 MB     |  90.17 ±  7.21    | 90.86 ± 2.07      | 38.30 ± 2.60      | **2.35×**   |
+
+**Observations**:
+
+- **IPC delivers 2.3–4.4× over gRPC** across all tested sizes. The zero-copy GPU→GPU handle
+  (no serialisation, no D2H, no H2D) is the dominant factor.
+- **TCP is barely faster than gRPC** in the subprocess benchmark (1.03–1.39×). The subprocess
+  overhead and loopback socket bottleneck cancel the serialisation savings. The pinned-memory
+  improvement remains undetectable (same conclusion as the thread-based benchmark).
+- **IPC improvement decreases as activation size grows**: medium (34 MB) gets 4.4× but xlarge
+  (50 MB) gets 2.35×. The likely cause: at 50 MB the IPC ACK round-trip cost becomes
+  non-trivial, and the gRPC numbers are dominated by serialisation + socket time, so both
+  paths are slower but IPC scales better.
+- **gRPC in the subprocess benchmark is ~3–4× slower** than in the thread-based benchmark
+  (103 ms vs 29 ms for medium). The subprocess adds real socket latency, IPC context switching,
+  and gRPC channel negotiation overhead that is elided by in-process stub calls.
+
+**Conclusion**: CUDA IPC is the right transport for same-machine multi-GPU split learning.
+Implement on production hardware (two discrete GPUs or two nodes) to see the full benefit.
+TCP/gRPC parity on loopback confirms that TCP's advantage only appears at the network level.

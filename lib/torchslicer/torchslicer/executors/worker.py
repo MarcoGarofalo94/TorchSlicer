@@ -634,7 +634,8 @@ class WorkerServicer(
         self._peer_tunnels: set = set()
 
         self._tied_cond = threading.Condition()
-        self._dist_group = None  # torch.distributed ProcessGroup for NCCL transport; None otherwise
+        self._dist_group  = None  # torch.distributed ProcessGroup for NCCL transport; None otherwise
+        self._nccl_future = None  # pending rendezvous Future; waited on before first NCCL transfer
         self._reset_state()
 
         # Single-worker compute pool: serialises forward/backward on this worker
@@ -931,8 +932,20 @@ class WorkerServicer(
                 ok=False, message=str(e), hostname=_HOSTNAME)
 
     def _init_nccl_group(self, coordinator: str, rank: int, world_size: int) -> None:
-        """Initialise a torch.distributed ProcessGroup for NCCL tensor transport."""
-        try:
+        """Kick off NCCL ProcessGroup init in a background thread.
+
+        init_process_group blocks until all world_size ranks have joined.
+        Calling it synchronously inside init() deadlocks when the coordinator
+        sends SliceConfigs sequentially: rank 0's init() would wait for rank 1
+        to join, but rank 1 hasn't received its SliceConfig yet.
+
+        Instead we launch the rendezvous in a thread and store a Future;
+        _wait_nccl() is called before the first NCCL send/recv.
+        """
+        self._nccl_future: futures.Future | None = None
+        executor = futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="nccl-init")
+
+        def _rendezvous():
             import torch.distributed as dist
             coord_host, coord_port_str = coordinator.rsplit(":", 1)
             nccl_port = int(coord_port_str) + _NCCL_STORE_PORT_OFFSET
@@ -952,11 +965,26 @@ class WorkerServicer(
                 rank=rank,
                 world_size=world_size,
             )
-            self._dist_group = dist.group.WORLD
-            _LOG.info("NCCL group initialised rank=%s world=%s backend=%s", rank, world_size, backend)
+            return dist.group.WORLD
+
+        self._nccl_future = executor.submit(_rendezvous)
+        executor.shutdown(wait=False)
+        _LOG.info("NCCL rendezvous started rank=%s world=%s (background)", rank, world_size)
+
+    def _wait_nccl(self) -> bool:
+        """Block until the background NCCL rendezvous completes; return True on success."""
+        if self._nccl_future is None:
+            return False
+        try:
+            self._dist_group = self._nccl_future.result(timeout=120)
+            self._nccl_future = None
+            _LOG.info("NCCL group ready device=%s", self.device)
+            return True
         except Exception as exc:
             _LOG.warning("NCCL init failed: %s — falling back to gRPC", exc)
             self._dist_group = None
+            self._nccl_future = None
+            return False
 
     # ── shutdown ───────────────────────────────────────────────────────────────
 
@@ -1357,6 +1385,8 @@ class WorkerServicer(
                 return
 
             # NCCL path: shape/dtype arrive via gRPC (empty data = sentinel); tensor via dist.recv.
+            if self._tensor_transport == "nccl" and self._nccl_future is not None:
+                self._wait_nccl()
             if (self._tensor_transport == "nccl" and self._dist_group is not None
                     and not request.input.data):
                 import torch.distributed as dist
@@ -1474,6 +1504,9 @@ class WorkerServicer(
         out = self._encode_out(batch_id, out)
         try:
             # NCCL path: send shape/dtype via gRPC (no data), then tensor via dist.isend.
+            if self._tensor_transport == "nccl":
+                if self._nccl_future is not None:
+                    self._wait_nccl()
             if (self._tensor_transport == "nccl" and self._dist_group is not None):
                 import torch.distributed as dist
                 with _tracer.span(
@@ -1530,6 +1563,8 @@ class WorkerServicer(
             self._before_runtime_phase("forward_last", batch_id)
             is_label = bool(request.label.data)
             # NCCL: shape/dtype in input, no data → receive tensor from previous worker.
+            if self._tensor_transport == "nccl" and self._nccl_future is not None:
+                self._wait_nccl()
             is_nccl_input = (
                 not is_label
                 and not bool(request.input.data)
@@ -1632,6 +1667,8 @@ class WorkerServicer(
             self._profiler.mark_idle_end("bwd")
 
             # NCCL path: gradient shape/dtype in message, no data → receive via dist.recv.
+            if self._tensor_transport == "nccl" and self._nccl_future is not None:
+                self._wait_nccl()
             if (self._tensor_transport == "nccl" and self._dist_group is not None
                     and not request.gradient.data):
                 import torch.distributed as dist
@@ -1795,6 +1832,8 @@ class WorkerServicer(
             with self._profiler.phase("send_bwd"):
                 try:
                     # NCCL path: send metadata via gRPC, tensor via dist.isend.
+                    if self._tensor_transport == "nccl" and self._nccl_future is not None:
+                        self._wait_nccl()
                     if (self._tensor_transport == "nccl" and self._dist_group is not None):
                         import torch.distributed as dist
                         with _tracer.span(

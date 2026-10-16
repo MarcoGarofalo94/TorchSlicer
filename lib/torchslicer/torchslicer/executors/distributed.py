@@ -1183,16 +1183,20 @@ class DistributedExecutor(BaseExecutor):
         try:
             import torch.distributed as dist
             import datetime
+            # TCPStore host_name must be a resolvable hostname, NOT a bind wildcard.
+            # Use the advertised coordinator address so workers can reach it.
+            coord_host = self.coordinator_addr.rsplit(":", 1)[0]
             nccl_port = self._bind_port() + 10  # _NCCL_STORE_PORT_OFFSET
             self._nccl_store = dist.TCPStore(
-                host_name=self._bind_host(),
+                host_name=coord_host,
                 port=nccl_port,
                 world_size=world_size,
                 is_master=True,
                 timeout=datetime.timedelta(seconds=60),
                 wait_for_workers=False,
             )
-            _LOG.info("NCCL TCPStore master started port=%s world_size=%s", nccl_port, world_size)
+            _LOG.info("NCCL TCPStore master started host=%s port=%s world_size=%s",
+                      coord_host, nccl_port, world_size)
         except Exception as exc:
             _LOG.warning("NCCL TCPStore master start failed: %s", exc)
             self._nccl_store = None

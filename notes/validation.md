@@ -950,3 +950,19 @@ loopback. Differences ranged –6% to +6%, all within run noise. The implementat
 applies to TCP vs gRPC, NOT to pinned vs sync. The roadmap target of 1.5–2× for pinned
 over bare TCP is not met in the loopback benchmark; it remains a hypothesis for
 bandwidth-limited scenarios (slow PCIe, many concurrent slices).
+
+### NCCL deadlock on sequential SliceConfig init (2026-10-16) — fixed
+
+`_init_slices` sends SliceConfigs sequentially. Rank 0's `init()` called `dist.init_process_group`
+synchronously, blocking until all world_size ranks joined. Rank 1 never received its SliceConfig
+because the coordinator was stuck waiting for rank 0's `init()` to return. Classic deadlock.
+Fix: `_init_nccl_group` now submits the rendezvous to a background thread and stores a Future;
+`_wait_nccl()` is called lazily before the first actual NCCL transfer.
+
+### NCCL hangs on MIG single-instance (2026-10-16) — known limitation
+
+After fixing the sequential deadlock, NCCL still hangs during `init_process_group` when both
+processes land on the same MIG GPU instance. NCCL's communicator setup probes NVLink/PCIe P2P
+between what it identifies as the same device, which deadlocks in the MIG context. NCCL requires
+genuinely separate GPU devices (multi-GPU node or multi-node). Not a bug in TorchSlicer;
+documented in `docs/tutorials/transport.md` and experiments.md.

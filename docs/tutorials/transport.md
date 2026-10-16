@@ -59,6 +59,9 @@ transport:
 
 **Limitations**:
 - All workers must share compatible CUDA and NCCL installations.
+- Requires genuinely separate GPU devices — two processes on the same MIG instance
+  will hang during communicator setup (NCCL probes NVLink/PCIe P2P between what it
+  sees as the same device).
 - Incompatible with `cut_hooks` (tensors travel raw on NCCL).
 - Persistent workers re-initialise the ProcessGroup on each run; the previous group
   is destroyed first (`dist.destroy_process_group`).
