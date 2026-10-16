@@ -194,8 +194,7 @@ shown in a Flower-based SplitFed baseline.
   - **Shape:** a local-topology option (e.g. `pipeline.offload: none|cpu|disk`); later, the same mechanism lets a
     distributed worker hold more than its GPU fits (link to M4: a memory-poor data owner can still host slice 0).
 - **M6, NAT-friendly transport**: the gradient comes back in the reply (clients need only outbound connections); optional relay.
-- **M7, security: encrypted, authenticated transport** (added 2026-10-15, owner request; closes M6's open
-  security items). Today every channel is plaintext and unauthenticated: gRPC (`insecure_channel`), raw TCP tensors,
+- **M7, security: encrypted, authenticated transport** (added 2026-10-15, owner request; **deferred to before M13**, 2026-10-16 owner decision — research framework on trusted clusters; closes M6's open security items). Today every channel is plaintext and unauthenticated: gRPC (`insecure_channel`), raw TCP tensors,
   tunnels and the relay. Anyone who can reach a node can call any RPC, and `init` deserializes the slice, cut hooks
   and optimizer/criterion params with `torch.load(weights_only=False)` (`executors/worker.py`), so **one
   unauthenticated `init` call is remote code execution** on a worker. The relay trusts every HELLO, so a node can
@@ -394,20 +393,24 @@ shown in a Flower-based SplitFed baseline.
     land, to stake the claim. Check the current calls and deadlines; none are recorded here.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-15, M6 done (version 0.8.0).
+Last updated 2026-10-16, M6 done (version 0.8.0). M7 deferred.
 - **Where things stand:**
   - Done, one branch per milestone: M0 on `feat/m0-foundations`, M1 on `feat/m1-split-anything`,
     M2 on `feat/m2-p2p`, M3 on `feat/m3-run-anywhere`, M4 on `feat/m4-sl-settings`.
     All milestone branches are pushed to `origin` (2026-10-15); `main` is unchanged.
   - M5 is on `feat/m5-offload`: implemented, with benchmarks deferred (see its Status entry).
   - M6 is on `feat/m6-nat` (done, not pushed).
-  - **Next: M7 (security: encrypted, authenticated transport).** Create it with
-    `git switch -c feat/m7-security feat/m6-nat`. Start with the threat model and survey
-    (`notes/security.md`), as M5 started with its survey.
-  - **After M7** (milestones reorganized on 2026-10-15 after an owner review of what an SL standard
-    needs): M8 algorithm API → M9 multi-client engine → M10 data and scale simulation → M11 privacy
-    suite → M12 baselines + Flower interop → M13 real environment and testbed → M14 release
-    readiness → M15 the MLSys paper.
+  - **M7 (security) deferred** (2026-10-16, owner decision): TorchSlicer is a research framework
+    running on trusted clusters; plaintext mode is acceptable for experiments. M7 will be done
+    just before M13 (real environment + testbed), which is the first milestone that requires
+    security on a real network. The `weights_only=False` RCE on worker `init` is a known open
+    risk; document it and accept it until then.
+  - **Next: M8 (algorithm API).** Create it with
+    `git switch -c feat/m8-algorithm-api feat/m6-nat`. Start with the survey
+    (`notes/algorithms.md`) as M5 started with its survey.
+  - **Milestone order** (updated 2026-10-16): M8 algorithm API → M9 multi-client engine →
+    M10 data and scale simulation → M11 privacy suite → M12 baselines + Flower interop →
+    M7 security → M13 real environment and testbed → M14 release readiness → M15 the MLSys paper.
 - **Read first:**
   - this file;
   - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–7);
