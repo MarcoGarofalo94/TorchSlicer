@@ -281,6 +281,7 @@ class SLConfig:
     clients:             int   = 1
     client_mode:         str   = "sequential"
     handoff:             str   = "copy"
+    algorithm:           str   = ""
 
     def __post_init__(self):
         if self.cut_hooks is None:

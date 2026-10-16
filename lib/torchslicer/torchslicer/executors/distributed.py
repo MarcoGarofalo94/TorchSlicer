@@ -409,6 +409,7 @@ class DistributedExecutor(BaseExecutor):
         run_config=None,  # ignored — DistributedExecutor uses constructor-injected RunConfig
         planner=None,
         cut_hooks=None,
+        algorithm=None,
     ) -> None:
         """``planner(nodes) -> partitions`` (from ``SlicedModel``) re-plans the split for
         the discovered nodes, in slice order, once their capabilities are known; it is
@@ -506,6 +507,15 @@ class DistributedExecutor(BaseExecutor):
                 ft.ping_timeout_s,
                 ft.enabled,
             )
+
+        # Algorithm
+        from ..algorithm.base import Algorithm
+        from ..algorithm.builtin import DefaultAlgorithm
+        if algorithm is None and getattr(self._run_config.sl, "algorithm", ""):
+            from ..algorithm.registry import get as _get_algo
+            algorithm = _get_algo(self._run_config.sl.algorithm)
+        self._algorithm = algorithm if algorithm is not None else DefaultAlgorithm()
+        self._algorithm.configure(len(partitions), None, self._placement)
 
         # Notify callbacks that training is about to begin
         for cb in self._callbacks:
@@ -639,6 +649,14 @@ class DistributedExecutor(BaseExecutor):
         if session is not None:
             session.finish(adapter)
         # one get_stats per worker: communication + compute (always), profiling (verbosity)
+        # Algorithm round-end (aggregation)
+        if session is not None and hasattr(self, "_algorithm"):
+            new_states = self._algorithm.on_round_end(list(session.states), {}, epoch)
+            if new_states is not None:
+                session.states = list(new_states)
+            agg_client, _ = self._algorithm.aggregate(list(session.states), [], epoch)
+            if agg_client is not None:
+                session.states = [agg_client] * len(session.states)
         stats = self._epoch_stats(epoch)
         self._add_worker_comm(stats)
         sl_metrics = self._meter.summary(self._placement, self._run_config.sl.link_bandwidth_mbps,

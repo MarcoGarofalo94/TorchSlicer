@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 
@@ -17,6 +18,8 @@ from ..sl.hooks import CutContext, resolve_cut_hooks, payload_nbytes, tensor_nby
 from ..sl.roles import Placement, resolve_setting
 from ..sl.metrics import CommMeter
 from ..sl.clients import ClientSession, SplitLayerClientState
+from ..algorithm.base import Algorithm, AlgorithmContext, BackwardPolicy
+from ..algorithm.builtin import DefaultAlgorithm
 
 _LOG = get_logger("torchslicer.local")
 
@@ -76,6 +79,8 @@ class LocalExecutor(BaseExecutor):
         self._meter: CommMeter = None
         self._link = (0.0, 0.0)
         self._sync = None
+        self._algorithm: Algorithm = DefaultAlgorithm()
+        self._round: int = 0
 
     def setup(
         self,
@@ -90,6 +95,7 @@ class LocalExecutor(BaseExecutor):
         model_name: str = "unknown",
         strategy_name: str = "unknown",
         cut_hooks=None,
+        algorithm: "Algorithm | None" = None,
     ) -> None:
         """``cut_hooks``: ``ts.slice(cut_hooks=)`` (see ``torchslicer.sl.hooks``); the
         config's ``sl`` section adds hooks, the setting and the link model."""
@@ -152,6 +158,13 @@ class LocalExecutor(BaseExecutor):
                                           node_names=model_graph.names(), expand=model_graph.expand)
             self._run_logger.record_split(partitions, layer_names, strategy_name)
 
+        # Algorithm — resolve from registry if a name was given via config
+        if algorithm is None and cfg and getattr(cfg.sl, "algorithm", ""):
+            from ..algorithm.registry import get as _get_algo
+            algorithm = _get_algo(cfg.sl.algorithm)
+        self._algorithm = algorithm if algorithm is not None else DefaultAlgorithm()
+        self._algorithm.configure(len(partitions), self.criterion, self._placement)
+
         # Notify callbacks
         for cb in self._callbacks:
             try:
@@ -164,10 +177,25 @@ class LocalExecutor(BaseExecutor):
 
     def train_epoch(self, data_loader, epoch: int = 0, verbose: bool = False,
                     total_epochs: int = 0) -> dict:
-        total_loss = 0.0
-        n_batches  = 0
-        n_total    = len(data_loader)
-        session    = data_loader if isinstance(data_loader, ClientSession) else None
+        self._round = epoch
+        total_loss  = 0.0
+        n_batches   = 0
+        n_total     = len(data_loader)
+        session     = data_loader if isinstance(data_loader, ClientSession) else None
+
+        # Per-client server state tracking (SplitFed V1)
+        needs_server_states = session is not None and self._algorithm.needs_per_client_server_state()
+        server_adapter = None
+        server_states: dict = {}
+        prev_client_for_server: "int | None" = None
+        initial_server_state = None
+        if needs_server_states:
+            client_set = set(self._placement.client_slices)
+            server_idxs = [i for i in range(len(self.split_layers)) if i not in client_set]
+            if server_idxs:
+                server_adapter = SplitLayerClientState({i: self.split_layers[i] for i in server_idxs})
+                initial_server_state = server_adapter.get_state()
+
         if session is not None:
             clients = self._placement.client_slices
             if not clients:
@@ -190,6 +218,16 @@ class LocalExecutor(BaseExecutor):
 
         with tracer.span("torchslicer.epoch", epoch=epoch) as epoch_span:
             for client, (inputs, labels) in batches:
+                # V1: swap per-client server state on client switch
+                if needs_server_states and server_adapter is not None and client != prev_client_for_server:
+                    if prev_client_for_server is not None:
+                        server_states[prev_client_for_server] = server_adapter.get_state()
+                    if client in server_states:
+                        server_adapter.set_state(server_states[client])
+                    elif initial_server_state is not None:
+                        server_adapter.set_state(copy.deepcopy(initial_server_state))
+                    prev_client_for_server = client
+
                 batch_id = epoch * n_total + n_batches
                 _shape = (str(tuple(inputs.shape)) if isinstance(inputs, torch.Tensor)
                           else "multimodal")
@@ -240,6 +278,9 @@ class LocalExecutor(BaseExecutor):
         avg = total_loss / n_batches if n_batches > 0 else 0.0
         if session is not None:
             session.finish(adapter)
+            # Save last client's server state for V1
+            if needs_server_states and server_adapter is not None and prev_client_for_server is not None:
+                server_states[prev_client_for_server] = server_adapter.get_state()
         if verbose:
             suffix = f"/{total_epochs}" if total_epochs else ""
             _LOG.info("epoch complete epoch=%s%s avg_loss=%.4f", epoch, suffix, avg)
@@ -254,6 +295,23 @@ class LocalExecutor(BaseExecutor):
             **self._meter.summary(self._placement, *self._link),
             **self._epoch_extras(epoch_duration_s),
         }
+
+        # Algorithm round-end: aggregation and per-client state updates
+        if session is not None:
+            new_states = self._algorithm.on_round_end(
+                list(session.states), epoch_metrics, epoch)
+            if new_states is not None:
+                session.states = list(new_states)
+            all_server_states = list(server_states.values()) if server_states else []
+            agg_client, agg_server = self._algorithm.aggregate(
+                list(session.states), all_server_states, epoch)
+            if agg_client is not None:
+                session.states = [agg_client] * len(session.states)
+            if agg_server is not None and server_adapter is not None:
+                server_adapter.set_state(agg_server)
+                for k in list(server_states):
+                    server_states[k] = copy.deepcopy(agg_server)
+
         for cb in self._callbacks:
             try:
                 result = cb.on_epoch_end(epoch, epoch_metrics)
@@ -344,7 +402,14 @@ class LocalExecutor(BaseExecutor):
         aux    = {k: v.to(device) for k, v in aux.items()}
         self._count_io(main, aux, labels)
 
-        # forward
+        ctx    = AlgorithmContext(round=self._round, batch_id=batch_id,
+                                  n_slices=len(self.split_layers))
+        policy = self._algorithm.backward_policy(self._round)
+
+        if policy == BackwardPolicy.LOCAL_LOSS:
+            return self._local_loss_batch(main, aux, labels, batch_id, ctx)
+
+        # ── FULL: standard forward → loss → backward ──────────────────────────
         outputs = []
         x = main
         for i, sl in enumerate(self.split_layers):
@@ -365,7 +430,8 @@ class LocalExecutor(BaseExecutor):
             outputs.append(x)
 
         t0 = self._clock()
-        loss = self.criterion(outputs[-1], labels)
+        custom = self._algorithm.loss(outputs[-1], labels, ctx)
+        loss   = custom if custom is not None else self.criterion(outputs[-1], labels)
 
         # backward — pop MoE aux loss BEFORE backward (same graph, would fail after)
         with tracer.span("torchslicer.partition.backward",
@@ -386,6 +452,62 @@ class LocalExecutor(BaseExecutor):
                     moe = self.split_layers[i].pop_moe_aux_loss()
                     if moe is not None:
                         # retain graph so moe.backward() can reuse the same nodes
+                        outputs[i].backward(gradient=grad, retain_graph=True)
+                        moe.backward()
+                        sl_x = self.split_layers[i].x
+                        grad = sl_x.grad if sl_x is not None else None
+                    else:
+                        grad = self.split_layers[i].backward(prev_g=grad, out=outputs[i])
+                with self._profilers[i].phase("optimizer"):
+                    self.split_layers[i].optimize()
+            self._meter.add_compute(i, self._clock() - t0)
+
+        return loss.item()
+
+    def _local_loss_batch(self, main, aux, labels, batch_id: int,
+                          ctx: AlgorithmContext) -> float:
+        """LOCAL_LOSS: forward + backward on client slices only; no server forward."""
+        cut_idx = self._algorithm.client_cut()
+        if cut_idx is None:
+            client_slices = sorted(self._placement.client_slices)
+            cut_idx = client_slices[-1] if client_slices else 0
+
+        outputs = []
+        x = main
+        for i in range(cut_idx + 1):
+            if i > 0:
+                x = self._cut_forward(i - 1, x, batch_id)
+            with tracer.span("torchslicer.partition.forward", partition=i,
+                             batch_id=batch_id, input_shape=str(tuple(x.shape))):
+                t0 = self._clock()
+                with self._profilers[i].phase("forward"):
+                    x = self.split_layers[i](x, **aux) if (i == 0 and aux) else self.split_layers[i](x)
+                self._meter.add_compute(i, self._clock() - t0)
+            outputs.append(x)
+
+        loss = self._algorithm.client_loss(outputs[-1], labels, ctx)
+
+        # Backward through client slices: the cut slice is NOT is_last, so we
+        # call loss.backward() directly and read x.grad from the cut slice.
+        t0 = self._clock()
+        with tracer.span("torchslicer.partition.backward", partition=cut_idx, batch_id=batch_id):
+            with self._profilers[cut_idx].phase("backward"):
+                moe = self.split_layers[cut_idx].pop_moe_aux_loss()
+                total = loss + moe if moe is not None else loss
+                total.backward()
+                grad = self.split_layers[cut_idx].x.grad if self.split_layers[cut_idx].x is not None else None
+            with self._profilers[cut_idx].phase("optimizer"):
+                self.split_layers[cut_idx].optimize()
+        self._algorithm.step_aux(ctx)
+        self._meter.add_compute(cut_idx, self._clock() - t0)
+
+        for i in range(cut_idx - 1, -1, -1):
+            grad = self._cut_backward(i, grad, outputs[i], batch_id)
+            t0 = self._clock()
+            with tracer.span("torchslicer.partition.backward", partition=i, batch_id=batch_id):
+                with self._profilers[i].phase("backward"):
+                    moe = self.split_layers[i].pop_moe_aux_loss()
+                    if moe is not None:
                         outputs[i].backward(gradient=grad, retain_graph=True)
                         moe.backward()
                         sl_x = self.split_layers[i].x

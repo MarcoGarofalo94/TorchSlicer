@@ -45,6 +45,13 @@ from .sl import (
     CutHook, CutContext, Float16, BFloat16, Quantize, TopK, GaussianNoise, Recorder, Chain,
     register_hook, ClientSession, Placement,
 )
+from . import algorithm as _algorithm_module  # noqa: ensure builtin registrations run
+from .algorithm import (
+    Algorithm, BackwardPolicy, AlgorithmContext,
+    register_algorithm, get_algorithm, available_algorithms,
+    DefaultAlgorithm, SplitFedAlgorithm, SplitFedV1Algorithm, LocalLossAlgorithm,
+    fedavg,
+)
 
 
 def peft_unwrap(model) -> "nn.Module":
@@ -157,6 +164,7 @@ class SlicedModel:
         n_micro_batches: int = None,
         callbacks: list = None,
         run_config=None,
+        algorithm=None,
     ) -> list:
         """Train the sliced model.
 
@@ -198,6 +206,8 @@ class SlicedModel:
             extra["cut_hooks"] = self.cut_hooks
         elif self.cut_hooks:
             raise ValueError(f"{type(self.executor).__name__} does not support cut_hooks")
+        if "algorithm" in accepted:
+            extra["algorithm"] = algorithm
         self.executor.setup(
             self.graph,
             self.partitions,
