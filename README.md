@@ -1,6 +1,6 @@
 # TorchSlicer
 
-<img src="https://github.com/MarcoGarofalo94/TorchSlicer/assets/47697181/3b9d71dc-64f0-4adf-ac9b-40576593f532" width="156" height="156" />
+<img src="docs/torchslicer-logo.png" width="156" height="156" />
 
 **Split learning for PyTorch** — partition a model across multiple devices or machines and train it end-to-end without any single node holding the full model.
 
