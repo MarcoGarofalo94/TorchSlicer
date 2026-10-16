@@ -295,7 +295,58 @@ shown in a Flower-based SplitFed baseline.
     schemes. Literature rules apply.
   - **Test:** the default algorithm reproduces the current matrix bit for bit; each new algorithm matches a
     hand-written reference loop.
-- **M9, multi-client engine** (carried from M4). Clients as real nodes, not states swapped in one process.
+- **M9, fast tensor transport** (added 2026-10-16, owner decision after benchmarking on A100).
+  Benchmarks on an A100 MIG (40 GB, loopback) showed TCP is already 1.4–3.5× faster than gRPC, but
+  both are far below PCIe bandwidth because every tensor goes GPU → CPU → socket → CPU → GPU.
+  Results: `benchmarks/transport/` (small 1 MB: gRPC 11 ms → TCP 3.9 ms; medium 33 MB: 28.8 → 8.2 ms;
+  large 8 MB: 12.5 → 8.8 ms; xlarge 50 MB: 40.3 → 26.2 ms, ×3 seeds).
+
+  **Three transports to add, in priority order:**
+
+  1. **Pinned memory + async D2H/H2D** (`transport.tensor: tcp`, improvement to existing path).
+     Allocate one pinned host buffer per peer connection at `init`. Use `tensor.to(pinned,
+     non_blocking=True)` + a CUDA event to signal readiness before `sendall`, and
+     `torch.cuda.current_stream().synchronize()` only when the buffer is needed. Overlaps GPU
+     compute on the *next* slice with the copy of the *current* slice's activation. Compatible
+     with the existing TCP frame format; no API change.
+     - Expected gain: 1.5–2× on top of TCP, especially for large tensors where the D2H copy
+       dominates. Measure with the `benchmarks/transport/bench_transport.py` script.
+     - **Constraint:** the pinned buffer must be size-stable (allocate at max expected activation
+       size, or realloc with a high-water mark). Never allocate per-batch.
+
+  2. **CUDA IPC** (`transport.tensor: ipc`, new mode, same-node only).
+     Export each GPU tensor as a CUDA IPC handle (a ~100-byte descriptor), send only the handle
+     over the existing socket, and let the receiver reconstruct the tensor by mapping the same
+     CUDA allocation — zero host copy. `torch.multiprocessing` already has the plumbing
+     (`ForkingPickler`, `reduce_tensor` / `rebuild_cuda_tensor`).
+     - Expected gain: 10–50× over TCP on same-node, approaching PCIe P2P bandwidth (~30 GB/s).
+     - **Constraint:** only works when both workers share a CUDA device (same machine). The
+       `Router` / discovery should detect cross-machine peers and fall back to TCP automatically.
+       Guard with `torch.cuda.is_available()` and a clear error if IPC is requested cross-node.
+     - **Lifecycle:** the sender must keep the tensor alive until the receiver signals consumption
+       (a tiny ACK over the socket); otherwise the CUDA allocator can reuse the memory.
+
+  3. **NCCL P2P** (`transport.tensor: nccl`, new mode, multi-node with RDMA NICs).
+     Use `torch.distributed.isend` / `irecv` with the NCCL backend for GPUDirect RDMA:
+     GPU memory → NIC → GPU memory on the peer, CPU never touched.
+     - Expected gain: near wire-speed on InfiniBand / NVLink clusters.
+     - **Constraint:** requires all workers to share a `ProcessGroup`. The executor initialises
+       one at setup (rank = slice index, world = n_slices); the coordinator/driver participates
+       as rank 0. This is architecturally heavier and may not compose cleanly with fault
+       recovery (process groups are torn down on failure). Implement after IPC is working.
+
+  **Deliverables:**
+  - Pinned-memory path in `executors/worker.py` (`_TensorPeerClient`) and `benchmarks/transport/`
+    results updated.
+  - New `transport.tensor: ipc` mode in `config.py`, `executors/worker.py`
+    (`_IpcPeerClient`, `_IpcServer`), with automatic fallback to TCP for cross-node peers.
+  - New `transport.tensor: nccl` mode, gated on `torch.distributed` availability.
+  - All three new modes pass the equivalence matrix at ≤ 1e-5.
+  - `benchmarks/transport/bench_transport.py` extended to cover all four modes (grpc / tcp /
+    ipc / nccl) across the four model sizes, with mean ± std over ≥ 3 seeds.
+  - `docs/tutorials/transport.md`: when to use which mode (≤ 60 lines).
+
+- **M10, multi-client engine** (was M9; carried from M4). Clients as real nodes, not states swapped in one process.
   - **Clients on several machines.** Covers:
     - a worker-side data source (a client node owns its loader);
     - a per-batch return address on the shared server slice;
@@ -308,7 +359,7 @@ shown in a Flower-based SplitFed baseline.
   - **Sessions with fault tolerance:** a failed client is dropped from the round instead of stopping the run
     (carried from M4).
   - **Test:** N client processes equal the in-process `ClientSession` for the same algorithm, and losses match.
-- **M10, data and scale simulation**:
+- **M11, data and scale simulation** (was M10):
   - **Federated partitioners:** IID; Dirichlet(α) label skew; quantity skew; per-client feature shift.
   - **Standard datasets:** MNIST, CIFAR-10/100, FEMNIST-like, a text/LLM fine-tuning set, tabular for vertical SL.
     Seeded splits saved with the run, so results are comparable across papers.
@@ -317,7 +368,7 @@ shown in a Flower-based SplitFed baseline.
   - **Heterogeneity profiles:** compute speed and link bandwidth/latency per client, from the M2 capability model
     and the M4 link model, as config.
   - **Test:** partition statistics match their definitions; a 1000-client run fits in this container's RAM.
-- **M11, privacy: attacks, defences, leakage metrics**. SL papers are judged on this, and the core has only
+- **M12, privacy: attacks, defences, leakage metrics** (was M11). SL papers are judged on this, and the core has only
   `Recorder`.
   - **Attacks:**
     - label inference from returned gradients;
@@ -331,7 +382,7 @@ shown in a Flower-based SplitFed baseline.
   - Attacks are `CutHook` observers or `Algorithm`s (M8), so they run in every topology.
   - **Test:** each attack reproduces its paper's qualitative result on a small setting, and each defence lowers
     it measurably. Negative results are recorded as such.
-- **M12, baselines + Flower interop** (was M8 "baselines + paper").
+- **M13, baselines + Flower interop** (was M12).
   - **A `baselines/` template:** config, seeds, expected numbers with tolerance, a CI smoke test, mean ± std
     over ≥3 seeds.
   - **Seed it with the famous papers:**
@@ -340,7 +391,7 @@ shown in a Flower-based SplitFed baseline.
     - SplitFed v1 and v2;
     - one local-loss / asynchronous SL;
     - one compression paper;
-    - one attack + defence pair (from M11);
+    - one attack + defence pair (from M12);
     - one split-LLM / LoRA fine-tuning paper.
   - **Each reproduces the published number within the stated tolerance.** If it doesn't, record it as such,
     with the reason.
@@ -348,7 +399,7 @@ shown in a Flower-based SplitFed baseline.
     SplitFed aggregation. This puts SL where the FL community already works; SplitBud (`notes/sota.md`) shows
     the demand.
   - **A contributor guide** for adding a baseline (cf. Flower Baselines).
-- **M13, real environment and testbed** (was M9; deferred from M3 on 2026-10-15, owner decision).
+- **M14, real environment and testbed** (was M13; deferred from M3 on 2026-10-15, owner decision).
   - **Containers.** This container has no Docker or kubectl, so this runs in a fresh clone on a machine that
     has them:
     - rebuild the image (`make build-cpu`/`build-gpu`);
@@ -363,8 +414,8 @@ shown in a Flower-based SplitFed baseline.
     - NAT/relay cost over a WAN;
     - recovery from a real node loss.
   - Record every bug in `notes/validation.md` as usual.
-- **M14, release readiness** (owner decisions marked; some items can happen at any time, and the owner
-  decisions should be settled before M12 invites contributors):
+- **M15, release readiness** (was M14; owner decisions marked; some items can happen at any time, and the owner
+  decisions should be settled before M13 invites contributors):
   - **Merge** the milestone branches into `main` in order, and tag a 1.0 release candidate (owner).
   - **License:** Apache-2.0 is the norm for adoption; GPL-3.0 deters industry users (owner).
   - **Stable public API:** a list of public names, semantic versioning, and a deprecation policy.
@@ -373,14 +424,14 @@ shown in a Flower-based SplitFed baseline.
     since M0), plus GPU CI if available.
   - **Packaging:** PyPI wheels, a Docker image on a registry, Zenodo DOI per release.
   - **Community:** a contribution guide, issue templates, a discussion channel, a simple governance note.
-- **M15, the paper (target: MLSys)**. The evaluation is designed up front, and each earlier milestone records
+- **M16, the paper (target: MLSys)** (was M15). The evaluation is designed up front, and each earlier milestone records
   its numbers in `notes/validation.md` as it goes.
   - **Claims to back with measurements:**
     1. *Generality.* Any `nn.Module` (CNNs, HF LLMs, LoRA, MoE via `pack=`) is split automatically into chains
        of any length, with no manual partitioning, vs SplitBud/SLPerf, where the split is manual.
     2. *Correctness.* Training is bit-identical or within 1e-5 of unsplit PyTorch in every mode (the
        equivalence matrix), which no other SL framework shows.
-    3. *Expressiveness.* The M12 baselines take N lines each with `ts.Algorithm`, compared with their original
+    3. *Expressiveness.* The M13 baselines take N lines each with `ts.Algorithm`, compared with their original
        code bases and with SplitBud/SLPerf.
     4. *Systems cost.* Overhead vs plain PyTorch; scaling with clients and with chain length;
        capability-aware planning vs uniform on heterogeneous nodes; NAT/relay and TLS cost; recovery time
@@ -393,24 +444,25 @@ shown in a Flower-based SplitFed baseline.
     land, to stake the claim. Check the current calls and deadlines; none are recorded here.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-16, M6 done (version 0.8.0). M7 deferred.
+Last updated 2026-10-16, M8 done (version 0.8.0). M7 deferred.
 - **Where things stand:**
-  - Done, one branch per milestone: M0 on `feat/m0-foundations`, M1 on `feat/m1-split-anything`,
-    M2 on `feat/m2-p2p`, M3 on `feat/m3-run-anywhere`, M4 on `feat/m4-sl-settings`.
-    All milestone branches are pushed to `origin` (2026-10-15); `main` is unchanged.
-  - M5 is on `feat/m5-offload`: implemented, with benchmarks deferred (see its Status entry).
-  - M6 is on `feat/m6-nat` (done, not pushed).
+  - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
+    M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),
+    M5 (`feat/m5-offload`), M6 (`feat/m6-nat`), M8 (`feat/m8-algorithm-api`). `main` is
+    unchanged (merge deferred to M15 release readiness).
   - **M7 (security) deferred** (2026-10-16, owner decision): TorchSlicer is a research framework
     running on trusted clusters; plaintext mode is acceptable for experiments. M7 will be done
-    just before M13 (real environment + testbed), which is the first milestone that requires
+    just before M14 (real environment + testbed), which is the first milestone that requires
     security on a real network. The `weights_only=False` RCE on worker `init` is a known open
     risk; document it and accept it until then.
-  - **Next: M8 (algorithm API).** Create it with
-    `git switch -c feat/m8-algorithm-api feat/m6-nat`. Start with the survey
-    (`notes/algorithms.md`) as M5 started with its survey.
-  - **Milestone order** (updated 2026-10-16): M8 algorithm API → M9 multi-client engine →
-    M10 data and scale simulation → M11 privacy suite → M12 baselines + Flower interop →
-    M7 security → M13 real environment and testbed → M14 release readiness → M15 the MLSys paper.
+  - **Next: M9 (fast tensor transport).** Create with
+    `git switch -c feat/m9-fast-transport feat/m8-algorithm-api`. See the M9 entry above for
+    the full spec. Start with pinned memory (lowest effort, composable with existing TCP),
+    then CUDA IPC, then NCCL P2P. Use `benchmarks/transport/bench_transport.py` to measure
+    each mode; the equivalence matrix must stay green throughout.
+  - **Milestone order** (updated 2026-10-16): M9 fast transport → M10 multi-client engine →
+    M11 data and scale simulation → M12 privacy suite → M13 baselines + Flower interop →
+    M7 security → M14 real environment and testbed → M15 release readiness → M16 the MLSys paper.
 - **Read first:**
   - this file;
   - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–7);
