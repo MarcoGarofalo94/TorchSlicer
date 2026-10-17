@@ -924,9 +924,19 @@ Three new tensor-transport modes on top of the existing `grpc` and `tcp` paths:
 ### Test coverage
 
 - All 272 existing tests pass after M9 changes (no new failures).
-- New equivalence-matrix modes (`ipc`, `nccl`) are not yet in `run_matrix.py`; pending
-  a multi-process in-tree test. The existing TCP equivalence tests cover the pinned-memory
-  path because the send/receive logic is unchanged; only the D2H timing is affected.
+- The pinned-memory path is covered by the existing TCP tests and matrix modes (the send/receive
+  logic is unchanged; only the D2H timing differs).
+- **Matrix modes `central-ipc` and `p2p-ipc` (2026-10-17).** Every node is a real OS process, so
+  IPC crosses CUDA contexts for real. 9 models x 2 modes x 2 devices = 36/36 OK, SGD:
+  - CPU: bit-exact (max|Δ| = 0). This is the TCP fallback, since CPU tensors never take IPC.
+  - CUDA (A100 MIG): dnn, cnn, resnet18, tinygpt and tinygpt-lora are bit-exact. gpt2, llama and
+    their LoRA variants are within 1.2e-7 to 4.8e-7. That is GPU nondeterminism: the recorded CUDA
+    `local` mode differs by as much (2.4e-7 to 4.5e-7, `results_cuda_AdamW.json`).
+  - Checked that IPC is really used, not a silent fallback: a probe that counts sends per client
+    class saw only `_IpcPeerClient` sends on CUDA tensors (cnn: 8/16/8 per node, 0 TCP).
+- `p2p-nccl` is in the matrix as opt-in only (`MATRIX_NCCL=1`). It hangs on a single MIG
+  instance (see the multi-process benchmark in `experiments.md`), so it has **not been run
+  end to end on this hardware**. It needs >= 2 distinct GPUs or 2 nodes.
 
 ### Known limitations (carried)
 
@@ -935,8 +945,8 @@ Three new tensor-transport modes on top of the existing `grpc` and `tcp` paths:
 - **NCCL incompatible with cut_hooks**: same reason.
 - **NCCL requires all-CUDA workers**: if any worker is on CPU, `init_process_group`
   falls back to `gloo`, but NCCL calls on CPU tensors will fail. Documented.
-- **No equivalence test for ipc/nccl**: a multi-process test requires forking workers
-  with shared CUDA context (IPC) or a full ProcessGroup (NCCL). Deferred.
+- **NCCL not validated**: no equivalence or benchmark run on this hardware (single MIG GPU).
+  IPC is validated (see Test coverage).
 - **NCCL persistent-worker re-init**: `destroy_process_group` is called inside
   `_init_nccl_group`. If the coordinator re-uses the same port across runs the TCPStore
   may not be ready immediately; a 60-second timeout is set.

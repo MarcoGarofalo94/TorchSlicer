@@ -124,6 +124,27 @@ shown in a Flower-based SplitFed baseline.
   - **Deviation from the plan:** not only the gradient comes back in a reply. Every reverse call
     rides the client's own connection (rationale in validation.md round 7).
 
+- M8 (branch `feat/m8-algorithm-api`, forked from M6's tip, pushed): **done** = `ts.Algorithm`
+  (`torchslicer/algorithm/`), a Flower-Strategy-style extension point. Built-ins: Default
+  (vanilla SplitNN, bit-exact), SplitFed V1/V2, LocalLoss; `fedavg()`; registry and
+  `sl.algorithm`. Survey: `notes/algorithms.md`; tutorial `docs/tutorials/algorithm.md`;
+  `tests/test_algorithm.py`.
+
+- M9 (branch `feat/m9-fast-transport`, forked from M8's tip, pushed): **done, NCCL unvalidated** =
+  `transport.tensor: tcp` with pinned-memory async D2H, plus new `ipc` (CUDA IPC, falls back to
+  TCP for cross-machine peers and CPU tensors) and `nccl` (isend/irecv on a process group).
+  Tutorial `docs/tutorials/transport.md`; benchmarks `benchmarks/transport/`.
+  - Matrix modes `central-ipc` and `p2p-ipc`: 36/36 OK (9 models, CPU and CUDA). A probe
+    confirmed the CUDA runs really used IPC.
+  - IPC is 2.3–4.4× faster than gRPC on a multi-process A100 MIG benchmark. The plan
+    expected 10–50×.
+  - Pinned vs sync D2H: no measurable difference on loopback (±6%, noise). The path is kept
+    for PCIe-bound setups.
+  - **Not validated: NCCL.** It hangs on a single MIG instance. `MATRIX_NCCL=1` adds
+    `p2p-nccl` for hardware with ≥2 GPUs.
+  - IPC and NCCL don't compose with `cut_hooks`.
+  - Bugs and details: validation.md "M9". Version 0.9.0.
+
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
   from `main`. The chain is `main` → `feat/m0-foundations` → `feat/m1-split-anything` → `feat/m2-...` and so on.
@@ -444,23 +465,23 @@ shown in a Flower-based SplitFed baseline.
     land, to stake the claim. Check the current calls and deadlines; none are recorded here.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-16, M8 done (version 0.8.0). M7 deferred.
+Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardware. M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
     M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),
-    M5 (`feat/m5-offload`), M6 (`feat/m6-nat`), M8 (`feat/m8-algorithm-api`). `main` is
+    M5 (`feat/m5-offload`), M6 (`feat/m6-nat`), M8 (`feat/m8-algorithm-api`),
+    M9 (`feat/m9-fast-transport`). `main` is
     unchanged (merge deferred to M15 release readiness).
   - **M7 (security) deferred** (2026-10-16, owner decision): TorchSlicer is a research framework
     running on trusted clusters; plaintext mode is acceptable for experiments. M7 will be done
     just before M14 (real environment + testbed), which is the first milestone that requires
     security on a real network. The `weights_only=False` RCE on worker `init` is a known open
     risk; document it and accept it until then.
-  - **Next: M9 (fast tensor transport).** Create with
-    `git switch -c feat/m9-fast-transport feat/m8-algorithm-api`. See the M9 entry above for
-    the full spec. Start with pinned memory (lowest effort, composable with existing TCP),
-    then CUDA IPC, then NCCL P2P. Use `benchmarks/transport/bench_transport.py` to measure
-    each mode; the equivalence matrix must stay green throughout.
-  - **Milestone order** (updated 2026-10-16): M9 fast transport → M10 multi-client engine →
+  - **Next: M10 (multi-client engine).** Create with
+    `git switch -c feat/m10-multi-client feat/m9-fast-transport`. See the M10 entry above.
+    Open item from M9: run `MATRIX_NCCL=1 MATRIX_DEVICE=cuda run_matrix.py` and the NCCL
+    transport benchmark once a machine with ≥2 distinct GPUs is available (at the latest in M14).
+  - **Milestone order** (updated 2026-10-16): M9 fast transport (done) → M10 multi-client engine →
     M11 data and scale simulation → M12 privacy suite → M13 baselines + Flower interop →
     M7 security → M14 real environment and testbed → M15 release readiness → M16 the MLSys paper.
 - **Read first:**
@@ -473,10 +494,10 @@ Last updated 2026-10-16, M8 done (version 0.8.0). M7 deferred.
   - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not
     for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (247 tests at the end of M6, about 3 min;
+  - `.venv/bin/python -m pytest tests/` green (272 tests at the end of M9, about 3.5 min;
     `test_sl.py::test_distributed_hooks_match_local[hook0]` flaked once under load);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about
-    15 min on CPU; pass a model name for a quick check).
+    15 min on CPU, more with the M9 `*-ipc` modes; pass a model name for a quick check).
     - Set `MATRIX_DEVICE=cuda` for the GPU, and
       `MATRIX_OPT='{"name":"AdamW","params":{"lr":0.001,"weight_decay":0.01}}'` for AdamW.
     - A change to splitting must not change any loss. Every mode is compared at 1e-5 against

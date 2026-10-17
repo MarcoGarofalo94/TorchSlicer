@@ -2,7 +2,8 @@
 
 usage: run_matrix.py [model ...]     logs in ./logs/<device>_<opt>/<model>_<mode>*.log
 env:   MATRIX_DEVICE=cpu|cuda, MATRIX_OPT='{"name": ..., "params": {...}}', MATRIX_PORT_BASE,
-       MATRIX_MODES=local,offload,... (a subset of the modes; only a full run writes results)
+       MATRIX_MODES=local,offload,... (a subset of the modes; only a full run writes results),
+       MATRIX_NCCL=1 (add p2p-nccl: needs >= 2 distinct GPUs, hangs on a single MIG instance)
 A full run (no model args) writes results/results_<device>_<opt>.json; see notes/validation.md.
 """
 import json
@@ -122,12 +123,16 @@ MODES = {
     "p2p-tcp": lambda n: p2p(n, "tcp"),
     "p2p-nat": lambda n: p2p(n, "tcp", nat="driver"),      # M6: driver behind NAT
     "p2p-relay": lambda n: p2p(n, "grpc", nat="relay"),    # M6: every node behind NAT
+    "central-ipc": lambda n: central(n, "ipc"),            # M9: CUDA IPC (TCP fallback on CPU)
+    "p2p-ipc": lambda n: p2p(n, "ipc"),
     "offload": lambda n: inproc(n, "offload"),
     "offload-gpipe": lambda n: inproc(n, "offload-gpipe"),
     "offload-disk": lambda n: inproc(n, "offload-disk"),
 }
 if GPU:   # the CPU optimizer placement only differs from "offload" with a device
     MODES["offload-cpuopt"] = lambda n: inproc(n, "offload-cpuopt")
+if os.environ.get("MATRIX_NCCL") == "1":   # M9: opt-in, see the module docstring
+    MODES["p2p-nccl"] = lambda n: p2p(n, "nccl")
 if os.environ.get("MATRIX_MODES"):   # e.g. MATRIX_MODES=local,offload for a quick check
     MODES = {k: v for k, v in MODES.items() if k in os.environ["MATRIX_MODES"].split(",")}
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchslicer"
-version = "0.8.0"
+version = "0.9.0"
 description = "Split learning framework for PyTorch — pipeline-parallel training across heterogeneous devices."
 authors = [{ name = "Marco Garofalo", email = "garofalomarco58@gmail.com" }]
 license = "GPL-3.0-or-later"
