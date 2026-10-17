@@ -1198,8 +1198,28 @@ class DistributedExecutor(BaseExecutor):
             _LOG.info("NCCL TCPStore master started host=%s port=%s world_size=%s",
                       coord_host, nccl_port, world_size)
         except Exception as exc:
-            _LOG.warning("NCCL TCPStore master start failed: %s", exc)
-            self._nccl_store = None
+            raise RuntimeError(f"transport.tensor=nccl: the rendezvous store could not start "
+                               f"on port {self._bind_port() + 10}: {exc}") from exc
+
+    def _wait_nccl_ready(self, init_token: str, n: int, timeout_s: float = 120.0) -> None:
+        """Wait until every slice reports its NCCL rendezvous (``WorkerServicer._init_nccl_group``);
+        raise with the reasons as soon as one fails, or if one does not report in ``timeout_s``."""
+        keys = [f"ts/nccl/{init_token}/status/{r}" for r in range(n)]
+        deadline = time.monotonic() + timeout_s
+        while True:
+            status = {r: self._nccl_store.get(k).decode()
+                      for r, k in enumerate(keys) if self._nccl_store.check([k])}
+            errs = {r: v[4:] for r, v in status.items() if v.startswith("err:")}
+            if errs:
+                raise RuntimeError("NCCL rendezvous failed: " + "; ".join(
+                    f"slice {r}: {e}" for r, e in sorted(errs.items())))
+            if len(status) == n:
+                break
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"NCCL rendezvous: slices {sorted(set(range(n)) - set(status))} "
+                                   f"did not report within {timeout_s:.0f}s")
+            time.sleep(0.2)
+        _LOG.info("NCCL process group ready slices=%s", n)
 
     def _add_servicers(self, server) -> None:
         """Hook: extra services on the coordinator's gRPC server. The data owner's slice 0
@@ -1460,6 +1480,8 @@ class DistributedExecutor(BaseExecutor):
                 res.hostname,
                 res.message,
             )
+        if cfg.transport.tensor == "nccl":
+            self._wait_nccl_ready(init_token, n)
 
     # ── internal ───────────────────────────────────────────────────────────────
 

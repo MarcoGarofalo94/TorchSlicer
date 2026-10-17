@@ -92,24 +92,26 @@ def tensor_nbytes(t: torch.Tensor) -> int:
 
 
 def pack_payload(payload) -> torch.Tensor:
-    """One CPU uint8 tensor holding the payload (header + raw buffers)."""
+    """One uint8 tensor holding the payload (header + raw buffers), on the payload's device:
+    a CUDA payload stays on the GPU, so a GPU transport (``ipc``, ``nccl``) can carry it."""
     is_list, ts = _as_list(payload)
+    device = next((t.device for t in ts if t.numel()), torch.device("cpu"))
     head = bytearray(_HEAD.pack(int(is_list), len(ts)))
     bufs = []
     for t in ts:
         if t.dtype not in _CODE:
             raise TypeError(f"unsupported dtype on a cut: {t.dtype}")
-        t = t.detach().cpu().contiguous()
+        t = t.detach().to(device).contiguous()
         head += _TENSOR_HEAD.pack(_CODE[t.dtype], t.dim())
         head += b"".join(_DIM.pack(int(d)) for d in t.shape)
-        bufs.append(t.reshape(-1).view(torch.uint8) if t.numel() else torch.empty(0, dtype=torch.uint8))
-    return torch.cat([torch.frombuffer(head, dtype=torch.uint8).clone(), *bufs])
+        bufs.append(t.reshape(-1).view(torch.uint8) if t.numel()
+                    else torch.empty(0, dtype=torch.uint8, device=device))
+    return torch.cat([torch.frombuffer(head, dtype=torch.uint8).to(device), *bufs])
 
 
-def unpack_payload(packed: torch.Tensor, device=None):
-    """Inverse of ``pack_payload`` (tensors land on ``device``)."""
-    data = packed.detach().cpu().contiguous()
-    raw = data.numpy().tobytes()
+def _parse_head(raw: bytes):
+    """(is_list, [(dtype, shape)], header size) from the start of a packed payload;
+    ``struct.error`` when ``raw`` is shorter than the header."""
     is_list, n = _HEAD.unpack_from(raw, 0)
     off = _HEAD.size
     shapes = []
@@ -119,12 +121,27 @@ def unpack_payload(packed: torch.Tensor, device=None):
         shape = [_DIM.unpack_from(raw, off + i * _DIM.size)[0] for i in range(ndim)]
         off += ndim * _DIM.size
         shapes.append((_DTYPES[code], shape))
+    return is_list, shapes, off
+
+
+_HEAD_PEEK = 4096   # bytes copied to the host to parse the header of a device payload
+
+
+def unpack_payload(packed: torch.Tensor, device=None):
+    """Inverse of ``pack_payload`` (tensors land on ``device``, default the packed one's).
+    Only the header is copied to the host; the buffers are sliced where ``packed`` lives."""
+    data = packed.detach().contiguous()
+    try:
+        is_list, shapes, off = _parse_head(data[:_HEAD_PEEK].cpu().numpy().tobytes())
+    except struct.error:   # a header longer than the peek (many tensors of high rank)
+        is_list, shapes, off = _parse_head(data.cpu().numpy().tobytes())
     out = []
     for dtype, shape in shapes:
         numel = 1
         for d in shape:
             numel *= d
         nb = numel * torch.empty(0, dtype=dtype).element_size()
+        # clone: an aligned buffer of its own (the offset may not suit ``dtype``)
         t = data[off:off + nb].clone().view(dtype).reshape(shape)
         off += nb
         out.append(t.to(device) if device is not None else t)

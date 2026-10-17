@@ -3,7 +3,8 @@
 usage: run_matrix.py [model ...]     logs in ./logs/<device>_<opt>/<model>_<mode>*.log
 env:   MATRIX_DEVICE=cpu|cuda, MATRIX_OPT='{"name": ..., "params": {...}}', MATRIX_PORT_BASE,
        MATRIX_MODES=local,offload,... (a subset of the modes; only a full run writes results),
-       MATRIX_NCCL=1 (add p2p-nccl: needs >= 2 distinct GPUs, hangs on a single MIG instance)
+       MATRIX_NCCL=1 (add {central,p2p}-nccl: on CUDA they need one GPU per slice; on CPU they
+       run the same code path on the gloo backend)
 A full run (no model args) writes results/results_<device>_<opt>.json; see notes/validation.md.
 """
 import json
@@ -132,6 +133,7 @@ MODES = {
 if GPU:   # the CPU optimizer placement only differs from "offload" with a device
     MODES["offload-cpuopt"] = lambda n: inproc(n, "offload-cpuopt")
 if os.environ.get("MATRIX_NCCL") == "1":   # M9: opt-in, see the module docstring
+    MODES["central-nccl"] = lambda n: central(n, "nccl")
     MODES["p2p-nccl"] = lambda n: p2p(n, "nccl")
 if os.environ.get("MATRIX_MODES"):   # e.g. MATRIX_MODES=local,offload for a quick check
     MODES = {k: v for k, v in MODES.items() if k in os.environ["MATRIX_MODES"].split(",")}

@@ -251,8 +251,10 @@ class _TensorPeerClient:
 
     On CUDA: copies the tensor into a per-connection pinned host buffer with
     ``non_blocking=True`` (DMA), records a CUDA event, builds the frame header
-    in parallel, then synchronises the event right before ``sendall``.  This is
-    1.5-2× faster than the pageable copy used by the old path.
+    in parallel, then synchronises the event right before ``sendall``.  The old
+    path (``.cpu()``) allocates fresh host memory per send, which page-faults
+    above glibc's 32 MB mmap threshold: 20 ms vs 1.4 ms for a 33.6 MB tensor.
+    ``TCP_NO_PINNED=1`` forces the old path (benchmarks).
     On CPU (or when CUDA is unavailable): falls back to the original path.
     The pinned buffer grows with a 25 % headroom (high-water-mark); it is never
     shrunk and is allocated at most once per peer connection per run.
@@ -870,7 +872,8 @@ class WorkerServicer(
             # hosts at coordinator_port + _NCCL_STORE_PORT_OFFSET.
             if self._tensor_transport == "nccl" and request.n_slices > 0:
                 self._init_nccl_group(
-                    request.coordinator, request.worker_index, request.n_slices
+                    request.coordinator, request.worker_index, request.n_slices,
+                    request.init_token,
                 )
 
             if request.checkpoint_path:
@@ -931,7 +934,8 @@ class WorkerServicer(
             return worker_service_pb2.StatusMessage(
                 ok=False, message=str(e), hostname=_HOSTNAME)
 
-    def _init_nccl_group(self, coordinator: str, rank: int, world_size: int) -> None:
+    def _init_nccl_group(self, coordinator: str, rank: int, world_size: int,
+                         token: str = "") -> None:
         """Kick off NCCL ProcessGroup init in a background thread.
 
         init_process_group blocks until all world_size ranks have joined.
@@ -940,7 +944,11 @@ class WorkerServicer(
         to join, but rank 1 hasn't received its SliceConfig yet.
 
         Instead we launch the rendezvous in a thread and store a Future;
-        _wait_nccl() is called before the first NCCL send/recv.
+        _wait_nccl() is called before the first NCCL send/recv. The outcome is
+        written to the store under ``ts/nccl/<token>/status/<rank>`` ("ok" or
+        "err:<reason>"), which the coordinator waits on after init
+        (``DistributedExecutor._wait_nccl_ready``), so a failure stops the run
+        with its reason instead of hanging the first transfer.
         """
         self._nccl_future: futures.Future | None = None
         executor = futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="nccl-init")
@@ -956,15 +964,38 @@ class WorkerServicer(
                 is_master=False,
                 timeout=datetime.timedelta(seconds=60),
             )
-            if dist.is_initialized():
-                dist.destroy_process_group()
-            backend = "nccl" if self.device.type == "cuda" else "gloo"
-            dist.init_process_group(
-                backend=backend,
-                store=store,
-                rank=rank,
-                world_size=world_size,
-            )
+            # one key space per init (recovery re-inits on the same store)
+            prefix = f"ts/nccl/{token}"
+            try:
+                if dist.is_initialized():
+                    dist.destroy_process_group()
+                cuda = self.device.type == "cuda"
+                if cuda:
+                    # NCCL allows one rank per GPU; with two it fails only at the first
+                    # transfer ("Duplicate GPU detected"). Check here, with a clear reason.
+                    gpu = f"{socket.gethostname()}/{torch.cuda.get_device_properties(self.device).uuid}"
+                    store.set(f"{prefix}/gpu/{rank}", gpu)
+                    keys = [f"{prefix}/gpu/{r}" for r in range(world_size)]
+                    store.wait(keys)
+                    owners = [store.get(k).decode() for k in keys]
+                    dup = [r for r, g in enumerate(owners) if g == gpu and r != rank]
+                    if dup:
+                        raise RuntimeError(
+                            f"transport.tensor=nccl needs one GPU per slice, but slices "
+                            f"{sorted([rank, *dup])} are on the same GPU ({gpu}); use "
+                            f"distinct GPUs, or transport.tensor=ipc on one GPU")
+                dist.init_process_group(
+                    backend="nccl" if cuda else "gloo",
+                    store=dist.PrefixStore(f"{prefix}/pg", store),
+                    rank=rank,
+                    world_size=world_size,
+                    # eager NCCL communicator: init errors surface here, not on first send
+                    **({"device_id": self.device} if cuda else {}),
+                )
+            except Exception as exc:
+                store.set(f"{prefix}/status/{rank}", f"err:{exc}")
+                raise
+            store.set(f"{prefix}/status/{rank}", "ok")
             return dist.group.WORLD
 
         self._nccl_future = executor.submit(_rendezvous)
@@ -972,19 +1003,19 @@ class WorkerServicer(
         _LOG.info("NCCL rendezvous started rank=%s world=%s (background)", rank, world_size)
 
     def _wait_nccl(self) -> bool:
-        """Block until the background NCCL rendezvous completes; return True on success."""
+        """Block until the background NCCL rendezvous completes. A failed rendezvous
+        raises: falling back to gRPC on one worker only would leave its peers blocked
+        in a NCCL recv that never comes."""
         if self._nccl_future is None:
             return False
         try:
             self._dist_group = self._nccl_future.result(timeout=120)
-            self._nccl_future = None
-            _LOG.info("NCCL group ready device=%s", self.device)
-            return True
         except Exception as exc:
-            _LOG.warning("NCCL init failed: %s — falling back to gRPC", exc)
-            self._dist_group = None
+            raise RuntimeError(f"NCCL process group init failed: {exc}") from exc
+        finally:
             self._nccl_future = None
-            return False
+        _LOG.info("NCCL group ready device=%s", self.device)
+        return True
 
     # ── shutdown ───────────────────────────────────────────────────────────────
 
@@ -1394,6 +1425,7 @@ class WorkerServicer(
                 shape = list(request.input.shape)
                 tensor = torch.empty(shape, dtype=dtype, device=self.device)
                 dist.recv(tensor, src=self._worker_index - 1, group=self._dist_group)
+                tensor = self._decode_in(batch_id, tensor)
                 self._run_forward_stage(batch_id, tensor, generation, aux={})
                 return
 
@@ -1578,6 +1610,7 @@ class WorkerServicer(
                 shape = list(request.input.shape)
                 tensor = torch.empty(shape, dtype=dtype, device=self.device)
                 dist.recv(tensor, src=self._worker_index - 1, group=self._dist_group)
+                tensor = self._decode_in(batch_id, tensor)
                 with _tracer.span("torchslicer.worker.forward", batch_id=batch_id,
                                   worker=_HOSTNAME, is_last=True,
                                   input_shape=str(tuple(tensor.shape))):
@@ -1676,6 +1709,7 @@ class WorkerServicer(
                 shape = list(request.gradient.shape)
                 grad_in = torch.empty(shape, dtype=dtype, device=self.device)
                 dist.recv(grad_in, src=self._worker_index + 1, group=self._dist_group)
+                grad_in = self._decode_grad(batch_id, grad_in)
                 self._run_backward_stage(batch_id, grad_in, is_last_micro, generation)
                 return
 

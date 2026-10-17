@@ -934,24 +934,24 @@ Three new tensor-transport modes on top of the existing `grpc` and `tcp` paths:
     `local` mode differs by as much (2.4e-7 to 4.5e-7, `results_cuda_AdamW.json`).
   - Checked that IPC is really used, not a silent fallback: a probe that counts sends per client
     class saw only `_IpcPeerClient` sends on CUDA tensors (cnn: 8/16/8 per node, 0 TCP).
-- `p2p-nccl` is in the matrix as opt-in only (`MATRIX_NCCL=1`). It hangs on a single MIG
-  instance (see the multi-process benchmark in `experiments.md`), so it has **not been run
-  end to end on this hardware**. It needs >= 2 distinct GPUs or 2 nodes.
+- `central-nccl`/`p2p-nccl` are in the matrix as opt-in (`MATRIX_NCCL=1`). They are
+  bit-exact on CPU (gloo). On one GPU they now stop at init with the reason (issue 23). Real
+  NCCL needs >= 2 GPUs: not run yet.
 
 ### Known limitations (carried)
 
-- **IPC incompatible with cut_hooks**: CUDA IPC sends the raw GPU tensor; cut hooks
-  expect serialised uint8 payloads. Documented in `docs/tutorials/transport.md`.
-- **NCCL incompatible with cut_hooks**: same reason.
-- **NCCL requires all-CUDA workers**: if any worker is on CPU, `init_process_group`
-  falls back to `gloo`, but NCCL calls on CPU tensors will fail. Documented.
+- ~~IPC incompatible with cut_hooks~~ **wrong, corrected 2026-10-17**: it worked through
+  the TCP fallback (payloads were packed on the CPU); now IPC carries them (issue 24).
+- ~~NCCL incompatible with cut_hooks~~ it was broken (issue 25); fixed 2026-10-17.
+- **NCCL requires all-CUDA workers or all-CPU ones** (CPU = gloo). Mixed devices are not
+  supported.
 - **NCCL not validated**: no equivalence or benchmark run on this hardware (single MIG GPU).
   IPC is validated (see Test coverage).
 - **NCCL persistent-worker re-init**: `destroy_process_group` is called inside
   `_init_nccl_group`. If the coordinator re-uses the same port across runs the TCPStore
   may not be ready immediately; a 60-second timeout is set.
 
-### Pinned-memory improvement: no measurable benefit on loopback (2026-10-16)
+### Pinned-memory improvement: no measurable benefit on loopback (2026-10-16) — **conclusion wrong, see the 2026-10-17 corrections**
 
 A direct comparison (TCP_NO_PINNED=1 to force the old sync path) found no statistically
 significant difference between pinned-async and sync-cpu D2H across four model sizes on
@@ -976,3 +976,71 @@ processes land on the same MIG GPU instance. NCCL's communicator setup probes NV
 between what it identifies as the same device, which deadlocks in the MIG context. NCCL requires
 genuinely separate GPU devices (multi-GPU node or multi-node). Not a bug in TorchSlicer;
 documented in `docs/tutorials/transport.md` and experiments.md.
+**Cause wrong, see issue 23**: NCCL fails cleanly ("Duplicate GPU detected"); the hang was ours.
+
+### Corrections and fixes (2026-10-17)
+
+Found by measuring each piece of the M9 benchmark separately (scratchpad micro-benchmarks,
+then the rewritten `benchmarks/transport/bench_transport.py`). Pre-fix numbers recorded first.
+
+**Benchmark errors (behind every M9 number logged on 2026-10-16):**
+- *"Act. MB/cut" was per epoch, not per batch.* It came from `bytes_fwd` of a whole
+  epoch (16 batches). Real cuts: small 0.07, medium 2.1, large 0.52, xlarge 3.15 MB per batch,
+  not 1/33.6/8.4/50.3 MB.
+- *ms/batch included setup.* It was the whole `train()` time (discovery, probing with its echo
+  bandwidth test, init, CUDA warm-up) over all batches; the "exclude first epoch" comment was
+  not implemented. IPC/medium: 22.3 ms reported vs 4.4 ms in steady state. This was the
+  "~21 ms fixed cost".
+- *Thread oversubscription.* torch sees the host's 40 cores (32 intra-op threads), but the
+  container's quota is 4 CPUs. Every CPU tensor op on the gRPC/TCP receive path woke 32
+  spinning OpenMP threads: about 15 CPU-seconds per process per run, and the cgroup was
+  throttled in 74 periods vs 4 with IPC. That also inflated the slices' measured compute
+  (580 ms vs 18 ms per epoch for the same layers). With `OMP_NUM_THREADS=4`, medium: gRPC
+  110 -> 22.5 ms/batch, TCP 58 -> 13 ms, IPC ~5 ms. The benchmark now sets threads to the
+  quota in both processes. The framework does not do this yet (open item).
+
+**23. NCCL on one GPU hung instead of failing.** Symptom: `p2p-nccl` with 2 slices on one
+GPU hung until the 240 s matrix timeout. Root cause: NCCL refuses two ranks on one GPU
+(`ncclInvalidUsage: Duplicate GPU detected`, checked with a 2-process script, NCCL 2.28.9).
+But PyTorch creates the communicator lazily, so the error came at the first send, inside a
+worker thread. And `_wait_nccl` swallowed rendezvous errors and switched that worker alone to
+gRPC, leaving its peer blocked in `dist.recv`. The 2026-10-16 explanation (NVLink probing on
+MIG) was wrong. Fix:
+- each rank publishes `hostname/GPU-UUID` in the store and refuses duplicates with a clear
+  reason;
+- eager communicator init (`device_id=`) and a per-init `PrefixStore`;
+- each rank writes `ok`/`err:<reason>` under `ts/nccl/<init_token>/status/<rank>`. The
+  coordinator polls these after `_init_slices` (`_wait_nccl_ready`) and raises on the first
+  error;
+- `_wait_nccl` raises instead of falling back; the store master failing to start raises.
+
+Now stops in 5–8 s with "needs one GPU per slice ... use transport.tensor=ipc on one GPU".
+Test: `tests/test_transport.py::test_nccl_on_one_gpu_fails_fast_with_the_reason`.
+
+**24. Hooked payloads never used IPC.** `pack_payload` moved every tensor to the CPU, and
+`_IpcPeerClient` sends CPU tensors over TCP. So IPC + hooks was correct (identical losses to
+TCP + hooks), but every send went over TCP: a send probe counted `ipc:cpu` -> TCP fallback
+on all sends. Fix: `pack_payload` keeps the payload's device. `unpack_payload` copies only a
+4 KB header peek to the host and slices the buffers where they live (with a full-copy
+fallback for longer headers). After: all sends `ipc:cuda:uint8`, same losses. Tests:
+`test_pack_payload_stays_on_the_payload_device`, `test_unpack_payload_header_longer_than_the_peek`,
+`test_ipc_matches_tcp_on_gpu[hooks1]`.
+
+**25. NCCL receive paths skipped hook decoding.** The three `dist.recv` sites (forward,
+last-slice forward, backward) passed the received tensor straight to the stage, skipping
+`_decode_in`/`_decode_grad`. Pre-fix symptom (gloo, CPU, quantize-8): `RuntimeError: Input
+type (unsigned char) and bias type (float) should be the same`. On CUDA the NCCL send of the
+CPU-packed payload would have failed first. Fix: decode after each `dist.recv` (+ issue 24
+for GPU payloads). After: matches TCP + hooks exactly. Test: `test_nccl_path_decodes_cut_hooks`.
+
+**Pinned memory, re-measured.** The old path (`.cpu()`) allocates fresh pageable memory per
+send. Above glibc's 32 MB mmap threshold every send page-faults: 20.3 ms vs 1.4 ms pinned at
+33.6 MB, 0.77 vs 0.36 ms at 8.4 MB. In the benchmark (mean of 3): no difference up to 8 MB
+cuts, **1.8x faster at 32 MB (92.5 -> 51.3 ms/batch) and 64 MB (168 -> 95 ms)**. The
+2026-10-16 "no benefit" came from cuts of 0.07–3 MB.
+
+**Coverage.** `tests/test_transport.py` (8 tests, real OS processes). The `nccl` transport is
+tested on CPU via gloo: same TorchSlicer code path, and a probe confirmed every transfer used
+`dist.isend`/`recv`. Matrix `central-nccl`/`p2p-nccl` (opt-in `MATRIX_NCCL=1`) are bit-exact
+on CPU. Full CPU matrix after these fixes: 115/117, the 2 known GPipe + BatchNorm cells;
+no existing cell's losses changed. **Still unverified: real NCCL on 2+ GPUs.**

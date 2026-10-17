@@ -135,15 +135,20 @@ shown in a Flower-based SplitFed baseline.
   TCP for cross-machine peers and CPU tensors) and `nccl` (isend/irecv on a process group).
   Tutorial `docs/tutorials/transport.md`; benchmarks `benchmarks/transport/`.
   - Matrix modes `central-ipc` and `p2p-ipc`: 36/36 OK (9 models, CPU and CUDA). A probe
-    confirmed the CUDA runs really used IPC.
-  - IPC is 2.3–4.4× faster than gRPC on a multi-process A100 MIG benchmark. The plan
-    expected 10–50×.
-  - Pinned vs sync D2H: no measurable difference on loopback (±6%, noise). The path is kept
-    for PCIe-bound setups.
-  - **Not validated: NCCL.** It hangs on a single MIG instance. `MATRIX_NCCL=1` adds
-    `p2p-nccl` for hardware with ≥2 GPUs.
-  - IPC and NCCL don't compose with `cut_hooks`.
-  - Bugs and details: validation.md "M9". Version 0.9.0.
+    confirmed the CUDA runs really used IPC. `central-nccl`/`p2p-nccl` (opt-in
+    `MATRIX_NCCL=1`) are bit-exact on CPU, where they run on gloo.
+  - Benchmark (redone 2026-10-17 after three measurement errors; experiments.md):
+    - IPC: 4.6× over TCP and 68× over gRPC at 64 MB cuts; its transfer is 10× cheaper than
+      TCP's.
+    - Pinned memory: 1.8× over the old TCP path at 32–64 MB, no difference ≤ 8 MB.
+    - For sub-MB cuts the transport barely matters.
+  - NCCL on one GPU now fails at init with the reason, instead of hanging. Cut hooks work
+    with IPC and NCCL; payloads are packed on the GPU.
+  - **Not validated: real NCCL.** It needs ≥ 2 GPUs.
+  - **Open: thread oversubscription.** torch uses the host's core count, not the container's
+    CPU quota, which made gRPC/TCP 4–5× slower here. The benchmark sets
+    `OMP_NUM_THREADS`; the framework doesn't yet.
+  - Bugs and details: validation.md "M9" (issues 23–25). Version 0.9.0.
 
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
@@ -494,7 +499,7 @@ Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardw
   - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not
     for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (272 tests at the end of M9, about 3.5 min;
+  - `.venv/bin/python -m pytest tests/` green (280 tests at the end of M9, about 5.5 min;
     `test_sl.py::test_distributed_hooks_match_local[hook0]` flaked once under load);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about
     15 min on CPU, more with the M9 `*-ipc` modes; pass a model name for a quick check).
