@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
+from ..algorithm.base import BackwardPolicy
 from ..core.split_layer import SplitLayer
 from ..core.tied import find_tied_parameters
 
@@ -514,12 +515,19 @@ class DistributedExecutor(BaseExecutor):
             )
 
         # Algorithm
-        from ..algorithm.base import Algorithm
+        from ..algorithm.base import Algorithm, check_supported
         from ..algorithm.builtin import DefaultAlgorithm
         if algorithm is None and getattr(self._run_config.sl, "algorithm", ""):
             from ..algorithm.registry import get as _get_algo
             algorithm = _get_algo(self._run_config.sl.algorithm)
         self._algorithm = algorithm if algorithm is not None else DefaultAlgorithm()
+        check_supported(self._algorithm, "distributed executor", {
+            "loss": "a custom loss",
+            "client_loss": "local-loss training",
+            "step_aux": "local-loss auxiliary optimizers",
+            "select_clients": "client sampling",
+            "needs_per_client_server_state": "per-client server copies, e.g. SplitFed V1",
+        })
         self._algorithm.configure(len(partitions), None, self._placement)
 
         # Notify callbacks that training is about to begin
@@ -539,6 +547,10 @@ class DistributedExecutor(BaseExecutor):
         n_batches        = 0
         n_total          = len(data_loader)
         session          = data_loader if isinstance(data_loader, ClientSession) else None
+        if self._algorithm.backward_policy(epoch) != BackwardPolicy.FULL:
+            raise ValueError(f"{type(self._algorithm).__name__}: the distributed executor runs only "
+                             f"BackwardPolicy.FULL (round {epoch} asked for "
+                             f"{self._algorithm.backward_policy(epoch).name})")
         if session is not None:
             adapter = self._session_adapter()
             batches = session.batches(adapter, epoch)
@@ -658,10 +670,10 @@ class DistributedExecutor(BaseExecutor):
         if session is not None and hasattr(self, "_algorithm"):
             new_states = self._algorithm.on_round_end(list(session.states), {}, epoch)
             if new_states is not None:
-                session.states = list(new_states)
+                session.replace_states(new_states, adapter)
             agg_client, _ = self._algorithm.aggregate(list(session.states), [], epoch)
             if agg_client is not None:
-                session.states = [agg_client] * len(session.states)
+                session.replace_states([agg_client] * len(session.states), adapter)
         stats = self._epoch_stats(epoch)
         self._add_worker_comm(stats)
         sl_metrics = self._meter.summary(self._placement, self._run_config.sl.link_bandwidth_mbps,

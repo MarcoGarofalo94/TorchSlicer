@@ -41,6 +41,7 @@ from .core.stages import (
 from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
 from .deploy import run
 from . import sl
+from . import data
 from .sl import (
     CutHook, CutContext, Float16, BFloat16, Quantize, TopK, GaussianNoise, Recorder, Chain,
     register_hook, ClientSession, Placement,

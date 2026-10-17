@@ -112,6 +112,15 @@ class ClientSession:
                 self.states = list(out if out is not None else states)
             adapter.set_state(self.states[self.current])
 
+    def replace_states(self, states, adapter) -> None:
+        """Replace every client's state (e.g. after aggregation) and load the active
+        client's new one into the live slices. Assigning ``states`` alone leaves the
+        slices on the active client's old state, which the next switch saves over the
+        new one."""
+        self.states = list(states)
+        if self.current is not None and self.states[self.current] is not None:
+            adapter.set_state(_copy_state(self.states[self.current]))
+
     def finish(self, adapter) -> None:
         """Store the active client's final state in ``states``."""
         if self.current is not None:
@@ -166,8 +175,14 @@ class SplitLayerClientState:
         for i, sl in self.layers.items():
             s = state[i]
             sl.load_state_dict(s["model"])
-            if sl.optimizer is not None and s.get("optimizer") is not None:
+            if sl.optimizer is None:
+                continue
+            if s.get("optimizer") is not None:
                 sl.optimizer.load_state_dict(s["optimizer"])
+            else:
+                # no optimizer state (e.g. after fedavg): start fresh, rather than keep
+                # the state of whichever client ran last
+                sl.optimizer.state.clear()
 
 
 def _cpu(obj):

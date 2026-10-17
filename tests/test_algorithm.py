@@ -332,3 +332,65 @@ def test_config_unknown_algorithm_raises():
     cfg.sl.algorithm = "does_not_exist_xyz"
     with pytest.raises(KeyError, match="unknown algorithm"):
         ts.slice(_model(), n=2).train(_data(), run_config=cfg)
+
+
+# ── SplitFed against a plain-PyTorch reference ────────────────────────────────
+
+def _splitfed_reference(datas, v1: bool, rounds=2):
+    """SplitFed in plain PyTorch, parallel clients: each client has its own client model
+    and optimizer; the server is shared (V2) or one copy per client (V1). At round end
+    the client models (and V1's server copies) are averaged and their optimizer states
+    start fresh (``fedavg`` drops them)."""
+    full = _model()
+    client0, server0 = nn.Sequential(*list(full)[:2]), nn.Sequential(*list(full)[2:])
+    k = len(datas)
+    clients = [copy.deepcopy(client0) for _ in range(k)]
+    servers = [copy.deepcopy(server0) for _ in range(k)] if v1 else [server0] * k
+    sgd = lambda m: torch.optim.SGD(m.parameters(), **SGD["params"])
+    c_opts = [sgd(c) for c in clients]
+    s_opts = [sgd(s) for s in servers] if v1 else [sgd(server0)] * k
+    out = []
+    for _ in range(rounds):
+        losses = []
+        for b in range(len(datas[0])):
+            for i in range(k):
+                x, y = datas[i][b]
+                a = clients[i](x)
+                a_in = a.detach().requires_grad_(True)
+                loss = nn.functional.cross_entropy(servers[i](a_in), y)
+                s_opts[i].zero_grad(); loss.backward(); s_opts[i].step()
+                c_opts[i].zero_grad(); a.backward(a_in.grad); c_opts[i].step()
+                losses.append(loss.item())
+        out.append(sum(losses) / len(losses))
+        groups = [(clients, c_opts)] + ([(servers, s_opts)] if v1 else [])
+        for models, opts in groups:
+            with torch.no_grad():
+                for ps in zip(*(m.parameters() for m in models)):
+                    avg = torch.stack([p for p in ps]).mean(0)
+                    for p in ps:
+                        p.copy_(avg)
+            for o in opts:
+                o.state.clear()
+    return out
+
+
+@pytest.mark.parametrize("algo_cls,v1", [(SplitFedAlgorithm, False), (SplitFedV1Algorithm, True)])
+def test_splitfed_matches_reference(algo_cls, v1):
+    # Regressions: after aggregation the last client of a round kept its old weights, and
+    # every client kept the previous client's momentum (validation.md M11).
+    g = torch.Generator().manual_seed(5)
+    datas = [[(torch.randn(B, D_IN, generator=g), torch.randint(0, 4, (B,), generator=g))
+              for _ in range(3)] for _ in range(3)]
+    cfg = _cfg(epochs=2)
+    cfg.sl.setting = "vanilla"
+    session = ts.ClientSession(datas, mode="parallel")
+    hist = ts.slice(_model(), n=2, cuts=["1"]).train(session, run_config=cfg, algorithm=algo_cls())
+    assert [h["loss"] for h in hist] == pytest.approx(_splitfed_reference(datas, v1), abs=1e-6)
+
+
+def test_unused_select_clients_is_refused():
+    class Sampler(ts.Algorithm):
+        def select_clients(self, available, round):
+            return available[:1]
+    with pytest.raises(ValueError, match="select_clients"):
+        _run(algorithm=Sampler(), epochs=1)

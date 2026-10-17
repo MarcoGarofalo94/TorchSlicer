@@ -18,7 +18,7 @@ from ..sl.hooks import CutContext, resolve_cut_hooks, payload_nbytes, tensor_nby
 from ..sl.roles import Placement, resolve_setting
 from ..sl.metrics import CommMeter
 from ..sl.clients import ClientSession, SplitLayerClientState
-from ..algorithm.base import Algorithm, AlgorithmContext, BackwardPolicy
+from ..algorithm.base import Algorithm, AlgorithmContext, BackwardPolicy, check_supported
 from ..algorithm.builtin import DefaultAlgorithm
 
 _LOG = get_logger("torchslicer.local")
@@ -163,6 +163,7 @@ class LocalExecutor(BaseExecutor):
             from ..algorithm.registry import get as _get_algo
             algorithm = _get_algo(cfg.sl.algorithm)
         self._algorithm = algorithm if algorithm is not None else DefaultAlgorithm()
+        check_supported(self._algorithm, "local executor", {"select_clients": "client sampling"})
         self._algorithm.configure(len(partitions), self.criterion, self._placement)
 
         # Notify callbacks
@@ -301,12 +302,12 @@ class LocalExecutor(BaseExecutor):
             new_states = self._algorithm.on_round_end(
                 list(session.states), epoch_metrics, epoch)
             if new_states is not None:
-                session.states = list(new_states)
+                session.replace_states(new_states, adapter)
             all_server_states = list(server_states.values()) if server_states else []
             agg_client, agg_server = self._algorithm.aggregate(
                 list(session.states), all_server_states, epoch)
             if agg_client is not None:
-                session.states = [agg_client] * len(session.states)
+                session.replace_states([agg_client] * len(session.states), adapter)
             if agg_server is not None and server_adapter is not None:
                 server_adapter.set_state(agg_server)
                 for k in list(server_states):

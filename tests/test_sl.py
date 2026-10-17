@@ -583,3 +583,12 @@ def test_u_shaped_recovery_keeps_the_tail_on_the_data_owner(tmp_path):
     assert [nd.address for nd in ex._nodes] == [addr, followers[0].address, f"127.0.0.1:{cfg.sl.tail_port}"]
     assert sorted(ex._local) == [0, 2] and len(ex.partitions) == 3
     assert h[-1]["bytes_label"] == 0 and len(h[-1]["bytes_fwd"]) == 2
+
+
+def test_distributed_refuses_algorithm_hooks_it_does_not_run():
+    # It used to ignore them and train plain SplitNN instead (validation.md M11).
+    data = _data()
+    two = lambda: [data[:2], data[2:]]
+    cfg = _cfg("p2p", "vanilla", clients=2, client_mode="parallel", algorithm="splitfed_v1")
+    with pytest.raises(ValueError, match="per-client server copies"):
+        _run(cfg, data_fn=two)

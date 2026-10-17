@@ -8,7 +8,7 @@ CLAUDE*.md
 AGENTS.md
 ISSUES.md
 local.*.md
-data/
+/data/
 runs/
 .cache/
 .env

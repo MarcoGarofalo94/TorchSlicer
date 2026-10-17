@@ -121,3 +121,20 @@ class Algorithm:
         """End of a round (epoch) with all client states. Return updated states
         or None to keep them. Default: no-op."""
         return None
+
+
+def overridden(algorithm: Algorithm, name: str) -> bool:
+    """Whether ``algorithm``'s class replaces ``Algorithm.<name>``."""
+    return getattr(type(algorithm), name, None) is not getattr(Algorithm, name)
+
+
+def check_supported(algorithm: Algorithm, executor: str, unsupported: dict) -> None:
+    """Raise if ``algorithm`` relies on a hook ``executor`` doesn't call, instead of
+    training something else silently. ``unsupported``: {hook name: what it does}."""
+    used = [f"{name} ({what})" for name, what in unsupported.items()
+            if (name == "needs_per_client_server_state" and algorithm.needs_per_client_server_state())
+            or (name != "needs_per_client_server_state" and overridden(algorithm, name))]
+    if used:
+        raise ValueError(f"{type(algorithm).__name__} uses hooks the {executor} doesn't run yet: "
+                         + "; ".join(used))
+

@@ -1083,3 +1083,40 @@ Verification: tests 278/280. The 2 failures are `test_offload.py::test_cuda_matc
 while another tenant held the GPU at 99 %. Possibly a timing race in offload, open.
 CPU matrix 115/117 (the 2 known GPipe + BatchNorm cells); every cell's losses
 bit-identical to before the change.
+
+## M11: Data and Scale Simulation (2026-10-17, branch `feat/m11-data-scale`)
+
+### Bugs found and fixed
+
+**27. After aggregation the last client of a round kept its old weights (M8, silent wrong
+result).** Found while designing evaluation for sessions. The executors replaced
+`session.states` with the `on_round_end`/`aggregate` output, but the live client slices still
+held the active (last) client's pre-aggregation state. The next round's first client switch
+saved that stale state over the aggregate. Probe: with SplitFed V2 and 3 parallel clients,
+before round 2's first switch all three states equal the average. After it, client 2's
+differs. So client 2 never received the average: one of N clients was left out of FedAvg
+every round. It affected local and distributed sessions with `ts.SplitFedAlgorithm`,
+`SplitFedV1Algorithm` or any `aggregate`/`on_round_end`, since M8 (0.8.0). Fix:
+`ClientSession.replace_states(states, adapter)` also loads the active client's new state into
+the slices; both executors use it.
+
+**28. After `fedavg` every client inherited the previous client's optimizer state (M8,
+silent wrong result with momentum/Adam).** `fedavg` drops optimizer state ("re-warms"), but
+`SplitLayerClientState.set_state` skipped the optimizer when the state had none. That left the
+live optimizer's buffers, i.e. the momentum of whichever client ran last (and V1's server
+copies likewise). Fix: no optimizer state now means `optimizer.state.clear()`.
+Test for 27 + 28: `test_algorithm.py::test_splitfed_matches_reference[V2, V1]`, which
+compares against SplitFed written in plain PyTorch (3 clients, SGD momentum 0.9, 2 rounds) at
+1e-6. Both fail without the fixes (round 2) and pass with them.
+
+**29. The distributed executor silently ignored most `ts.Algorithm` hooks (M8, silent wrong
+result).** It ran only `configure`, `on_round_end` and `aggregate`. A custom `loss`, local-loss
+training (`backward_policy`, `client_loss`, `step_aux`) and SplitFed V1's per-client server
+copies were dropped, and the run trained plain SplitNN/SplitFed V2 instead. Also,
+`select_clients` was called by no executor at all. M8's "one object, all executors" didn't
+hold. Fix for now: the executors refuse what they don't run, with a clear `ValueError`
+naming the hooks (`algorithm.base.check_supported`; a non-FULL backward policy is checked per
+round). Implementing them in the distributed executor is open (scheduled with M10).
+`select_clients` (client sampling) belongs in M11's many-client simulation. Tests:
+`test_sl.py::test_distributed_refuses_algorithm_hooks_it_does_not_run`,
+`test_algorithm.py::test_unused_select_clients_is_refused`.
