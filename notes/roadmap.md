@@ -380,7 +380,7 @@ shown in a Flower-based SplitFed baseline.
     ipc / nccl) across the four model sizes, with mean ± std over ≥ 3 seeds.
   - `docs/tutorials/transport.md`: when to use which mode (≤ 60 lines).
 
-- **M10, multi-client engine** (was M9; carried from M4). Clients as real nodes, not states swapped in one process.
+- **M10, multi-client engine** (was M9; carried from M4; moved after M13 on 2026-10-17). Clients as real nodes, not states swapped in one process.
   - **Clients on several machines.** Covers:
     - a worker-side data source (a client node owns its loader);
     - a per-batch return address on the shared server slice;
@@ -393,8 +393,6 @@ shown in a Flower-based SplitFed baseline.
   - **Sessions with fault tolerance:** a failed client is dropped from the round instead of stopping the run
     (carried from M4).
   - **Test:** N client processes equal the in-process `ClientSession` for the same algorithm, and losses match.
-  - **Why this before more transport work** (2026-10-17): SL algorithm research runs mostly in the simulator
-    (local executor, many seeds and clients), which M9 doesn't speed up.
 - **M11, data and scale simulation** (was M10):
   - **Federated partitioners:** IID; Dirichlet(α) label skew; quantity skew; per-client feature shift.
   - **Standard datasets:** MNIST, CIFAR-10/100, FEMNIST-like, a text/LLM fine-tuning set, tabular for vertical SL.
@@ -403,6 +401,12 @@ shown in a Flower-based SplitFed baseline.
     off-device (reuse M5 paging) and a scheduler over a GPU pool.
   - **Heterogeneity profiles:** compute speed and link bandwidth/latency per client, from the M2 capability model
     and the M4 link model, as config.
+  - **Batched client execution** (added 2026-10-17): today `ClientSession` runs clients one at a
+    time, swapping states. Run many clients' slices in one batched forward/backward (e.g.
+    `torch.func` + `vmap` over stacked client states) where the algorithm allows, so a round
+    costs about one big batch instead of N small ones. Must match the sequential path's losses.
+  - **Calibrated simulated time** (added 2026-10-17): check `sim_*_comm_s` against the M9 transport
+    measurements (`benchmarks/transport/`), so simulated wall-clock can be trusted.
   - **Test:** partition statistics match their definitions; a 1000-client run fits in this container's RAM.
 - **M12, privacy: attacks, defences, leakage metrics** (was M11). SL papers are judged on this, and the core has only
   `Recorder`.
@@ -492,19 +496,30 @@ Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardw
     just before M14 (real environment + testbed), which is the first milestone that requires
     security on a real network. The `weights_only=False` RCE on worker `init` is a known open
     risk; document it and accept it until then.
-  - **Next: M10 (multi-client engine).** Create with
-    `git switch -c feat/m10-multi-client feat/m9-fast-transport`. See the M10 entry above.
+  - **Next: M11 (data and scale simulation).** Create with
+    `git switch -c feat/m11-data-scale feat/m9-fast-transport`. See the M11 entry above.
     Open item from M9: run `MATRIX_NCCL=1 MATRIX_DEVICE=cuda run_matrix.py` and the NCCL
     transport benchmark once a machine with ≥2 distinct GPUs is available (at the latest in M14).
     Other open items:
     - `test_offload.py::test_cuda_matches_local` flakes (NaN), with or without the M9 changes,
       seen while another tenant held the GPU at 99 %. It may be a timing race in offload (M5).
-    - Calibrate `sim_*_comm_s` against the M9 transport measurements (benchmarks/transport/),
-      so simulated wall-clock can be trusted without real processes (fits M11).
+    - Calibrate `sim_*_comm_s` against the M9 transport measurements: now part of M11.
     - Framework-side thread sizing to the cgroup CPU quota (owner decision: changes defaults).
-  - **Milestone order** (updated 2026-10-16): M9 fast transport (done) → M10 multi-client engine →
+  - **Milestone order** (updated 2026-10-17, owner decision): M9 fast transport (done) →
     M11 data and scale simulation → M12 privacy suite → M13 baselines + Flower interop →
-    M7 security → M14 real environment and testbed → M15 release readiness → M16 the MLSys paper.
+    M10 multi-client engine → M7 security → M14 real environment and testbed →
+    M15 release readiness → M16 the MLSys paper. Numbers are kept, only the order changed.
+    - **Why:** the goal is adoption as the standard SL framework. Researchers mostly simulate, and
+      the competitors (SLPerf: 13 variants, datasets, non-IID splits; SplitBud: Flower-based,
+      multi-client) win on what a researcher meets first. So the simulator features (M11),
+      the privacy suite (M12, needed by the M13 attack + defence baseline) and the reproduced
+      baselines (M13) come before real multi-node clients (M10). SplitFed-style baselines
+      run on the in-process `ClientSession`, so M13 doesn't need M10.
+    - **Release work stays last** (owner decision 2026-10-17): the repo is already public, so
+      merging into `main`, publishing to PyPI and the docs site happen in M15. The license
+      can change later (owner).
+    - **Never break what exists:** every milestone keeps the test suite and the equivalence
+      matrix green, and doesn't change existing losses or defaults without an owner decision.
 - **Read first:**
   - this file;
   - `notes/validation.md` (how correctness is checked, and every bug found so far, rounds 1–7);
