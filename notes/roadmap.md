@@ -148,7 +148,15 @@ shown in a Flower-based SplitFed baseline.
   - **Open: thread oversubscription.** torch uses the host's core count, not the container's
     CPU quota, which made gRPC/TCP 4–5× slower here. The benchmark sets
     `OMP_NUM_THREADS`; the framework doesn't yet.
-  - Bugs and details: validation.md "M9" (issues 23–25). Version 0.9.0.
+  - gRPC above 32 MB (issue 26): the slowdown was page faults on fresh ≥32 MB buffers,
+    repeated over its ~9 copies per transfer. `deserialize_tensor` now copies once: 10–12 %.
+    `MALLOC_MMAP_MAX_=0 MALLOC_ARENA_MAX=1` gives 4× (documented in the tutorial, not set by
+    the framework). gRPC stays ~3.6× slower than TCP for big cuts; a streaming RPC would fix
+    that (not planned).
+  - **Who gains:** only runs with slices in separate processes: `ipc` on one machine (2–8×
+    over the old TCP), pinned `tcp` across machines for cuts ≥32 MB. The local executor
+    (simulator) has no transport and is unchanged. Real networks are unmeasured (loopback only).
+  - Bugs and details: validation.md "M9" (issues 23–26). Version 0.9.0.
 
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
@@ -385,6 +393,8 @@ shown in a Flower-based SplitFed baseline.
   - **Sessions with fault tolerance:** a failed client is dropped from the round instead of stopping the run
     (carried from M4).
   - **Test:** N client processes equal the in-process `ClientSession` for the same algorithm, and losses match.
+  - **Why this before more transport work** (2026-10-17): SL algorithm research runs mostly in the simulator
+    (local executor, many seeds and clients), which M9 doesn't speed up.
 - **M11, data and scale simulation** (was M10):
   - **Federated partitioners:** IID; Dirichlet(α) label skew; quantity skew; per-client feature shift.
   - **Standard datasets:** MNIST, CIFAR-10/100, FEMNIST-like, a text/LLM fine-tuning set, tabular for vertical SL.
@@ -486,6 +496,12 @@ Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardw
     `git switch -c feat/m10-multi-client feat/m9-fast-transport`. See the M10 entry above.
     Open item from M9: run `MATRIX_NCCL=1 MATRIX_DEVICE=cuda run_matrix.py` and the NCCL
     transport benchmark once a machine with ≥2 distinct GPUs is available (at the latest in M14).
+    Other open items:
+    - `test_offload.py::test_cuda_matches_local` flakes (NaN), with or without the M9 changes,
+      seen while another tenant held the GPU at 99 %. It may be a timing race in offload (M5).
+    - Calibrate `sim_*_comm_s` against the M9 transport measurements (benchmarks/transport/),
+      so simulated wall-clock can be trusted without real processes (fits M11).
+    - Framework-side thread sizing to the cgroup CPU quota (owner decision: changes defaults).
   - **Milestone order** (updated 2026-10-16): M9 fast transport (done) → M10 multi-client engine →
     M11 data and scale simulation → M12 privacy suite → M13 baselines + Flower interop →
     M7 security → M14 real environment and testbed → M15 release readiness → M16 the MLSys paper.
@@ -500,7 +516,8 @@ Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardw
     for framework milestones.
 - **Every change must keep:**
   - `.venv/bin/python -m pytest tests/` green (280 tests at the end of M9, about 5.5 min;
-    `test_sl.py::test_distributed_hooks_match_local[hook0]` flaked once under load);
+    `test_sl.py::test_distributed_hooks_match_local[hook0]` flaked once under load, and
+    `test_offload.py::test_cuda_matches_local` flakes on a busy GPU, see open items);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about
     15 min on CPU, more with the M9 `*-ipc` modes; pass a model name for a quick check).
     - Set `MATRIX_DEVICE=cuda` for the GPU, and

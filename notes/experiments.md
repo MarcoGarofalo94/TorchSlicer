@@ -177,3 +177,16 @@ NCCL: skipped. It needs one GPU per slice, and this host exposes one.
 
 **Conclusion**: for same-machine GPU slices use `ipc`; elsewhere use `tcp`. Keep `grpc` for
 NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
+
+## 2026-10-17 — gRPC transport above 32 MB
+
+- Hypothesis: gRPC's superlinear slowdown (61 ms at 8.4 MB -> 724 ms at 33.6 MB) comes from
+  page faults on fresh ≥32 MB buffers, not from gRPC itself.
+- Command: `BENCH_REPEATS=2 .venv/bin/python benchmarks/transport/bench_transport.py act32
+  act64 --variants grpc,tcp-nopin`, with and without `MALLOC_MMAP_MAX_=0 MALLOC_ARENA_MAX=1
+  MALLOC_TRIM_THRESHOLD_=4294967296`; before/after the `deserialize_tensor` copy fix.
+- grpc ms/batch at 33.6 / 67 MB: 740 / 1423 before; 654 / 1276 with the fix; 175 / 348 with
+  the fix plus the malloc settings. tcp-nopin: 101 / 181 -> 49 / 97 with the malloc settings
+  (= pinned TCP).
+- Conclusion: confirmed. The code fix gives 10–12 %; the malloc settings give 4×. gRPC stays
+  3.6× slower than TCP at these sizes. Details: notes/validation.md issue 26.

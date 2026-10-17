@@ -1044,3 +1044,42 @@ tested on CPU via gloo: same TorchSlicer code path, and a probe confirmed every 
 `dist.isend`/`recv`. Matrix `central-nccl`/`p2p-nccl` (opt-in `MATRIX_NCCL=1`) are bit-exact
 on CPU. Full CPU matrix after these fixes: 115/117, the 2 known GPipe + BatchNorm cells;
 no existing cell's losses changed. **Still unverified: real NCCL on 2+ GPUs.**
+
+### 26. gRPC collapse above 32 MB: page faults on fresh buffers (2026-10-17)
+
+Symptom: gRPC took 61 ms/batch at 8.4 MB cuts but 724 ms at 33.6 MB (12× for 4× the
+bytes). Cause, measured stage by stage (one transfer, A100 host, 4 threads): every fresh
+buffer of 32 MB or more page-faults on first touch, at about 0.6 ms/MB. Each transfer makes
+about 9 full-size copies (D2H, `tobytes`, protobuf serialize, gRPC core, parse, `msg.data`,
+`bytearray`, `clone`, H2D). Each copy is ≥10 GB/s below the threshold and about 1.6 GB/s
+above it: `deserialize_tensor` 6.8 ms at 16 MB, 74 ms at 32 MB. Two mechanisms are
+involved:
+- glibc serves allocations ≥32 MB with a fresh `mmap`;
+- gRPC handler threads allocate from secondary malloc arenas. Their heaps are capped at
+  64 MB and trimmed back to the OS, so `MALLOC_MMAP_MAX_=0` alone fixed 32 MB (740 -> 268
+  ms) but not 64 MB (1423 -> 1393).
+
+Fix (code): `deserialize_tensor` views the already-copied `msg.data` (upb copies on access)
+and makes one `.to(device, copy=True)` straight to the slice's device, dropping the
+`bytearray` and `clone` copies. Micro: 74 -> 33 ms at 32 MB on the GPU path. The send side
+can't be fixed the same way: protobuf only accepts `bytes`, and every new `bytes` ≥32 MB
+page-faults however it is built.
+
+End to end (grpc, ms/batch, mean of 2):
+
+| cut | before | deserialize fix | + `MALLOC_MMAP_MAX_=0 MALLOC_ARENA_MAX=1` |
+|---|---|---|---|
+| 33.6 MB | 740 | 654 | 175 |
+| 67 MB | 1423 | 1276 | 348 |
+
+The malloc settings restore linear scaling, and TCP without the pinned buffer matches pinned
+(49 / 97 ms). They are process-wide: RSS keeps its peak, and one arena means
+allocator lock contention. So they are documented, not set by the framework (open: an
+opt-in knob). The rest of the gap to TCP is gRPC's own copies; removing it needs a
+streaming/raw-bytes RPC (not done).
+
+Verification: tests 278/280. The 2 failures are `test_offload.py::test_cuda_matches_local`
+(NaN). It is flaky with and without this change (stash check: 2/4 and 3/4 failing runs),
+while another tenant held the GPU at 99 %. Possibly a timing race in offload, open.
+CPU matrix 115/117 (the 2 known GPipe + BatchNorm cells); every cell's losses
+bit-identical to before the change.

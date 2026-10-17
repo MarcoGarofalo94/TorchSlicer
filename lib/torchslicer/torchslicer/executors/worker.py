@@ -13,6 +13,7 @@ import socket
 import struct
 import threading
 import traceback
+import warnings
 from concurrent import futures
 from multiprocessing.reduction import ForkingPickler
 
@@ -137,9 +138,19 @@ def _tensor_payload_view(arr: torch.Tensor):
     return memoryview(arr.numpy()).cast("B")
 
 
-def deserialize_tensor(msg) -> torch.Tensor:
+def deserialize_tensor(msg, device="cpu") -> torch.Tensor:
+    """``msg.data`` is already a fresh copy (upb copies on access): view it and let the
+    one ``.to`` be the only other copy, straight to ``device``. Each fresh buffer of
+    32 MB or more page-faults (glibc mmap threshold), so every copy saved counts."""
     dtype = _DTYPE_MAP.get(msg.dtype, torch.float32)
-    return torch.frombuffer(bytearray(msg.data), dtype=dtype).reshape(list(msg.shape)).clone()
+    shape = list(msg.shape)
+    data = msg.data
+    if not data:
+        return torch.empty(shape, dtype=dtype, device=device)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "The given buffer is not writable")
+        view = torch.frombuffer(data, dtype=dtype)
+    return view.reshape(shape).to(device, copy=True)   # bytes are immutable: always copy
 
 
 def serialize_tensor(t: torch.Tensor):
@@ -1435,7 +1446,7 @@ class WorkerServicer(
                 worker=_HOSTNAME,
                 source="input",
             ):
-                tensor_cpu = deserialize_tensor(request.input)
+                tensor_cpu = deserialize_tensor(request.input, self.device)
             with _tracer.span(
                 "torchslicer.tensor.h2d",
                 batch_id=batch_id,
@@ -1454,7 +1465,7 @@ class WorkerServicer(
                         worker=_HOSTNAME,
                         source=f"aux:{k}",
                     ):
-                        aux_cpu = deserialize_tensor(v)
+                        aux_cpu = deserialize_tensor(v, self.device)
                     with _tracer.span(
                         "torchslicer.tensor.h2d",
                         batch_id=batch_id,
@@ -1635,7 +1646,7 @@ class WorkerServicer(
                     worker=_HOSTNAME,
                     source="label",
                 ):
-                    label_cpu = deserialize_tensor(request.label)
+                    label_cpu = deserialize_tensor(request.label, self.device)
                 with _tracer.span(
                     "torchslicer.tensor.h2d",
                     batch_id=batch_id,
@@ -1652,7 +1663,7 @@ class WorkerServicer(
                     worker=_HOSTNAME,
                     source="input_last",
                 ):
-                    tensor_cpu = deserialize_tensor(request.input)
+                    tensor_cpu = deserialize_tensor(request.input, self.device)
                 with _tracer.span(
                     "torchslicer.tensor.h2d",
                     batch_id=batch_id,
@@ -1719,7 +1730,7 @@ class WorkerServicer(
                 worker=_HOSTNAME,
                 source="gradient",
             ):
-                grad_cpu = deserialize_tensor(request.gradient)
+                grad_cpu = deserialize_tensor(request.gradient, self.device)
             with _tracer.span(
                 "torchslicer.tensor.h2d",
                 batch_id=batch_id,

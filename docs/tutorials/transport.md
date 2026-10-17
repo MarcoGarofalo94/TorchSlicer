@@ -29,6 +29,19 @@ CPU quota. Oversubscribed, the CPU work on the receive path spins idle threads a
 burns the quota: gRPC/TCP ran 4–5× slower on a 4-CPU container. Set `OMP_NUM_THREADS`
 to the quota on every node.
 
+**Cuts of 32 MB or more.** glibc serves each buffer that large with fresh memory, and
+the first write to every page of it costs a page fault (~0.6 ms/MB here). gRPC makes about
+nine copies per transfer, so it suffered most: 724 ms/batch at 33.6 MB vs 61 ms at 8.4 MB.
+Setting these on every node restores linear scaling (gRPC 654 -> 175 ms at 33.6 MB,
+1276 -> 348 ms at 67 MB):
+
+```bash
+export MALLOC_MMAP_MAX_=0 MALLOC_ARENA_MAX=1 MALLOC_TRIM_THRESHOLD_=4294967296
+```
+
+The cost: the process keeps its peak memory, and one malloc arena serializes
+allocations across threads. Prefer `tcp`/`ipc` for large cuts where you can.
+
 ## tcp
 
 A raw socket per directly reachable peer. CUDA tensors are copied into a reused
