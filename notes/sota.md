@@ -35,3 +35,35 @@ Format: title — year, venue — link — idea — setting — numbers. `[abstr
 - **Depth Gives a False Sense of Privacy: LLM Internal States Inversion** (Dong et al.) — 2025, USENIX Security — https://arxiv.org/abs/2507.16372 — inverts middle-layer states; 4,112-token prompt recovered at 86.88 token F1 from middle layer of Llama-3; 4 defenses insufficient.
 - **Privacy Failure in Split-LLM Training: The Returned Gradient Nullifies the Decoys** (Politis, Pappas) — 2026, arXiv — https://arxiv.org/abs/2609.04382 — decoy rows get zero gradient → 4096/4096 real rows identified; forward-only privacy checks miss gradient channel. Vanilla 2-node.
 - **UnSplit** — 2022, WPES — https://eprint.iacr.org/2021/1074 `[abstract-only]` — honest-but-curious server recovers inputs + client model knowing only architecture.
+
+## Leakage from weight updates (copied from the research branches, 2026-10-18)
+- **Deep Leakage from Gradients** (Zhu, Liu, Han) — 2019, NeurIPS `[unverified: venue]` — https://arxiv.org/abs/1906.08935 — pixel-/token-accurate reconstruction from shared gradients.
+- **Inverting Gradients** (Geiping, Bauermeister, Dröge, Moeller) — 2020, NeurIPS `[unverified: venue]` — https://arxiv.org/abs/2003.14053 — cosine-loss inversion; averaging over several iterations or images does not protect privacy.
+- **Data Leakage in Federated Averaging** (Dimitrov, Balunović, Konstantinov, Vechev) — 2022, TMLR `[unverified: venue]` — https://arxiv.org/abs/2206.12395 — inverts multi-epoch FedAvg weight deltas: >45% of images recovered from 10 local epochs × 10 batches × 5 images (FEMNIST) vs <10% for baselines. **Implication for RQ4:** φ_{t1} − φ_{t0} is a multi-step weight delta over P_{k-1}'s outputs and B's gradients, so it is a known leakage channel. Shipping it to P_k is not obviously ≤ normal participation (see gaps.md).
+
+## Failures/dropouts as an attack surface; active and label attacks in SL (retrieved 2026-09-29, for the G5 reframing)
+- **Practical Secure Aggregation for Privacy-Preserving ML** (Bonawitz et al.) — 2017, CCS `[unverified: venue, not on the pages read]` — https://eprint.iacr.org/2017/281 `[full-text §4.0.2–4.0.3]` — **closest precedent for fake failures.** Two quotes. A slow user is assumed dropped, the others reveal shares of its key, then its late message arrives and the server "learn[s] x_u in the clear". And "an adversarial server in the active model can similarly learn x_u simply by lying about whether user u has dropped out." Fix: double masking plus a signed ConsistencyCheck round. Lesson for us: make the protocol safe *even if* the failure claim is false; don't only harden detection. FL/SecAgg, a single server, no chain.
+- **Eluding Secure Aggregation in FL via Model Inconsistency** (Pasquini, Francati, Ateniese) — 2022, CCS — https://arxiv.org/abs/2111.07380 — a malicious server sends different models to different users and bypasses SecAgg. Protocol-level manipulation beats the cryptographic protection.
+- **DROPFL: Client Dropout Attacks Against FL Under Communication Constraints** (Qian et al.) — 2024, IEEE (ICASSP?) `[abstract-only via search snippet; unverified: venue]` — https://ieeexplore.ieee.org/document/10446609/ — controlled clients drop out deliberately: up to −10.2% accuracy, up to 4.1× training time. The goal is **availability/accuracy, not privacy.**
+- **Unleashing the Tiger: Inference Attacks on Split Learning (FSHA)** (Pasquini, Ateniese, Bernaschi) — 2021, CCS `[venue via search snippet]` — https://arxiv.org/abs/2012.02670 `[abstract-level]` — a malicious server uses its control of the gradients to steer the client's feature space into a known invertible one, then reconstructs inputs; also shows malicious clients can attack honest ones. **Relevance:** during an outage the downstream party supplies all gradients that train a *freshly initialised* stand-in, the easiest possible target for hijacking.
+- **Label Leakage and Protection in Two-party Split Learning** (Li, Sun, Yang, Gao, Zhang, Xie, Smith, Wang) — 2022, ICLR — https://arxiv.org/abs/2102.08504 — norm and direction attacks recover labels from the returned gradients; defense: Marvell noise. The attack heuristics target the binary/imbalanced case.
+- Not found: any SL/pipeline paper where a party fakes or induces a failure to gain weights or a shallower view. Searches: "split learning adversarial party exploits recovery re-partition", "fault tolerance mechanism exploited privacy attack", "client dropout manipulation attack". The dropout-attack literature targets SecAgg (privacy) or FL accuracy (DROPFL). `[negative search result, not proof of absence]`
+
+## Model extraction / functionality stealing in SL (retrieved 2026-09-29, for G5 "what the recovery node keeps")
+- **UnSplit** (Erdogan, Kupcu, Cicek) — 2022, WPES — https://arxiv.org/abs/2108.09033 — replaces the earlier
+  `[abstract-only]` eprint entry above. An honest-but-curious server that knows only the client architecture recovers
+  inputs and "a functionally similar model to the client model, without being detected" (coordinate descent on a
+  randomly initialised copy). It also infers labels perfectly when only the output layer is hidden.
+- **PCAT: Functionality and Data Stealing from SL by Pseudo-Client Attack** (Gao, Zhang) — 2023, USENIX Security —
+  https://www.usenix.org/conference/usenixsecurity23/presentation/gao `[abstract-level via search snippet + slides title]`
+  — a semi-honest server with a tiny aux set (0.1–5% of the training set) trains a pseudo-client that steals the
+  client's functionality, reconstructs inputs and infers labels. No knowledge of the client model is needed, and it works
+  for deeper client nets. **Baseline for G5:** a *downstream* party can already extract a surrogate of everything
+  upstream of it in normal operation.
+- **Model Extraction Attacks on Split Federated Learning** (Li, Rakin, Chen, Yang, He, Fan, Chakrabarti) — 2023, arXiv
+  `[unverified: venue; an OpenReview page exists]` — https://arxiv.org/abs/2303.08581 — malicious clients extract the
+  *server-side* model by querying gradients: >90% accuracy, <2% degradation (5-layer server part, VGG-11/CIFAR-10);
+  data-free when the server part is small. So extraction also works *upstream → downstream* via gradients.
+- **Oops!… They Stole it Again: Attacks on Split Learning (SoK)** (Khan, Michalas) — 2025, arXiv —
+  https://arxiv.org/abs/2508.10598 — covers poisoning, backdoor, model inversion, label/feature inference. **Does not
+  cover** dropout/failure/recovery-triggered attacks or multi-hop chains (checked 2026-09-29).
