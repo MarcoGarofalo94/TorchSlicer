@@ -309,3 +309,51 @@ def test_render_baremetal_gives_nodes_on_one_host_distinct_ports(tmp_path):
     assert env["peers"] == "h0:50051,h1:50051,h1:50053"   # tcp: port + 1 is taken
     with pytest.raises(SystemExit, match="needs 3 hosts"):
         render_baremetal(cfg, SCRIPT, "x.yaml", ["h0"], out=str(tmp_path), workdir="/")
+
+
+# ── ports every transport listens on (ipc and nccl were missing) ─────────────
+
+def test_listen_offsets_per_transport():
+    t = ts.RunConfig().transport
+    for tensor, serve, drive in [("grpc", [0], [0]), ("tcp", [0, 1], [0, 1]),
+                                 ("ipc", [0, 1], [0, 1]), ("nccl", [0], [0, 10])]:
+        t.tensor = tensor
+        assert (t.listen_offsets(), t.listen_offsets(drives=True)) == (serve, drive), tensor
+
+
+def test_free_port_avoids_the_ephemeral_range_and_checks_every_offset():
+    import socket
+    from torchslicer.deploy.runner import free_port
+    for _ in range(20):
+        p = free_port((0, 1, 10))
+        assert 20000 <= p < 32000
+        for o in (0, 1, 10):
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", p + o))
+
+
+@pytest.mark.parametrize("transport,lead_ports,worker_ports", [
+    ("ipc", ["grpc", "tensor"], ["grpc", "tensor"]),          # ipc falls back to TCP across pods
+    ("nccl", ["grpc", "nccl-store"], ["grpc"]),               # workers dial the driver's store
+])
+def test_render_k8s_exposes_ipc_and_nccl_ports(transport, lead_ports, worker_ports):
+    cfg = _load("p2p")
+    cfg.transport.tensor = transport
+    text = (ROOT / "experiments" / "run_anywhere_p2p.yaml").read_text()
+    docs = list(yaml.safe_load_all(yaml.safe_dump_all(render_k8s(cfg, SCRIPT, text))))
+    kinds = {(d["kind"], d["metadata"]["name"]): d for d in docs}
+    pre = cfg.deploy.name
+    assert [p["name"] for p in kinds[("Service", f"{pre}-driver")]["spec"]["ports"]] == lead_ports
+    assert [p["name"] for p in kinds[("Service", f"{pre}-workers")]["spec"]["ports"]] == worker_ports
+    nccl = [p for p in kinds[("Service", f"{pre}-driver")]["spec"]["ports"] if p["name"] == "nccl-store"]
+    assert all(p["port"] == cfg.network.worker_port + 10 for p in nccl)
+
+
+def test_render_baremetal_spaces_ipc_nodes_like_tcp(tmp_path):
+    cfg = _load("p2p")
+    cfg.transport.tensor = "ipc"
+    paths = render_baremetal(cfg, SCRIPT, "experiments/run_anywhere_p2p.yaml",
+                             ["h0", "h1", "h1"], out=str(tmp_path), workdir="/srv/run")
+    peers = next(line.split("=", 1)[1] for p in paths for line in pathlib.Path(p).read_text().splitlines()
+                 if line.startswith("export WORKER_PEERS="))
+    assert peers == "h0:50051,h1:50051,h1:50053"

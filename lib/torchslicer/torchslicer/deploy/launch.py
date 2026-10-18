@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 
-from ..config import RunConfig
+from ..config import NCCL_STORE_PORT_OFFSET, RunConfig
 from .nodes import RELAY_PORT, NodeSpec, coordinator_port, node_names, plan_nodes, tail_slice
 from .runner import free_port
 
@@ -99,12 +99,11 @@ def run_processes(script: str, config_path: str, cfg: RunConfig, *, out: str,
     """One OS process per node on this host (loopback, free ports). Workers start
     first; the driving node's output goes to stdout, the others' to ``out/<name>.log``.
     Returns the driving node's exit code (nonzero if a node crashed it)."""
-    tcp = cfg.transport.tensor.strip().lower() == "tcp"
-    offset = int(cfg.transport.tensor_port_offset) if tcp else 0
     names = node_names(cfg)
-    ports = [free_port(offset) for _ in names]
+    ports = [free_port(cfg.transport.listen_offsets(drives=role in ("coordinator", "driver")))
+             for _, role in names]
     nodes = plan_nodes(cfg, ["127.0.0.1"] * len(names), ports, config_path=config_path,
-                       tail_port=free_port(offset) if tail_slice(cfg) else None)
+                       tail_port=free_port(cfg.transport.listen_offsets()) if tail_slice(cfg) else None)
     if nodes[0].role == "coordinator":
         nodes[0].env["COORDINATOR_BIND_ADDRESS"] = nodes[0].address   # loopback only
     os.makedirs(out, exist_ok=True)
@@ -235,17 +234,14 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
     nodes = plan_nodes(cfg, hosts, ports, config_path=f"{_CONFIG_DIR}/run.yaml",
                        discovery="static")
     relay = nodes.pop() if has_relay else None
-    tcp = cfg.transport.tensor.strip().lower() == "tcp"
-    offset = int(cfg.transport.tensor_port_offset)
+    names_of = {0: "grpc", int(cfg.transport.tensor_port_offset): "tensor", NCCL_STORE_PORT_OFFSET: "nccl-store"}
 
-    def ports_of(port, tail: int | None = None):
-        ps = [{"name": "grpc", "port": port, "targetPort": port}]
-        if tcp:
-            ps.append({"name": "tensor", "port": port + offset, "targetPort": port + offset})
+    def ports_of(port, tail: int | None = None, drives: bool = False):
+        ps = [{"name": names_of[o], "port": port + o, "targetPort": port + o}
+              for o in cfg.transport.listen_offsets(drives=drives)]
         if tail:   # u_shaped: the driving node's last slice (followers send to it)
-            ps.append({"name": "tail", "port": tail, "targetPort": tail})
-            if tcp:
-                ps.append({"name": "tail-tensor", "port": tail + offset, "targetPort": tail + offset})
+            ps += [{"name": "tail" if o == 0 else f"tail-{names_of[o]}", "port": tail + o, "targetPort": tail + o}
+                   for o in cfg.transport.listen_offsets()]
         return ps
 
     lead_tail = int(nodes[0].env["SL_TAIL_PORT"]) if "SL_TAIL_PORT" in nodes[0].env else None
@@ -258,7 +254,8 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
             "command": [python, *nd.argv(script)],
             "env": [{"name": k, "value": v} for k, v in env.items()],
             "ports": [{"containerPort": p["targetPort"], "name": p["name"]}
-                      for p in (ports_of(nd.port, lead_tail if nd is nodes[0] else None)
+                      for p in (ports_of(nd.port, lead_tail if nd is nodes[0] else None,
+                                         drives=nd is nodes[0])
                                 if nd.role != "relay"
                                 else [{"name": "grpc", "port": nd.port, "targetPort": nd.port}])],
             "volumeMounts": [{"name": "config", "mountPath": _CONFIG_DIR}],
@@ -288,7 +285,7 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
     lead_labels = {"app.kubernetes.io/name": cfg.deploy.name, "torchslicer/node": lead_name}
     docs.append({
         "apiVersion": "v1", "kind": "Service", "metadata": meta(lead),
-        "spec": {"selector": lead_labels, "ports": ports_of(lead_port, lead_tail)},
+        "spec": {"selector": lead_labels, "ports": ports_of(lead_port, lead_tail, drives=True)},
     })
     k = len(nodes) - 1
     if k:
@@ -343,8 +340,7 @@ def render_baremetal(cfg: RunConfig, script: str, config_path: str, hosts: list[
     if len(hosts) != len(names):
         raise SystemExit(f"--hosts needs {len(names)} hosts ({', '.join(n for n, _ in names)}), "
                          f"got {len(hosts)}")
-    tcp = cfg.transport.tensor.strip().lower() == "tcp"
-    step = int(cfg.transport.tensor_port_offset) + 1 if tcp else 1
+    step = max(cfg.transport.listen_offsets(drives=True)) + 1   # nodes on one host don't overlap
     used: dict[tuple, int] = {}
     ports = []
     for (_, role), h in zip(names, hosts):

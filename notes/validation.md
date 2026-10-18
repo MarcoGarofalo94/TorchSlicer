@@ -1239,3 +1239,45 @@ change. But under load they now fail every time, including
 pager's stream/event ordering (M5), not noise. **Open, worth fixing before M16's offload
 claims.** On an idle GPU, `test_offload.py` passes 25/25 three times in a row, so the
 failures depend on load: a timing race, not wrong math.
+
+## After M11 (2026-10-18, branch `fix/post-m11`)
+
+**30. Offload trained to NaN under GPU load (M5, silent wrong result).** Symptom: the offload
+CUDA tests failed with NaN losses whenever another process loaded the GPU, and passed when it
+was idle. Reproduced on demand with a load generator (8192² matmuls in a loop, GPU at 100 %):
+4 of 25 tests failed every run. Bisected by syncing at one place at a time (4 runs each):
+- syncing after `acquire`/`fetch` or before `release`/`_writeback` didn't help; syncing before
+  `_page_in`, or `CUDA_LAUNCH_BLOCKING=1`, fixed it;
+- syncing the compute stream fixed it; syncing the H2D or D2H stream didn't;
+- only full page-ins needed it (not state-only), and only the first copy into a **freshly
+  allocated slot**: at construction or when slots grow after batch 1 (both needed).
+
+So the first H2D into a new slot raced with work already queued on the compute stream, which
+its `free`/`out` events (None for a new slot) don't cover. Which compute op touches the new
+memory isn't identified (`_ensure_cap` synchronizes before allocating).
+Fix: that one copy also waits for an event recorded on the compute stream (`_Slot.fresh`).
+A first version waited at every page-in. That was also correct, but bimodally ~11 % slower
+(0.168 ± 0.011 vs 0.159 ± 0.001 s/step, 150M-param model, 4 runs each). The narrowed version
+measured 0.159 in 4 of 5 rounds, the same as before; in the fifth both versions slowed together
+(external). After: `test_offload.py` 25/25 three times in a row at 100 % GPU load.
+
+**31. The deploy code didn't reserve or expose the ports of ipc and nccl, and picked ports in
+the ephemeral range (M3/M9).** Found by CI on `main` (py3.12): `test_nccl_path_on_gloo_matches_tcp`
+failed with `EADDRINUSE` on the NCCL store port (driver port + 10), which the launcher never
+checked. Also:
+- `ipc` opens its tensor listener at port + offset like `tcp`, but the processes launcher,
+  `ROLE=all`, k8s (Service/containerPort) and bare metal only reserved or exposed it for `tcp`.
+  So `ipc` across k8s pods, which falls back to TCP on that port, would not connect;
+- the NCCL store port wasn't exposed on the k8s lead Service;
+- `free_port` took ports from the OS (32768–60999, the ephemeral range), so an outgoing
+  connection could take one between the check and the bind.
+Fix: `TransportConfig.listen_offsets(drives=)` is the one list of a node's ports (gRPC,
+tensor listener for tcp/ipc, NCCL store on the driving node), used by every launcher;
+`NCCL_STORE_PORT_OFFSET` is shared by the store and the workers; `free_port(offsets)` draws
+from 20000–32000 and checks every offset. `start_worker(port=0)` refuses ipc like tcp.
+Tests: `test_listen_offsets_per_transport`, `test_free_port_avoids_the_ephemeral_range_and_checks_every_offset`,
+`test_render_k8s_exposes_ipc_and_nccl_ports`, `test_render_baremetal_spaces_ipc_nodes_like_tcp`.
+
+Verification (issues 30–31 + GPU CI files): tests 330/330 with CUDA visible (offload, IPC
+and the CUDA tests all passing); CPU matrix 115/117 (known GPipe + BatchNorm), all losses
+identical.
