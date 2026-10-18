@@ -665,3 +665,11 @@ def test_state_nbytes_counts_optimizer_slots():
     assert state_nbytes(layer(lambda p: torch.optim.SGD(p, lr=0.1))) == 440
     assert state_nbytes(layer(lambda p: torch.optim.SGD(p, lr=0.1, momentum=0.9))) == 880
     assert state_nbytes(layer(lambda p: torch.optim.Adam(p))) == 1320
+
+
+def test_distributed_refuses_simulated_client_profiles():
+    data = _data()
+    cfg = _cfg("p2p", "vanilla", clients=2, client_mode="parallel",
+               client_profiles=[{"compute_scale": 2.0}])
+    with pytest.raises(ValueError, match="client_profiles"):
+        _run(cfg, data_fn=lambda: [data[:2], data[2:]])

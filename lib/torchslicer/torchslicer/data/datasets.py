@@ -13,7 +13,14 @@ Names (``available_datasets()``):
   smoke tests). Params: ``shape`` (default [3, 32, 32]), ``classes`` (10), ``n``
   (1024 train / 256 test).
 - ``npz``: a local ``.npz`` file with ``x`` (N, H, W[, C] uint8 or float) and ``y`` (N,)
-  arrays. Params: ``path`` (train file), ``test_path``, optional ``mean``/``std``.
+  arrays, and optionally ``groups`` (N,) for the ``natural`` partitioner (e.g. LEAF's
+  FEMNIST writers). Params: ``path`` (train file), ``test_path``, optional ``mean``/``std``.
+- ``shakespeare``: next-character prediction on tiny-shakespeare (1 MB), in windows of
+  ``seq_len`` (64) characters, each tagged with its speaking role in ``groups``, so the
+  ``natural`` partitioner gives one or more roles per client (in the spirit of LEAF's
+  Shakespeare; not the same corpus or split). ``x``, ``y``: int64 ``(seq_len,)``, ``y`` =
+  ``x`` shifted by one. ``targets`` (what the partitioners read) are the role ids;
+  ``vocab`` is the character list. A seeded 10 % of the windows is the test set.
 """
 from __future__ import annotations
 
@@ -102,10 +109,62 @@ def _npz(train: bool, path: str, test_path: str | None = None, mean=None, std=No
         raise ValueError("dataset npz: params.test_path is needed for the test set")
     z = np.load(Path(file))
     x = _nchw(z["x"])
-    return ImageTensorDataset(x, torch.as_tensor(z["y"], dtype=torch.long), mean, std)
+    ds = ImageTensorDataset(x, torch.as_tensor(z["y"], dtype=torch.long), mean, std)
+    if "groups" in z.files:
+        ds.groups = np.asarray(z["groups"], dtype=np.int64)
+    return ds
 
 
-_DATASETS = ("mnist", "fashion_mnist", "cifar10", "cifar100", "synthetic", "npz")
+class TextLMDataset(Dataset):
+    """Next-token windows over one token sequence: ``x = ids[s:s+T]``, ``y = ids[s+1:s+T+1]``."""
+
+    def __init__(self, ids: torch.Tensor, starts: np.ndarray, seq_len: int, groups: np.ndarray, vocab):
+        self.ids, self.starts, self.seq_len = ids, starts, seq_len
+        self.groups = groups
+        self.targets = torch.as_tensor(groups, dtype=torch.long)
+        self.vocab = vocab
+
+    def __len__(self) -> int:
+        return len(self.starts)
+
+    def __getitem__(self, i):
+        s = int(self.starts[i])
+        return self.ids[s:s + self.seq_len], self.ids[s + 1:s + self.seq_len + 1]
+
+
+_SHAKESPEARE_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+
+
+def _shakespeare(root: str, train: bool, download: bool, seed: int = 0, seq_len: int = 64,
+                 test_fraction: float = 0.1):
+    path = Path(root) / "shakespeare" / "input.txt"
+    if not path.exists():
+        if not download:
+            raise FileNotFoundError(f"{path} is missing and download is off")
+        import urllib.request
+        path.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(_SHAKESPEARE_URL, path)
+    text = path.read_text()
+    vocab = sorted(set(text))
+    index = {c: i for i, c in enumerate(vocab)}
+    ids = torch.tensor([index[c] for c in text], dtype=torch.long)
+    roles, starts, groups, pos = {}, [], [], 0
+    for block in text.split("\n\n"):                 # "NAME:\nspeech..." per speech
+        head, _, speech = block.partition("\n")
+        begin = pos + len(head) + 1                    # the speech, after the name line
+        if head.endswith(":") and len(speech) > seq_len:
+            role = roles.setdefault(head[:-1].strip(), len(roles))
+            for s in range(begin, begin + len(speech) - seq_len, seq_len):
+                starts.append(s)
+                groups.append(role)
+        pos += len(block) + 2
+    starts, groups = np.array(starts), np.array(groups)
+    test = np.random.default_rng(seed).random(len(starts)) < test_fraction
+    keep = ~test if train else test
+    return TextLMDataset(ids, starts[keep], seq_len, groups[keep], vocab)
+
+
+_DATASETS = ("mnist", "fashion_mnist", "cifar10", "cifar100", "synthetic", "npz", "shakespeare")
 
 
 def available_datasets() -> list[str]:
@@ -124,4 +183,6 @@ def load_dataset(name: str, root: str = "data", train: bool = True, download: bo
         return _synthetic(train, seed=seed, **params)
     if name == "npz":
         return _npz(train, **params)
+    if name == "shakespeare":
+        return _shakespeare(root, train, download, seed=seed, **params)
     raise KeyError(f"unknown dataset {name!r}; available: {available_datasets()}")

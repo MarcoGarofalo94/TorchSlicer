@@ -1196,3 +1196,46 @@ code (not a loss mismatch). It passes alone (8/8) and after `test_sl.py`, so it 
 in full runs, 2 of the last 4. The error text was lost to `tail`; open: capture it (the test
 prints the subprocess's stdout/stderr on failure). CPU matrix 115/117 (known GPipe + BatchNorm),
 all losses identical. Container memory peak during all of this: 6.2 GB.
+
+### Step 4: heterogeneous clients, link-model calibration, more data (2026-10-18)
+
+- **Client profiles** (`sl.client_profiles`, local executor; distributed refuses). Each
+  client draws `{compute_scale, bandwidth_mbps, latency_ms}` by `share` (seeded).
+  `CommMeter` keeps per-client sub-meters, so a client's simulated time is its own compute ×
+  scale plus its own bytes and messages over its own link. Checked exactly: with scale 0, the
+  time equals the link formula on the known bytes (2176 B and 3 messages per batch). The round
+  equals the slowest client (parallel) or the sum (sequential) plus server compute, and
+  training losses are unchanged.
+- **Link-model calibration** (`benchmarks/transport/fit_link.py`): fit
+  `other = 3·latency + 2·cut/bandwidth` per transport to the benchmark. A100 (cuts ≤ 10 MB):
+  tcp 1.37 ms + 15.6 Gbit/s (median error 14 %, max 127 %), ipc 0.64 ms + 47 Gbit/s (7 %, 14 %),
+  grpc 1.37 ms + 2.5 Gbit/s (11 %, 46 %). gRPC above 32 MB doesn't fit a line (issue 26).
+  CPU (`results/cpu.json`, new): tcp 0.94 ms + 24 Gbit/s (12 %, 31 %), grpc 0.79 ms +
+  3.1 Gbit/s (16 %, 45 %).
+- **Simulator vs real**, CPU (the GPU was held at 99 % by another tenant throughout). Local
+  executor with the fitted link vs the real 2-process run, ms/batch:
+  medium/xlarge/act8 (cut ≥ 2 MB or compute-heavy): **0–6 % error** for both transports.
+  small (~7 ms/batch): 42–58 % too low; large tcp: 33 % too low. The simulator misses fixed
+  per-batch costs (RPC scheduling, thread handoffs) that dominate a few-ms batch, and two real
+  processes share 4 CPUs, so their measured compute differs. Conclusion: simulated time is
+  trustworthy when compute or cut size dominates, and optimistic for tiny models.
+  **GPU** (idle A100, fits from `results/cuda.json`, 15 model × transport cases): median error
+  12 %; cuts ≥ 3 MB 1–12 %; ipc 6–20 %; worst small/tcp 51 %, large/tcp 34 %, medium/tcp
+  32 %. The simulator under-predicts everywhere but one case, as on CPU. (A first attempt
+  ran under 99 % GPU load and used a fit file overwritten by a 100 MB fit, which gave gRPC a
+  negative latency; both fixed: per-limit fit files, and runs only on an idle GPU.)
+- **`natural` partitioner** (whole groups per client, greedy balance), **feature shift**
+  (`noise`: std grows with the client index, fixed per sample; `rotate`), **`shakespeare`**
+  (tiny-shakespeare by speaking role: 11,203 train windows, 241 roles; not LEAF's corpus),
+  `npz` with `groups`. **Per-token accuracy** for `(N, C, T)` outputs, checked against the
+  model evaluated by hand. Smoke: 10 clients by role, SplitFed: token accuracy 31 → 38 % in 2
+  small epochs.
+
+Verification of step 4: tests 320/325. The 5 failures are `test_offload.py` CUDA tests
+(NaN), with the GPU held at 99 % by another tenant. Same-GPU A/B: 4 failures in each of 2
+runs with step 4 and in each of 2 runs without it (one run gave 2), so they are not from this
+change. But under load they now fail every time, including
+`test_cuda_trains_a_model_that_does_not_fit`, which points at a real race in the offload
+pager's stream/event ordering (M5), not noise. **Open, worth fixing before M16's offload
+claims.** On an idle GPU, `test_offload.py` passes 25/25 three times in a row, so the
+failures depend on load: a timing race, not wrong math.

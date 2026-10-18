@@ -61,7 +61,7 @@ pip install 'torchslicer[grpc,monitor,peft]'       # + OpenTelemetry tracing + L
 Python ≥ 3.10. PyTorch is deliberately not a dependency: install the build that matches
 your hardware first. The datasets in `ts.data` use `torchvision` for downloading.
 
-From source (the development version, 0.9.0):
+From source (the development version, 0.11.0):
 
 ```bash
 git clone https://github.com/MarcoGarofalo94/TorchSlicer && cd TorchSlicer

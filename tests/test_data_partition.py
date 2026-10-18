@@ -114,3 +114,46 @@ def test_register_partitioner_and_errors():
         partition(_labels(), 2, "nope")
     with pytest.raises(ValueError):
         partition(_labels(), 0)
+
+
+def test_natural_keeps_groups_whole_and_balances():
+    rng = np.random.default_rng(0)
+    groups = np.repeat(np.arange(12), rng.integers(5, 60, 12))
+    labels = np.zeros(len(groups), dtype=np.int64)
+    split = partition(labels, 4, "natural", groups=groups, seed=2)
+    owner = {}
+    for k, idx in enumerate(split.indices):
+        for g in np.unique(groups[idx]):
+            assert owner.setdefault(g, k) == k                 # a group never spans clients
+    sizes = split.sizes()
+    assert max(sizes) - min(sizes) <= max(np.bincount(groups))  # greedy: within one group
+    one_each = partition(labels, 12, "natural", groups=groups)
+    assert sorted(len(np.unique(groups[i])) for i in one_each.indices) == [1] * 12
+    assert "groups" not in split.params                        # not saved with the split
+    with pytest.raises(ValueError, match="only 12 groups"):
+        partition(labels, 13, "natural", groups=groups)
+
+
+def test_feature_shift_noise_grows_with_the_client_and_is_fixed():
+    from torchslicer.data import FeatureShift
+    x = torch.zeros(4000)
+    shift = FeatureShift("noise", 0.5, seed=1)
+    assert torch.equal(shift(x, 0, 5, 7), x)                    # client 0 unshifted
+    for k in (1, 4):
+        out = shift(x, k, 5, 7)
+        assert out.std().item() == pytest.approx(0.5 * k / 4, rel=0.05)
+        assert torch.equal(out, shift(x, k, 5, 7))             # same every epoch
+    assert not torch.equal(shift(x, 4, 5, 7), shift(x, 4, 5, 8))
+
+
+def test_feature_shift_rotate_and_loaders():
+    from torchslicer.data import FeatureShift
+    img = torch.arange(16.).view(1, 4, 4)
+    rot = FeatureShift("rotate", 90.0)(img, 1, 2, 0)
+    assert torch.allclose(rot, torch.rot90(img, 1, (1, 2)), atol=1e-4) or \
+           torch.allclose(rot, torch.rot90(img, -1, (1, 2)), atol=1e-4)
+    ds = TensorDataset(torch.zeros(40, 1, 4, 4), torch.as_tensor(_labels(4, 10)))
+    split = partition(ds.tensors[1], 2, "iid")
+    l0, l1 = split.loaders(ds, 8, feature_shift=FeatureShift("noise", 1.0))
+    assert torch.equal(next(iter(l0))[0], torch.zeros(8, 1, 4, 4))
+    assert next(iter(l1))[0].abs().sum() > 0

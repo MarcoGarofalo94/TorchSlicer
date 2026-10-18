@@ -530,6 +530,9 @@ class DistributedExecutor(BaseExecutor):
         })
         self._algorithm.configure(len(partitions), None, self._placement)
         self._client_store = None
+        if self._run_config.sl.client_profiles:
+            raise ValueError("sl.client_profiles (simulated heterogeneous clients) run on the local "
+                             "executor; a distributed run has real ones")
 
         # Notify callbacks that training is about to begin
         for cb in self._callbacks:

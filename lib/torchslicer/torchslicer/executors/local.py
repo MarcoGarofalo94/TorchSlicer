@@ -16,7 +16,7 @@ from ..monitor.run_logger import RunLogger
 from ..monitor.callback import TrainingCallback
 from ..sl.hooks import CutContext, resolve_cut_hooks, payload_nbytes, tensor_nbytes
 from ..sl.roles import Placement, resolve_setting
-from ..sl.metrics import CommMeter
+from ..sl.metrics import CommMeter, assign_profiles, client_times
 from ..sl.clients import (ClientSession, SplitLayerClientState, algorithm_round_end,
                           resolve_client_store, select_clients)
 from ..algorithm.base import Algorithm, AlgorithmContext, BackwardPolicy
@@ -143,6 +143,9 @@ class LocalExecutor(BaseExecutor):
         self._link = ((sl_cfg.link_bandwidth_mbps, sl_cfg.link_latency_ms) if sl_cfg else (0.0, 0.0))
         self._client_states = (sl_cfg.client_states if sl_cfg else "") or "cpu"
         self._client_store = self._server_store = None
+        self._profiles = list(sl_cfg.client_profiles or []) if sl_cfg else []
+        self._profile_seed = int(sl_cfg.profile_seed) if sl_cfg else 0
+        self._tiers = None
 
         # Initialise profilers (one per partition) and RunLogger
         if cfg:
@@ -250,6 +253,8 @@ class LocalExecutor(BaseExecutor):
                     prev_client_for_server = client
 
                 batch_id = epoch * n_total + n_batches
+                if self._profiles:
+                    self._meter.client = client if client is not None else 0
                 _shape = (str(tuple(inputs.shape)) if isinstance(inputs, torch.Tensor)
                           else "multimodal")
 
@@ -316,6 +321,14 @@ class LocalExecutor(BaseExecutor):
             **self._meter.summary(self._placement, *self._link),
             **self._epoch_extras(epoch_duration_s),
         }
+        if self._profiles:
+            n_clients = session.n_clients if session is not None else 1
+            if self._tiers is None:
+                self._tiers = assign_profiles(self._profiles, n_clients, self._profile_seed)
+                epoch_metrics["client_tiers"] = list(self._tiers)
+            parallel = session is not None and session.mode == "parallel"
+            epoch_metrics.update(client_times(self._meter, self._placement, self._profiles,
+                                              self._tiers, parallel))
 
         # Algorithm round-end: aggregation and per-client state updates
         if session is not None:
@@ -365,15 +378,15 @@ class LocalExecutor(BaseExecutor):
         return epoch_metrics
 
     def evaluate(self, loader) -> dict:
-        """Test loss (the training criterion) and, for classification (``(N, C)`` outputs,
-        ``(N,)`` labels), accuracy of the current weights: forward only, no gradients,
+        """Test loss (the training criterion) and, for classification (``(N, C)`` outputs and
+        ``(N,)`` labels, or per token: ``(N, C, T)`` and ``(N, T)``), accuracy of the current weights: forward only, no gradients,
         every slice in eval mode, the RNG state restored after. Cut hooks transform the activations as in training
         (``CutContext.direction == "eval"``; ``Recorder`` skips it); no bytes are counted."""
         device = next(self.split_layers[0].parameters()).device
         was_training = [sl.training for sl in self.split_layers]
         for sl in self.split_layers:
             sl.eval()
-        total, correct, n, classify = 0.0, 0, 0, True
+        total, correct, n, n_items, classify = 0.0, 0, 0, 0, True
         # iterating a DataLoader draws from the global RNG: keep training's stream intact
         rng_devices = [device] if device.type == "cuda" else []
         try:
@@ -391,8 +404,11 @@ class LocalExecutor(BaseExecutor):
                     b = labels.shape[0]
                     total += self.criterion(x, labels).item() * b
                     n += b
-                    if x.dim() == 2 and labels.dim() == 1:
+                    # classes on dim 1: (N, C) vs (N,), or (N, C, T...) vs (N, T...) for tokens
+                    if (x.dim() == labels.dim() + 1 and not labels.is_floating_point()
+                            and x.shape[0] == b and x.shape[2:] == labels.shape[1:]):
                         correct += (x.argmax(1) == labels).sum().item()
+                        n_items += labels.numel()
                     else:
                         classify = False
         finally:
@@ -402,7 +418,7 @@ class LocalExecutor(BaseExecutor):
             return {}
         out = {"test_loss": round(total / n, 6), "test_samples": n}
         if classify:
-            out["test_accuracy"] = round(correct / n, 6)
+            out["test_accuracy"] = round(correct / n_items, 6)
         return out
 
     def _eval_cut(self, cut: int, x):

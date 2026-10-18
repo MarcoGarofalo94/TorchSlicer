@@ -20,6 +20,13 @@ Methods (``ts.data.available_partitioners()``):
   at random (with 2 shards, at most ~2 classes per client).
 - ``quantity`` (``beta``): quantity skew. Client sizes drawn from Dirichlet(beta),
   samples assigned at random (labels stay IID).
+- ``natural`` (``groups``): the data's own partition, e.g. writers or speakers. Groups
+  are never split; each client gets whole groups, the largest first to the client with
+  the fewest samples (one group each when there are as many clients as groups).
+  ``groups`` defaults to the dataset's ``groups`` attribute.
+
+Feature shift (the same labels, different inputs per client) is a transform on top of
+any split: ``ClientSplit.loaders(..., feature_shift=FeatureShift("noise", 0.5))``.
 
 Add one with ``ts.data.register_partitioner(name, fn)``, where
 ``fn(labels, n_clients, rng, **params) -> list[np.ndarray]``.
@@ -103,7 +110,27 @@ def _quantity(labels, n_clients, rng, beta: float = 0.5, min_size: int = 1, max_
                      f"draws (beta={beta}, {n_clients} clients); raise beta or lower min_size")
 
 
-_PARTITIONERS = {"iid": _iid, "dirichlet": _dirichlet, "shards": _shards, "quantity": _quantity}
+def _natural(labels, n_clients, rng, groups=None):
+    if groups is None:
+        raise ValueError("natural: needs groups (one id per sample), e.g. the dataset's groups")
+    groups = np.asarray(groups)
+    if len(groups) != len(labels):
+        raise ValueError(f"natural: {len(groups)} group ids for {len(labels)} samples")
+    ids = rng.permutation(np.unique(groups))
+    if n_clients > len(ids):
+        raise ValueError(f"natural: {n_clients} clients but only {len(ids)} groups")
+    members = {g: np.flatnonzero(groups == g) for g in ids}
+    order = sorted(ids, key=lambda g: -len(members[g]))          # stable: ties keep the shuffle
+    parts, sizes = [[] for _ in range(n_clients)], np.zeros(n_clients, dtype=np.int64)
+    for g in order:
+        k = int(np.argmin(sizes))
+        parts[k].append(members[g])
+        sizes[k] += len(members[g])
+    return [np.concatenate(p) for p in parts]
+
+
+_PARTITIONERS = {"iid": _iid, "dirichlet": _dirichlet, "shards": _shards, "quantity": _quantity,
+                 "natural": _natural}
 
 
 def register_partitioner(name: str, fn) -> None:
@@ -139,12 +166,17 @@ class ClientSplit:
         from torch.utils.data import Subset
         return [Subset(dataset, i.tolist()) for i in self.indices]
 
-    def loaders(self, dataset, batch_size: int, shuffle: bool = True, **kwargs) -> list:
-        """One ``DataLoader`` per client. Client ``k`` shuffles with seed ``seed + k``."""
+    def loaders(self, dataset, batch_size: int, shuffle: bool = True, feature_shift=None, **kwargs) -> list:
+        """One ``DataLoader`` per client. Client ``k`` shuffles with seed ``seed + k``;
+        ``feature_shift`` (a ``FeatureShift``) transforms client ``k``'s inputs."""
         import torch
         from torch.utils.data import DataLoader
+        subs = self.subsets(dataset)
+        if feature_shift is not None:
+            subs = [_Shifted(dataset, idx, feature_shift, k, self.n_clients)
+                    for k, idx in enumerate(self.indices)]
         out = []
-        for k, sub in enumerate(self.subsets(dataset)):
+        for k, sub in enumerate(subs):
             g = torch.Generator().manual_seed(self.seed + k) if shuffle else None
             out.append(DataLoader(sub, batch_size=batch_size, shuffle=shuffle, generator=g, **kwargs))
         return out
@@ -176,10 +208,62 @@ def partition(labels, n_clients: int, method: str = "iid", seed: int = 0, **para
         raise KeyError(f"unknown partitioner {method!r}; available: {available_partitioners()}")
     if n_clients < 1:
         raise ValueError(f"n_clients must be >= 1, got {n_clients}")
+    if method == "natural" and params.get("groups") is None and hasattr(labels, "groups"):
+        params = dict(params, groups=labels.groups)
     labels = labels_of(labels)
     if n_clients > len(labels):
         raise ValueError(f"{n_clients} clients for {len(labels)} samples")
     parts = _PARTITIONERS[method](labels, n_clients, np.random.default_rng(seed), **params)
     if len(parts) != n_clients:
         raise ValueError(f"partitioner {method!r} returned {len(parts)} parts for {n_clients} clients")
-    return ClientSplit([np.sort(np.asarray(p, dtype=np.int64)) for p in parts], method, seed, params)
+    recipe = {k: v for k, v in params.items() if k != "groups"}     # saved with the split
+    return ClientSplit([np.sort(np.asarray(p, dtype=np.int64)) for p in parts], method, seed, recipe)
+
+
+class FeatureShift:
+    """Per-client input shift, growing with the client index ``k`` of ``n`` (client 0
+    unshifted, client n-1 at ``level``), as in noise-based feature skew:
+
+    - ``noise``: add Gaussian noise of std ``level * k / (n - 1)``, fixed per sample
+      (seeded by ``seed``, the client and the sample), so every epoch sees the same input.
+    - ``rotate``: rotate images by ``level * k / (n - 1)`` degrees.
+    """
+
+    KINDS = ("noise", "rotate")
+
+    def __init__(self, kind: str, level: float, seed: int = 0):
+        if kind not in self.KINDS:
+            raise ValueError(f"feature shift kind must be one of {self.KINDS}, got {kind!r}")
+        self.kind, self.level, self.seed = kind, float(level), int(seed)
+
+    def __call__(self, x, k: int, n: int, sample: int):
+        import torch
+        amount = self.level * (k / (n - 1) if n > 1 else 0.0)
+        if amount == 0.0 or not x.is_floating_point():
+            return x
+        if self.kind == "noise":
+            g = torch.Generator().manual_seed((self.seed * 1_000_003 + k) * 1_000_003 + sample)
+            return x + amount * torch.randn(x.shape, generator=g, dtype=x.dtype)
+        import math
+        import torch.nn.functional as F
+        a = math.radians(amount)
+        theta = torch.tensor([[math.cos(a), -math.sin(a), 0.0], [math.sin(a), math.cos(a), 0.0]],
+                             dtype=x.dtype).unsqueeze(0)
+        img = x.unsqueeze(0) if x.dim() == 3 else x.view(1, 1, *x.shape)
+        grid = F.affine_grid(theta, list(img.shape), align_corners=False)
+        return F.grid_sample(img, grid, align_corners=False).view_as(x)
+
+
+class _Shifted:
+    """Client ``k``'s samples of ``dataset`` with ``shift`` applied to the inputs."""
+
+    def __init__(self, dataset, indices, shift: FeatureShift, k: int, n: int):
+        self.dataset, self.indices, self.shift, self.k, self.n = dataset, indices, shift, k, n
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, i):
+        j = int(self.indices[i])
+        x, y = self.dataset[j]
+        return self.shift(x, self.k, self.n, j), y

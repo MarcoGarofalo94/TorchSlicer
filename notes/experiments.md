@@ -190,3 +190,16 @@ NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
   (= pinned TCP).
 - Conclusion: confirmed. The code fix gives 10–12 %; the malloc settings give 4×. gRPC stays
   3.6× slower than TCP at these sizes. Details: notes/validation.md issue 26.
+
+## 2026-10-18 — Does the simulator's link model predict real transport time?
+
+- Hypothesis: `sim time = compute + messages·latency + bytes/bandwidth`, with latency and
+  bandwidth fitted per transport, predicts real per-batch time of a 2-process P2P run.
+- Commands: `CUDA_VISIBLE_DEVICES= BENCH_REPEATS=2 benchmarks/transport/bench_transport.py small
+  large medium xlarge act8 --variants grpc,tcp`; `benchmarks/transport/fit_link.py results/cpu.json`;
+  local executor with the fitted `sl.link_*` on the same models (scratch script).
+- Result (CPU): error 0–6 % for medium, xlarge, act8 (both transports); 6–58 % for small and
+  large, always under-predicting.
+- GPU (idle A100, grpc/tcp/ipc): median error 12 %, cuts ≥ 3 MB 1–12 %, worst 51 % (small, tcp).
+- Conclusion: confirmed when compute or cut size dominates; optimistic for few-ms batches
+  (fixed per-batch overheads are not modelled).

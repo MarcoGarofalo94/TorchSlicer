@@ -170,3 +170,85 @@ def test_mnist_loads_normalized():
     assert len(tr) == 60000 and tuple(tr[0][0].shape) == (1, 28, 28)
     xs = torch.stack([tr[i][0] for i in range(0, len(tr), 50)])
     assert abs(xs.mean().item()) < 0.05 and abs(xs.std().item() - 1) < 0.05
+
+
+# ── heterogeneous client profiles (simulated) ─────────────────────────────────
+
+FAST = {"name": "fast", "compute_scale": 0.0, "bandwidth_mbps": 100.0, "latency_ms": 5.0}
+SLOW = {"name": "slow", "compute_scale": 0.0, "bandwidth_mbps": 10.0, "latency_ms": 50.0}
+
+
+def test_assign_profiles_is_seeded_and_follows_shares():
+    from torchslicer.sl.metrics import assign_profiles
+    a = assign_profiles([dict(FAST, share=3), dict(SLOW, share=1)], 4000, seed=1)
+    assert a == assign_profiles([dict(FAST, share=3), dict(SLOW, share=1)], 4000, seed=1)
+    assert abs(a.count(0) / 4000 - 0.75) < 0.03
+    with pytest.raises(ValueError, match="unknown keys"):
+        assign_profiles([{"bandwith_mbps": 1}], 2)
+
+
+def _profiled_run(mode, profiles, epochs=1):
+    cfg = _cfg(setting="vanilla", client_profiles=profiles, profile_seed=0)
+    s = ts.ClientSession([list(_loader(k, n=32)) for k in (3, 4)], mode=mode)
+    return ts.slice(_model(), n=2, cuts=["1"]).train(s, run_config=cfg, epochs=epochs)
+
+
+def test_client_times_follow_each_clients_link():
+    # compute_scale 0: a client's time is exactly its link time. Per batch of 16 the client
+    # sends a 16x16 fp32 activation (1024 B) and the labels (128 B) and gets a 1024 B
+    # gradient back: 2176 B and 3 messages; 2 batches per client.
+    h = _profiled_run("parallel", [FAST, SLOW])[0]
+    tiers, times = h["client_tiers"], h["sim_client_time_s"]
+    for k in (0, 1):
+        p = [FAST, SLOW][tiers[k]]
+        expect = 2 * (2176 * 8 / (p["bandwidth_mbps"] * 1e6) + 3 * p["latency_ms"] / 1e3)
+        assert times[k] == pytest.approx(expect, abs=1e-6)
+
+
+@pytest.mark.parametrize("mode", ["parallel", "sequential"])
+def test_round_time_is_slowest_or_sum_plus_server(mode):
+    h = _profiled_run(mode, [dict(FAST, compute_scale=2.0), dict(SLOW, compute_scale=8.0)])[0]
+    t = list(h["sim_client_time_s"].values())
+    clients = max(t) if mode == "parallel" else sum(t)
+    assert h["sim_round_s"] == pytest.approx(clients + h["server_compute_s"], abs=1e-5)
+
+
+def test_profiles_do_not_change_training():
+    plain = _profiled_run("parallel", [], epochs=2)
+    prof = _profiled_run("parallel", [FAST, SLOW], epochs=2)
+    assert [e["loss"] for e in plain] == [e["loss"] for e in prof]
+    assert "sim_round_s" not in plain[0] and "client_tiers" not in prof[1]
+
+
+class _ToClassesFirst(nn.Module):
+    def forward(self, x):                      # (B, T, V) -> (B, V, T) for CrossEntropyLoss
+        return x.transpose(1, 2)
+
+
+def test_token_accuracy_for_language_model_outputs():
+    torch.manual_seed(0)
+    vocab, t = 11, 6
+    model = nn.Sequential(nn.Embedding(vocab, 8), nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, vocab),
+                          _ToClassesFirst())
+    g = torch.Generator().manual_seed(0)
+    x = torch.randint(0, vocab, (24, t), generator=g)
+    loader = DataLoader(TensorDataset(x, x.roll(-1, 1)), batch_size=8)
+    hist = ts.slice(model, n=2, cuts=["1"]).train(loader, run_config=_cfg(), epochs=1, eval_data=loader)
+    with torch.no_grad():
+        out = torch.cat([model(b) for b, _ in loader])
+    acc = (out.argmax(1) == x.roll(-1, 1)).float().mean().item()   # same weights: trained in place
+    assert hist[0]["test_accuracy"] == pytest.approx(acc, abs=1e-6)
+
+
+@pytest.mark.skipif(not ts.data.datasets.Path("data/shakespeare/input.txt").exists(),
+                    reason="tiny-shakespeare not downloaded")
+def test_shakespeare_windows_and_natural_split():
+    tr = load_dataset("shakespeare", root="data", download=False)
+    x, y = tr[5]
+    assert x.shape == y.shape == (64,) and torch.equal(x[1:], y[:-1])
+    split = ts.data.partition(tr, 20, "natural", seed=0)
+    owner = {}
+    for k, idx in enumerate(split.indices):        # every speaking role on one client only
+        for role in np.unique(tr.groups[idx]):
+            assert owner.setdefault(role, k) == k
+    assert len(owner) == len(np.unique(tr.groups))

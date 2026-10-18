@@ -41,6 +41,20 @@ sorted index array per client. Same inputs and seed give the same split on any m
 | `dirichlet` | `alpha`, `min_size` | label skew: each class's samples are shared across clients by Dirichlet(alpha); small alpha = few classes per client |
 | `shards` | `shards_per_client` | pathological label skew: label-sorted shards, `shards_per_client` per client |
 | `quantity` | `beta`, `min_size` | quantity skew: client sizes by Dirichlet(beta), labels IID |
+| `natural` | `groups` (default: the dataset's) | the data's own partition (writers, speakers): whole groups per client |
+
+**Feature shift** (same labels, different inputs per client) goes on top of any split:
+`data.feature_shift: {kind: noise, level: 0.5}` (Gaussian noise, std growing from 0 on
+client 0 to `level` on the last client, fixed per sample) or `{kind: rotate, level: 30}`
+(degrees). In Python: `split.loaders(ds, 32, feature_shift=ts.data.FeatureShift("noise", 0.5))`.
+The test set is not shifted.
+
+**Datasets with a natural partition:** `shakespeare` is next-character prediction on
+tiny-shakespeare, tagged by speaking role, so `partition: natural` gives one or more roles per
+client. It follows the spirit of LEAF's Shakespeare, but the corpus and split are smaller
+and different. For LEAF's FEMNIST, or any naturally partitioned data, convert it to an `.npz`
+with `x`, `y` and a `groups` array (e.g. writer ids) and use `dataset: npz`.
+Evaluation reports per-token accuracy for `(N, C, T)` outputs.
 
 ```python
 split = ts.data.partition(train_set, 10, "dirichlet", alpha=0.1, seed=0)
@@ -107,3 +121,27 @@ one batch of 16 per client):
 
 Clients with a small client slice (a conv layer or two) are cheap anywhere: 1000 clients of
 the example CNN take 2 s per round and 1.2 GB.
+
+## Heterogeneous clients (simulated)
+
+Real SL clients differ in speed and network. In the simulator, give the clients profiles;
+nothing is slowed down, the history just reports what the round would have cost:
+
+```yaml
+sl:
+  client_profiles:
+    - {name: phone,  share: 0.7, compute_scale: 8.0, bandwidth_mbps: 20,  latency_ms: 60}
+    - {name: laptop, share: 0.3, compute_scale: 2.0, bandwidth_mbps: 100, latency_ms: 20}
+  profile_seed: 0
+```
+
+Each client draws a profile by `share` (seeded; `client_tiers` in the first history entry).
+Per round, a client's simulated time is its measured client-slice compute × `compute_scale`
+plus its own bytes and messages across the data owner's boundary over its link. That's
+`sim_client_time_s`, per client. `sim_round_s` is the slowest client plus the server's
+compute when clients run in parallel, or the sum when they run in sequence. Distributed runs
+refuse profiles: their clients are real.
+
+The link model is `messages × latency + bytes / bandwidth`, the same as `sl.link_*`. To
+simulate a real transport on your machine, measure it with `benchmarks/transport/bench_transport.py`
+and fit the two numbers with `benchmarks/transport/fit_link.py`.

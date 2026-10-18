@@ -11,8 +11,9 @@ from .roles import Placement
 
 
 class CommMeter:
-    def __init__(self, n_slices: int):
+    def __init__(self, n_slices: int, per_client: bool = True):
         self.n_slices = n_slices
+        self._per_client = per_client
         self.reset()
 
     def reset(self) -> None:
@@ -27,26 +28,46 @@ class CommMeter:
         self.msgs_input = self.msgs_label = 0
         self.compute = [0.0] * self.n_slices
         self.batches = 0
+        self.client = None          # the session's active client: its counts also go to
+        self.clients: dict = {}     # clients[k], a CommMeter of its own (heterogeneity)
+
+    def _mirror(self):
+        if self.client is None or not self._per_client:
+            return None
+        sub = self.clients.get(self.client)
+        if sub is None:
+            sub = self.clients[self.client] = CommMeter(self.n_slices, per_client=False)
+        return sub
 
     def add_fwd(self, cut: int, wire: int, raw: int, msgs: int = 1) -> None:
+        if (sub := self._mirror()) is not None:
+            sub.add_fwd(cut, wire, raw, msgs)
         self.fwd[cut] += wire
         self.raw_fwd[cut] += raw
         self.msgs_fwd[cut] += msgs
 
     def add_bwd(self, cut: int, wire: int, raw: int, msgs: int = 1) -> None:
+        if (sub := self._mirror()) is not None:
+            sub.add_bwd(cut, wire, raw, msgs)
         self.bwd[cut] += wire
         self.raw_bwd[cut] += raw
         self.msgs_bwd[cut] += msgs
 
     def add_input(self, nbytes: int, msgs: int = 1) -> None:
+        if (sub := self._mirror()) is not None:
+            sub.add_input(nbytes, msgs)
         self.input += nbytes
         self.msgs_input += msgs
 
     def add_label(self, nbytes: int, msgs: int = 1) -> None:
+        if (sub := self._mirror()) is not None:
+            sub.add_label(nbytes, msgs)
         self.label += nbytes
         self.msgs_label += msgs
 
     def add_compute(self, i: int, seconds: float) -> None:
+        if (sub := self._mirror()) is not None:
+            sub.add_compute(i, seconds)
         self.compute[i] += seconds
 
     def summary(self, placement: Placement, bandwidth_mbps: float = 0.0, latency_ms: float = 0.0) -> dict:
@@ -84,3 +105,42 @@ class CommMeter:
                 + (_t(self.input, self.msgs_input) if p.inputs_leave else 0.0)
                 + (_t(self.label, self.msgs_label) if p.labels_leave else 0.0), 6)
         return out
+
+
+# ── heterogeneous clients (simulated) ─────────────────────────────────────────
+
+def assign_profiles(profiles: list, n_clients: int, seed: int = 0) -> list:
+    """One profile index per client: each ``profiles[i]`` is drawn with probability
+    ``share`` (default equal), seeded. ``profiles``: dicts with ``compute_scale``
+    (client compute = measured x this), ``bandwidth_mbps``, ``latency_ms``, ``share``."""
+    import numpy as np
+    if not profiles:
+        return []
+    shares = np.array([float(p.get("share", 1.0)) for p in profiles])
+    if (shares < 0).any() or shares.sum() <= 0:
+        raise ValueError("sl.client_profiles: shares must be >= 0 and not all 0")
+    for p in profiles:
+        unknown = set(p) - {"name", "share", "compute_scale", "bandwidth_mbps", "latency_ms"}
+        if unknown:
+            raise ValueError(f"sl.client_profiles: unknown keys {sorted(unknown)}")
+    rng = np.random.default_rng(seed)
+    return [int(i) for i in rng.choice(len(profiles), size=n_clients, p=shares / shares.sum())]
+
+
+def client_times(meter: CommMeter, placement: Placement, profiles: list, tiers: list,
+                 parallel: bool) -> dict:
+    """Simulated time of each client this epoch on its own profile, and of the round.
+    A client's time = its client-slice compute x ``compute_scale`` + its bytes and
+    messages across the data owner's boundary over its link. The round: the slowest
+    client plus the server's compute when clients run in parallel, else the sum."""
+    times = {}
+    for k, sub in sorted(meter.clients.items()):
+        prof = profiles[tiers[k]]
+        s = sub.summary(placement, float(prof.get("bandwidth_mbps", 0.0)), float(prof.get("latency_ms", 0.0)))
+        times[k] = s["client_compute_s"] * float(prof.get("compute_scale", 1.0)) + s.get("sim_client_comm_s", 0.0)
+    server = sum(t for i, t in enumerate(meter.compute) if not placement.is_client(i))
+    clients = list(times.values())
+    rnd = (max(clients) if parallel else sum(clients)) + server if clients else server
+    return {"sim_client_time_s": {k: round(t, 6) for k, t in times.items()},
+            "sim_round_s": round(rnd, 6)}
+

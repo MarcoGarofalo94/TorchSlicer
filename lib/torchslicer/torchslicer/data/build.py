@@ -20,7 +20,7 @@ import os
 import numpy as np
 
 from .datasets import load_dataset
-from .partition import ClientSplit, labels_of, partition
+from .partition import ClientSplit, FeatureShift, labels_of, partition
 
 
 def _subset(dataset, n: int, seed: int):
@@ -30,6 +30,8 @@ def _subset(dataset, n: int, seed: int):
     idx = np.sort(np.random.default_rng(seed).permutation(len(dataset))[:n])
     sub = Subset(dataset, idx.tolist())
     sub.targets = labels_of(dataset)[idx]
+    if hasattr(dataset, "groups"):
+        sub.groups = np.asarray(dataset.groups)[idx]
     return sub
 
 
@@ -53,7 +55,9 @@ def build_data(cfg):
     split = None
     if clients > 1:
         split = partition(train, clients, d.partition, seed=d.seed, **(d.partition_params or {}))
-        train_out = split.loaders(train, d.batch_size)
+        shift = (FeatureShift(d.feature_shift["kind"], d.feature_shift.get("level", 0.0), d.seed)
+                 if d.feature_shift else None)
+        train_out = split.loaders(train, d.batch_size, feature_shift=shift)
         if cfg.logging.enabled:
             split.save(os.path.join(cfg.logging.dir, cfg.run_id, "client_split.json"))
     else:

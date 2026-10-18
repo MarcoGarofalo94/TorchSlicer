@@ -1,0 +1,20 @@
+{
+ "source": "cpu.json",
+ "max_mb": 10.0,
+ "fits": {
+  "grpc": {
+   "latency_ms": 0.794,
+   "bandwidth_mbps": 3086.1,
+   "n": 5,
+   "median_rel_err": 0.161,
+   "max_rel_err": 0.447
+  },
+  "tcp": {
+   "latency_ms": 0.94,
+   "bandwidth_mbps": 24151.7,
+   "n": 5,
+   "median_rel_err": 0.121,
+   "max_rel_err": 0.312
+  }
+ }
+}

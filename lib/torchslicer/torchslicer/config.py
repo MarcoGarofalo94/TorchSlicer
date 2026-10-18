@@ -283,6 +283,11 @@ class SLConfig:
                    "cuda:i" | "auto" (the slices' GPU if they fit, else host RAM). A run
                    whose states don't fit in 80 % of the free memory stops before
                    training  (env: SL_CLIENT_STATES)
+        client_profiles: simulated heterogeneous clients (local executor): a list of
+                   ``{name, share, compute_scale, bandwidth_mbps, latency_ms}``; each client
+                   draws one (by ``share``, seeded by ``profile_seed``) and the history gets
+                   ``sim_client_time_s`` per client and ``sim_round_s``. Nothing is slowed down.
+        profile_seed: seed of the profile assignment  (env: SL_PROFILE_SEED)
     """
     setting:             str   = ""
     cut_hooks:           list  = field(default_factory=list)
@@ -294,10 +299,14 @@ class SLConfig:
     handoff:             str   = "copy"
     algorithm:           str   = ""
     client_states:       str   = "cpu"
+    client_profiles:     list  = field(default_factory=list)
+    profile_seed:        int   = 0
 
     def __post_init__(self):
         if self.cut_hooks is None:
             self.cut_hooks = []
+        if self.client_profiles is None:
+            self.client_profiles = []
 
 
 @dataclass
@@ -348,6 +357,9 @@ class DataConfig:
         train_subset, test_subset: use N samples (seeded), 0 = all; for smoke tests
                     (env: DATA_TRAIN_SUBSET, DATA_TEST_SUBSET)
         eval_every: evaluate on the test set every N epochs, 0 = never  (env: DATA_EVAL_EVERY)
+        feature_shift: per-client input shift on top of the split, e.g.
+                    ``{kind: noise, level: 0.5}`` or ``{kind: rotate, level: 30}``
+                    (``ts.data.FeatureShift``; the test set is unshifted)
     """
     dataset:          str  = ""
     root:             str  = "data"
@@ -361,8 +373,10 @@ class DataConfig:
     train_subset:     int  = 0
     test_subset:      int  = 0
     eval_every:       int  = 1
+    feature_shift:    dict = field(default_factory=dict)
 
     def __post_init__(self):
+        self.feature_shift = self.feature_shift or {}
         self.params = self.params or {}
         self.partition_params = self.partition_params or {}
 
@@ -624,6 +638,7 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("OFFLOAD_SLOTS",          lambda cfg, v: setattr(cfg.offload, "slots",          int(v))),
     ("OFFLOAD_DIRECT_IO",      lambda cfg, v: setattr(cfg.offload, "direct_io",      _parse_bool(v))),
     ("OFFLOAD_DEVICE",         lambda cfg, v: setattr(cfg.offload, "device",         v.strip().lower())),
+    ("SL_PROFILE_SEED",        lambda cfg, v: setattr(cfg.sl, "profile_seed",        int(v))),
     ("SL_CLIENT_STATES",       lambda cfg, v: setattr(cfg.sl, "client_states",       v.strip().lower())),
     ("SL_HANDOFF",             lambda cfg, v: setattr(cfg.sl, "handoff",             v.strip().lower())),
 )

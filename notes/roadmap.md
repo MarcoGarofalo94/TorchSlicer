@@ -158,6 +158,24 @@ shown in a Flower-based SplitFed baseline.
     (simulator) has no transport and is unchanged. Real networks are unmeasured (loopback only).
   - Bugs and details: validation.md "M9" (issues 23–26). Version 0.9.0.
 
+- M11 (branch `feat/m11-data-scale`, forked from M9's tip, pushed): **done** (2026-10-18) =
+  `ts.data`: partitioners (iid, dirichlet, shards, quantity, natural) + feature shift; datasets
+  (mnist, fashion_mnist, cifar10/100, shakespeare, synthetic, npz with groups); a `data:` config
+  section, so `ts.run(model_fn)` runs a whole experiment from YAML; evaluation (`test_loss`,
+  `test_accuracy`, per-token, per-client) on the local executor. Many clients: no-copy switches,
+  `sl.client_states: cpu|gpu|auto` with a memory check before training, client sampling
+  (`select_clients`). 1000 clients × 2.1M-param client slices: 1.5 s/round on the GPU store.
+  Simulated client profiles (`sl.client_profiles`), and the link model calibrated against real
+  runs (`benchmarks/transport/fit_link.py`): simulated time within 0–12 % of real when compute
+  or cut size dominates, under-predicting tiny models by up to ~50 %.
+  - Bugs fixed: SplitFed's last client missed the aggregate and every client inherited the
+    previous one's momentum (since M8); the distributed executor silently ignored most
+    `ts.Algorithm` hooks (now refused); evaluation shifted the dropout RNG (fixed before release).
+  - Later (not capabilities): batched client execution, a disk tier for client states, a real
+    FEMNIST/LEAF download, a tabular dataset.
+  - Open: offload CUDA tests fail under GPU load (race, M5); IPC test intermittent in full runs.
+  - Details: validation.md "M11" (issues 27–29). Tutorial `docs/tutorials/data.md`. Version 0.11.0.
+
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
   from `main`. The chain is `main` → `feat/m0-foundations` → `feat/m1-split-anything` → `feat/m2-...` and so on.
@@ -506,7 +524,7 @@ shown in a Flower-based SplitFed baseline.
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardware. M7 deferred.
+Last updated 2026-10-18, M11 done (version 0.11.0); next M12. NCCL unvalidated on this hardware. M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
     M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),
@@ -518,15 +536,9 @@ Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardw
     just before M14 (real environment + testbed), which is the first milestone that requires
     security on a real network. The `weights_only=False` RCE on worker `init` is a known open
     risk; document it and accept it until then.
-  - **In progress: M11 (data and scale simulation)** on `feat/m11-data-scale` (forked from M9's tip).
-    Done: steps 1–2 = partitioners (`ts.data.partition`), datasets, the `data:` config section
-    (`ts.run(model_fn)` without `data_fn`), evaluation on the local executor
-    (`docs/tutorials/data.md`); bugs 27–29 fixed (SplitFed aggregation and optimizer state,
-    distributed executor ignoring Algorithm hooks). Step 3 done: no-copy client switches,
-    `sl.client_states: cpu|gpu|auto` with a memory check before training, client sampling
-    (`select_clients`); 1000 clients × 2.1M-param client slices run here on the GPU store
-    (1.5 s/round). Next: step 4, heterogeneity profiles and calibrated `sim_*_comm_s`; step 5,
-    batched client execution. Every step only adds code; losses and defaults stay unchanged.
+  - **Next: M12 (privacy: attacks, defences, leakage metrics).** Create with
+    `git switch -c feat/m12-privacy feat/m11-data-scale`. See the M12 entry above. M11 is done
+    (version 0.11.0, see Status).
     **This container has 16 GB RAM and may be shut down if it exceeds it:** estimate every
     scaling run first and use the watchdog in `benchmarks/clients/bench_clients.py`.
     Open item from M9: run `MATRIX_NCCL=1 MATRIX_DEVICE=cuda run_matrix.py` and the NCCL
@@ -563,7 +575,7 @@ Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardw
   - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not
     for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (280 tests at the end of M9, about 5.5 min;
+  - `.venv/bin/python -m pytest tests/` green (325 tests at the end of M11, about 6 min;
     `test_sl.py::test_distributed_hooks_match_local[hook0]` flaked once under load, and
     `test_offload.py::test_cuda_matches_local` flakes on a busy GPU, see open items);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about
