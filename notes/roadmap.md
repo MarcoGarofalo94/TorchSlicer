@@ -482,6 +482,28 @@ shown in a Flower-based SplitFed baseline.
   - **Artifact:** packaged for artifact evaluation, reproducing every figure from configs + seeds.
   - **Early preview** (optional): a short workshop paper (e.g. EuroMLSys, where SplitBud appeared) once M8–M9
     land, to stake the claim. Check the current calls and deadlines; none are recorded here.
+- **M17, compiled slices and a `torch.export` tracer** (added 2026-10-17; not yet placed in the milestone order,
+  owner to decide). `torch.fx` is used only to build the graph at slice time (`core/model_graph.py`); slices
+  then run as eager PyTorch, and nothing calls `torch.compile` today. Its costs are model coverage (data-dependent
+  control flow and dynamic shapes fail, hence `pack=` for HF LLMs/MoE) and an untyped graph (no shapes or costs),
+  not speed. A JAX backend was considered and rejected: SL time is mostly communication, which XLA doesn't
+  touch; the per-slice optimizer, recovery, `ClientSession` and offload state are imperative; and SL/FL users
+  are on PyTorch (adoption goal).
+  - **Per-slice `torch.compile`** (opt-in, e.g. `training.compile: false|true|<mode>`, plus env override).
+    Compile each `SplitLayer`'s module; optionally CUDA graphs for fixed-shape slices. Must interact correctly
+    with bf16 autocast, GPipe micro-batches, offload paging (`tensor.data` swaps into slots will
+    invalidate guards: likely unsupported there, fail clearly), `ClientSession` state swaps, and recovery
+    re-init. Compile cost is paid once per worker, so record it separately from step time.
+  - **`torch.export` tracing backend** (e.g. `ts.slice(..., tracer="fx"|"export"|"auto")`). Build `ModelGraph`
+    from the exported graph, keeping symbolic shapes on `LayerNode`s so `flops`/`params` costs and
+    `valid_cuts()` can use them without profiling. `auto` tries export, then fx, then points to `pack=`.
+    Slices must still be picklable `nn.Module`s shipped with `torch.save` (check that exported submodules are).
+  - **Communication/compute overlap** where still missing (async sends, overlapping micro-batch comm with
+    compute), since that is where SL time goes.
+  - **Test:** compiled and eager slices match within the equivalence-matrix tolerance in every mode; the
+    export tracer gives the same partitions as fx on every model fx handles today, and traces at least one
+    model that currently needs `pack=` (record which ones still don't). Benchmark eager vs compiled step time
+    and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
 
 ## Handoff (read this first if you are a new session)
 Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardware. M7 deferred.
@@ -496,8 +518,14 @@ Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardw
     just before M14 (real environment + testbed), which is the first milestone that requires
     security on a real network. The `weights_only=False` RCE on worker `init` is a known open
     risk; document it and accept it until then.
-  - **Next: M11 (data and scale simulation).** Create with
-    `git switch -c feat/m11-data-scale feat/m9-fast-transport`. See the M11 entry above.
+  - **In progress: M11 (data and scale simulation)** on `feat/m11-data-scale` (forked from M9's tip).
+    Done: steps 1–2 = partitioners (`ts.data.partition`), datasets, the `data:` config section
+    (`ts.run(model_fn)` without `data_fn`), evaluation on the local executor
+    (`docs/tutorials/data.md`); bugs 27–29 fixed (SplitFed aggregation and optimizer state,
+    distributed executor ignoring Algorithm hooks). Next: step 3, the client-state store for
+    1000 clients (measure `ClientSession`'s per-switch deepcopy first), with client sampling
+    (`select_clients`); step 4, heterogeneity profiles and calibrated `sim_*_comm_s`; step 5,
+    batched client execution. Every step only adds code; losses and defaults stay unchanged.
     Open item from M9: run `MATRIX_NCCL=1 MATRIX_DEVICE=cuda run_matrix.py` and the NCCL
     transport benchmark once a machine with ≥2 distinct GPUs is available (at the latest in M14).
     Other open items:
@@ -509,6 +537,8 @@ Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardw
     M11 data and scale simulation → M12 privacy suite → M13 baselines + Flower interop →
     M10 multi-client engine → M7 security → M14 real environment and testbed →
     M15 release readiness → M16 the MLSys paper. Numbers are kept, only the order changed.
+    M17 (compiled slices + `torch.export` tracer, added 2026-10-17) is not placed yet (owner);
+    it should land before M16, whose "overhead vs plain PyTorch" claim it affects.
     - **Why:** the goal is adoption as the standard SL framework. Researchers mostly simulate, and
       the competitors (SLPerf: 13 variants, datasets, non-IID splits; SplitBud: Flower-based,
       multi-client) win on what a researcher meets first. So the simulator features (M11),

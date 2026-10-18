@@ -27,7 +27,7 @@ from .config import (
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
     StartupConfig, TransportConfig,
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
-    NetworkConfig, PlanningConfig, DeployConfig, SLConfig, OffloadConfig,
+    NetworkConfig, PlanningConfig, DeployConfig, SLConfig, OffloadConfig, DataConfig,
 )
 from .monitor import TrainingCallback, RunLogger
 from .core.stages import (
@@ -166,11 +166,15 @@ class SlicedModel:
         callbacks: list = None,
         run_config=None,
         algorithm=None,
+        eval_data=None,
+        eval_every: int = None,
     ) -> list:
         """Train the sliced model.
 
         ``data_loader`` yields ``(inputs, labels)``; a ``ts.ClientSession`` trains
         several clients (data owners) against the shared server slices.
+        ``eval_data``: a test loader, evaluated every ``eval_every`` epochs (default
+        ``data.eval_every``, else 1); ``test_loss``/``test_accuracy`` go into the history.
 
         When ``run_config`` is supplied all training parameters default to the
         values in the config; explicit kwargs override individual fields::
@@ -209,6 +213,13 @@ class SlicedModel:
             raise ValueError(f"{type(self.executor).__name__} does not support cut_hooks")
         if "algorithm" in accepted:
             extra["algorithm"] = algorithm
+        if eval_data is not None:
+            if "eval_data" not in accepted:
+                raise ValueError(f"{type(self.executor).__name__} doesn't support evaluation yet "
+                                 "(eval_data / data.eval_every); it runs on the local executor")
+            extra["eval_data"] = eval_data
+            extra["eval_every"] = (eval_every if eval_every is not None
+                                   else (cfg.data.eval_every if cfg else 1))
         self.executor.setup(
             self.graph,
             self.partitions,

@@ -65,7 +65,26 @@ def hosted_slices(cfg: RunConfig, topology: str, n: int) -> int:
     return len(Placement(resolve_setting(cfg.sl.setting, topology), n).client_slices)
 
 
-def run(model_fn, data_fn, *, run_config: RunConfig | None = None, role: str | None = None,
+def _config_data(cfg, data_fn, topology: str, drives: bool):
+    """``(data_fn, eval_data)``: with ``data.dataset`` set, TorchSlicer builds the loaders
+    (``torchslicer.data.build_data``) and ``data_fn`` must be ``None``."""
+    if not cfg.data.dataset:
+        if data_fn is None and drives:
+            raise ValueError("ts.run needs a data_fn, or data.dataset in the config")
+        return data_fn, None
+    if data_fn is not None:
+        raise ValueError("set either data_fn or data.dataset, not both")
+    if not drives:
+        return None, None
+    if topology != "local" and cfg.data.eval_every:
+        raise ValueError(f"evaluation runs only on the local topology for now ({topology}); "
+                         "set data.eval_every: 0")
+    from ..data.build import build_data
+    train, test, _ = build_data(cfg)
+    return (lambda: train), test
+
+
+def run(model_fn, data_fn=None, *, run_config: RunConfig | None = None, role: str | None = None,
         verbose: bool = True, callbacks: list | None = None, **slice_kwargs) -> list:
     """Run this process as its node of the experiment; return the training history on
     the node that drives training (local, coordinator, driver, ``all``), else ``[]``.
@@ -78,7 +97,9 @@ def run(model_fn, data_fn, *, run_config: RunConfig | None = None, role: str | N
     the data owner (coordinator / driver) hosts ``sl.setting``'s share of them
     in-process (pipeline: none, vanilla: slice 0, u_shaped: slice 0 and the last) and
     workers / followers the rest. With ``sl.clients`` > 1, ``data_fn()`` returns one
-    loader per client (a ``ts.ClientSession``).
+    loader per client (a ``ts.ClientSession``). With ``data.dataset`` set there is no
+    ``data_fn``: the loaders, the client split and the test set come from the config's
+    ``data`` section (``torchslicer.data``).
     """
     from ..monitor import tracer
     from ..monitor.process_logger import configure as configure_process_logging
@@ -92,6 +113,7 @@ def run(model_fn, data_fn, *, run_config: RunConfig | None = None, role: str | N
     topology, role = resolve_role(cfg)
     n = int(cfg.discovery.n_workers)
     _LOG.info("run topology=%s role=%s n=%s run_id=%s", topology, role, n, cfg.run_id)
+    data_fn, eval_data = _config_data(cfg, data_fn, topology, role not in ("worker", "follower"))
 
     if topology == "local":
         import torch
@@ -102,7 +124,7 @@ def run(model_fn, data_fn, *, run_config: RunConfig | None = None, role: str | N
         model = model_fn().to(torch.device(resolve_device(cfg.network.device)))
         sliced = ts_slice(model, n=n, **slice_kwargs)
         return sliced.train(data_for_run(cfg, data_fn), run_config=cfg, verbose=verbose,
-                            callbacks=callbacks)
+                            callbacks=callbacks, eval_data=eval_data)
     if role in ("worker", "follower"):
         return _serve(cfg, topology)
     if role == "all":

@@ -166,6 +166,9 @@ class OffloadExecutor(LocalExecutor):
     def setup(self, model_graph, partitions, optimizer_cfg, criterion_cfg, mixed_precision=False,
               n_micro_batches=1, run_config=None, **kwargs):
         cfg = run_config
+        if kwargs.get("eval_data") is not None:
+            raise ValueError("evaluation (eval_data / data.eval_every) isn't supported with "
+                             "offload yet: the weights live paged out of the device")
         mode = self._opt("mode", cfg, "cpu")
         mode = "cpu" if mode == "none" else mode
         dev_arg = self._opt("device", cfg, None) or (cfg.network.device if cfg else None)

@@ -1120,3 +1120,34 @@ round). Implementing them in the distributed executor is open (scheduled with M1
 `select_clients` (client sampling) belongs in M11's many-client simulation. Tests:
 `test_sl.py::test_distributed_refuses_algorithm_hooks_it_does_not_run`,
 `test_algorithm.py::test_unused_select_clients_is_refused`.
+
+### Added (step 1–2) and how it is checked
+
+- `ts.data.partition` (iid / dirichlet / shards / quantity). `tests/test_data_partition.py`:
+  every split is a seeded partition of the samples. Dirichlet's per-class share variance
+  matches (1/K)(1−1/K)/(Kα+1) for α ∈ {0.1, 1, 10}, and quantity skew's size variance
+  matches (1/K)(1−1/K)/(Kβ+1); both within 20 %. (My first test used (α+1), which is wrong:
+  the code matched the correct formula, 0.0446 vs 0.045 at α = 0.1.)
+- Datasets (mnist, fashion_mnist, cifar10/100, synthetic, npz) as in-memory tensors,
+  normalized per channel; measured mean ≈ 0, std ≈ 1 on MNIST and CIFAR-10.
+- `data:` config section; `ts.run(model_fn)` without `data_fn` builds the train loaders,
+  the client split (saved as `client_split.json`) and the test set.
+- Evaluation (`eval_data`, `data.eval_every`; local executor). Checked against an unsplit
+  model evaluated by hand (loss at 1e-6, accuracy exact, a smaller last batch). Training
+  losses are identical with and without evaluation, also with BatchNorm + Dropout and in
+  parallel sessions. Sessions report per-client results.
+- **Found while testing evaluation:** iterating any `DataLoader`, even unshuffled, draws one
+  value from the global torch RNG (its worker seed). So evaluating between epochs shifted
+  every later dropout mask: losses differed from epoch 2 (1.353257 vs 1.356807). Evaluation
+  now runs inside `torch.random.fork_rng`. Any user callback that iterates a loader in
+  `on_epoch_end` perturbs training the same way; the tutorial doesn't cover callbacks
+  (open: a note in `monitor/callback.py`).
+- Repo hygiene: `.gitignore` and `.git/info/exclude` had an unanchored `data/` that also
+  ignored the new `torchslicer/data` package. Both anchored to `/data/`.
+
+Verification of steps 1–2: tests 303/307 in the full run while another tenant loaded the GPU.
+The 4 failures are GPU-only tests that step 2 doesn't touch: 3 × `test_offload.py::test_cuda_matches_local`
+(the known NaN flake) and `test_transport.py::test_ipc_matches_tcp_on_gpu[hooks1]`. Rerun on an idle
+GPU: 33/33 for both files, and the IPC test 6/6 in 3 more runs. So the IPC test is also load-sensitive
+(open, like the offload one). CPU matrix 115/117 (the 2 known GPipe + BatchNorm cells); every
+cell's losses identical to before M11.

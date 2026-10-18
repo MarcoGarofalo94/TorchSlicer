@@ -81,6 +81,8 @@ class LocalExecutor(BaseExecutor):
         self._sync = None
         self._algorithm: Algorithm = DefaultAlgorithm()
         self._round: int = 0
+        self._eval_loader = None
+        self._eval_every = 0
 
     def setup(
         self,
@@ -96,9 +98,14 @@ class LocalExecutor(BaseExecutor):
         strategy_name: str = "unknown",
         cut_hooks=None,
         algorithm: "Algorithm | None" = None,
+        eval_data=None,
+        eval_every: int = 1,
     ) -> None:
         """``cut_hooks``: ``ts.slice(cut_hooks=)`` (see ``torchslicer.sl.hooks``); the
-        config's ``sl`` section adds hooks, the setting and the link model."""
+        config's ``sl`` section adds hooks, the setting and the link model.
+        ``eval_data``: a test loader, evaluated every ``eval_every`` epochs (``evaluate``)."""
+        self._eval_loader = eval_data
+        self._eval_every = int(eval_every or 0) if eval_data is not None else 0
         layers = model_graph.get_layers()
         n = len(partitions)
         self.split_layers = []
@@ -313,6 +320,9 @@ class LocalExecutor(BaseExecutor):
                 for k in list(server_states):
                     server_states[k] = copy.deepcopy(agg_server)
 
+        if self._eval_every and epoch % self._eval_every == 0:
+            epoch_metrics.update(self._evaluate_round(session, adapter if session is not None else None))
+
         for cb in self._callbacks:
             try:
                 result = cb.on_epoch_end(epoch, epoch_metrics)
@@ -345,6 +355,79 @@ class LocalExecutor(BaseExecutor):
                 profiler.reset_epoch()
 
         return epoch_metrics
+
+    def evaluate(self, loader) -> dict:
+        """Test loss (the training criterion) and, for classification (``(N, C)`` outputs,
+        ``(N,)`` labels), accuracy of the current weights: forward only, no gradients,
+        every slice in eval mode, the RNG state restored after. Cut hooks transform the activations as in training
+        (``CutContext.direction == "eval"``; ``Recorder`` skips it); no bytes are counted."""
+        device = next(self.split_layers[0].parameters()).device
+        was_training = [sl.training for sl in self.split_layers]
+        for sl in self.split_layers:
+            sl.eval()
+        total, correct, n, classify = 0.0, 0, 0, True
+        # iterating a DataLoader draws from the global RNG: keep training's stream intact
+        rng_devices = [device] if device.type == "cuda" else []
+        try:
+            with torch.random.fork_rng(devices=rng_devices), torch.no_grad():
+                for inputs, labels in loader:
+                    main, aux = _unpack_inputs(inputs)
+                    x = main.to(device)
+                    labels = labels.to(device)
+                    aux = {k: v.to(device) for k, v in aux.items()}
+                    for i, sl in enumerate(self.split_layers):
+                        if i > 0:
+                            x = self._eval_cut(i - 1, x)
+                        x = sl(x, **aux) if (i == 0 and aux) else sl(x)
+                        sl.pop_moe_aux_loss()
+                    b = labels.shape[0]
+                    total += self.criterion(x, labels).item() * b
+                    n += b
+                    if x.dim() == 2 and labels.dim() == 1:
+                        correct += (x.argmax(1) == labels).sum().item()
+                    else:
+                        classify = False
+        finally:
+            for sl, mode in zip(self.split_layers, was_training):
+                sl.train(mode)
+        if n == 0:
+            return {}
+        out = {"test_loss": round(total / n, 6), "test_samples": n}
+        if classify:
+            out["test_accuracy"] = round(correct / n, 6)
+        return out
+
+    def _eval_cut(self, cut: int, x):
+        hook = self._hooks.get(cut)
+        if hook is None:
+            return x
+        ctx = CutContext(cut, "eval", -1, len(self.split_layers))
+        return hook.decode(_detach_payload(hook.encode(x, ctx)), ctx)
+
+    def _evaluate_round(self, session, adapter) -> dict:
+        """``evaluate`` for the epoch's history entry. In a session, every distinct client
+        state is evaluated with the shared server slices (clients that share one state
+        object, e.g. after ``fedavg``, once): the mean, plus ``*_clients`` lists."""
+        if session is None:
+            return self.evaluate(self._eval_loader)
+        results, by_state = [], {}
+        for state in session.states:
+            state = state if state is not None else session._initial   # not trained yet
+            if id(state) not in by_state:
+                adapter.set_state(state)
+                by_state[id(state)] = self.evaluate(self._eval_loader)
+            results.append(by_state[id(state)])
+        if session.current is not None and session.states[session.current] is not None:
+            adapter.set_state(session.states[session.current])
+        out = {}
+        for key in ("test_loss", "test_accuracy"):
+            vals = [r[key] for r in results if key in r]
+            if vals:
+                out[key] = round(sum(vals) / len(vals), 6)
+                if len(by_state) > 1:
+                    out[f"{key}_clients"] = vals
+        out["test_samples"] = results[0].get("test_samples", 0)
+        return out
 
     def _epoch_extras(self, duration_s: float) -> dict:
         """Executor-specific fields for the epoch's history entry."""

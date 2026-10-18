@@ -322,6 +322,47 @@ class OffloadConfig:
 
 
 @dataclass
+class DataConfig:
+    """The experiment's data, built by TorchSlicer (``torchslicer/data/``, M11). With
+    ``dataset`` set, ``ts.run(model_fn)`` needs no ``data_fn``: the training set is
+    split across ``sl.clients`` clients and the test set is evaluated.
+
+    Fields:
+        dataset:    "" (``data_fn`` decides) | mnist | fashion_mnist | cifar10 | cifar100 |
+                    synthetic | npz  (env: DATA_DATASET)
+        root:       download/cache directory  (env: DATA_ROOT)
+        download:   download if missing  (env: DATA_DOWNLOAD)
+        params:     dataset parameters (synthetic: shape/classes/n; npz: path/test_path)
+        batch_size: training batch size per client  (env: DATA_BATCH_SIZE)
+        test_batch_size: evaluation batch size
+        partition:  how the training set is split across clients: iid | dirichlet |
+                    shards | quantity (``ts.data.register_partitioner`` adds more)
+                    (env: DATA_PARTITION)
+        partition_params: e.g. ``{alpha: 0.5}`` (dirichlet), ``{shards_per_client: 2}``
+        seed:       seed of the split, subsets and shuffling  (env: DATA_SEED)
+        train_subset, test_subset: use N samples (seeded), 0 = all; for smoke tests
+                    (env: DATA_TRAIN_SUBSET, DATA_TEST_SUBSET)
+        eval_every: evaluate on the test set every N epochs, 0 = never  (env: DATA_EVAL_EVERY)
+    """
+    dataset:          str  = ""
+    root:             str  = "data"
+    download:         bool = True
+    params:           dict = field(default_factory=dict)
+    batch_size:       int  = 32
+    test_batch_size:  int  = 256
+    partition:        str  = "iid"
+    partition_params: dict = field(default_factory=dict)
+    seed:             int  = 0
+    train_subset:     int  = 0
+    test_subset:      int  = 0
+    eval_every:       int  = 1
+
+    def __post_init__(self):
+        self.params = self.params or {}
+        self.partition_params = self.partition_params or {}
+
+
+@dataclass
 class RunConfig:
     run_id:          str                  = field(default_factory=_default_run_id)
     training:        TrainingConfig       = field(default_factory=TrainingConfig)
@@ -338,6 +379,7 @@ class RunConfig:
     deploy:          DeployConfig         = field(default_factory=DeployConfig)
     sl:              SLConfig             = field(default_factory=SLConfig)
     offload:         OffloadConfig        = field(default_factory=OffloadConfig)
+    data:            DataConfig           = field(default_factory=DataConfig)
 
     # ── factory: flat Python API ──────────────────────────────────────────────
 
@@ -561,6 +603,16 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("SL_TAIL_PORT",           lambda cfg, v: setattr(cfg.sl, "tail_port",           int(v))),
     ("SL_CLIENTS",             lambda cfg, v: setattr(cfg.sl, "clients",             int(v))),
     ("SL_CLIENT_MODE",         lambda cfg, v: setattr(cfg.sl, "client_mode",         v.strip().lower())),
+    # ── data ───────────────────────────────────────────────────────────────────
+    ("DATA_DATASET",           lambda cfg, v: setattr(cfg.data, "dataset",           v.strip().lower())),
+    ("DATA_ROOT",              lambda cfg, v: setattr(cfg.data, "root",              v)),
+    ("DATA_DOWNLOAD",          lambda cfg, v: setattr(cfg.data, "download",          _parse_bool(v))),
+    ("DATA_BATCH_SIZE",        lambda cfg, v: setattr(cfg.data, "batch_size",        int(v))),
+    ("DATA_PARTITION",         lambda cfg, v: setattr(cfg.data, "partition",         v.strip().lower())),
+    ("DATA_SEED",              lambda cfg, v: setattr(cfg.data, "seed",              int(v))),
+    ("DATA_TRAIN_SUBSET",      lambda cfg, v: setattr(cfg.data, "train_subset",      int(v))),
+    ("DATA_TEST_SUBSET",       lambda cfg, v: setattr(cfg.data, "test_subset",       int(v))),
+    ("DATA_EVAL_EVERY",        lambda cfg, v: setattr(cfg.data, "eval_every",        int(v))),
     ("OFFLOAD",                lambda cfg, v: setattr(cfg.offload, "mode",           v.strip().lower())),
     ("OFFLOAD_OPTIMIZER",      lambda cfg, v: setattr(cfg.offload, "optimizer",      v.strip().lower())),
     ("OFFLOAD_DIR",            lambda cfg, v: setattr(cfg.offload, "dir",            v)),
