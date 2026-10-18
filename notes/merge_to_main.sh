@@ -17,9 +17,9 @@ git fetch -q origin
 git worktree add -q -B "$WORK" "$DIR" origin/main
 cd "$DIR"
 git merge --no-ff --no-commit "origin/$BRANCH" || true
-git rm -r -q --ignore-unmatch notes                # notes never reach main
+git rm -r -q -f --ignore-unmatch notes             # notes never reach main
 for f in $(git diff --name-only --diff-filter=U); do
-  case "$f" in notes/*) git rm -q "$f" ;; *) echo "conflict outside notes/: $f"; exit 1 ;; esac
+  case "$f" in notes/*) git rm -q -f "$f" ;; *) echo "conflict outside notes/: $f"; exit 1 ;; esac
 done
 if git grep -n -I -E "notes/|validation\.md|roadmap\.md|experiments\.md|sota\.md|gaps\.md" -- . ; then
   echo "shipped files reference the notes (above): fix them on $BRANCH first"; exit 1
@@ -27,8 +27,9 @@ fi
 git commit -q -m "Merge $BRANCH into main (without notes/)"
 git push -q -u origin "$WORK"
 URL=$(git remote get-url origin | sed -E 's#^git@github.com:#https://github.com/#; s#\.git$##')
-if command -v gh >/dev/null; then
-  gh pr create --base main --head "$WORK" --title "Merge $BRANCH into main" \
+GH=$(command -v gh || echo "$HOME/.local/bin/gh")
+if [ -x "$GH" ] && "$GH" auth status >/dev/null 2>&1; then
+  "$GH" pr create --base main --head "$WORK" --title "Merge $BRANCH into main" \
     --body "Merges \`$BRANCH\` into \`main\` without \`notes/\` (notes stay on the milestone branches)."
 else
   echo "open the PR: $URL/compare/main...$WORK?expand=1"
