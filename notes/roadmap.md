@@ -524,7 +524,7 @@ shown in a Flower-based SplitFed baseline.
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-18, M11 done (version 0.11.0); next M12. NCCL unvalidated on this hardware. M7 deferred.
+Last updated 2026-10-18, M11 done (version 0.11.0); next M12 (plan in notes/privacy.md). NCCL unvalidated on this hardware. M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
     M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),
@@ -536,9 +536,11 @@ Last updated 2026-10-18, M11 done (version 0.11.0); next M12. NCCL unvalidated o
     just before M14 (real environment + testbed), which is the first milestone that requires
     security on a real network. The `weights_only=False` RCE on worker `init` is a known open
     risk; document it and accept it until then.
-  - **Next: M12 (privacy: attacks, defences, leakage metrics).** Create with
-    `git switch -c feat/m12-privacy fix/post-m11` (M11 + the post-M11 fixes, issues 30–31).
-    See the M12 entry above. M11 is done (version 0.11.0, see Status).
+  - **Next: M12 (privacy: attacks, defences, leakage metrics)**, on branch `feat/m12-privacy`
+    (already created from `fix/post-m11`, pushed; nothing implemented yet). **Start with
+    `notes/privacy.md`** (design + 4 steps); the papers are in `notes/sota.md` ("Privacy of
+    intermediate representations", "Leakage from weight updates", label leakage, FSHA, NoPeek;
+    don't re-search them). M11 is done (version 0.11.0, see Status).
   - **`main` is up to date** (2026-10-18): M1–M11 + `fix/post-m11` merged via PRs #3 and #4,
     without `notes/` (see `notes/README.md` and `notes/merge_to_main.sh`). CI: `tests.yml`
     (CPU, py3.10–3.12, on PRs and main) and `gpu-tests.yml` (self-hosted runner
