@@ -17,8 +17,9 @@ from ..monitor.callback import TrainingCallback
 from ..sl.hooks import CutContext, resolve_cut_hooks, payload_nbytes, tensor_nbytes
 from ..sl.roles import Placement, resolve_setting
 from ..sl.metrics import CommMeter
-from ..sl.clients import ClientSession, SplitLayerClientState
-from ..algorithm.base import Algorithm, AlgorithmContext, BackwardPolicy, check_supported
+from ..sl.clients import (ClientSession, SplitLayerClientState, algorithm_round_end,
+                          resolve_client_store, select_clients)
+from ..algorithm.base import Algorithm, AlgorithmContext, BackwardPolicy
 from ..algorithm.builtin import DefaultAlgorithm
 
 _LOG = get_logger("torchslicer.local")
@@ -83,6 +84,9 @@ class LocalExecutor(BaseExecutor):
         self._round: int = 0
         self._eval_loader = None
         self._eval_every = 0
+        self._client_states = "cpu"
+        self._client_store = None
+        self._server_store = None
 
     def setup(
         self,
@@ -137,6 +141,8 @@ class LocalExecutor(BaseExecutor):
         self._hooks = resolve_cut_hooks(cut_hooks, n, sl_cfg.cut_hooks if sl_cfg else None)
         self._meter = CommMeter(n)
         self._link = ((sl_cfg.link_bandwidth_mbps, sl_cfg.link_latency_ms) if sl_cfg else (0.0, 0.0))
+        self._client_states = (sl_cfg.client_states if sl_cfg else "") or "cpu"
+        self._client_store = self._server_store = None
 
         # Initialise profilers (one per partition) and RunLogger
         if cfg:
@@ -170,7 +176,6 @@ class LocalExecutor(BaseExecutor):
             from ..algorithm.registry import get as _get_algo
             algorithm = _get_algo(cfg.sl.algorithm)
         self._algorithm = algorithm if algorithm is not None else DefaultAlgorithm()
-        check_supported(self._algorithm, "local executor", {"select_clients": "client sampling"})
         self._algorithm.configure(len(partitions), self.criterion, self._placement)
 
         # Notify callbacks
@@ -201,7 +206,11 @@ class LocalExecutor(BaseExecutor):
             client_set = set(self._placement.client_slices)
             server_idxs = [i for i in range(len(self.split_layers)) if i not in client_set]
             if server_idxs:
-                server_adapter = SplitLayerClientState({i: self.split_layers[i] for i in server_idxs})
+                layers = {i: self.split_layers[i] for i in server_idxs}
+                if self._server_store is None:
+                    self._server_store = resolve_client_store(
+                        self._client_states, layers, session.n_clients, what="per-client server")
+                server_adapter = SplitLayerClientState(layers, store=self._server_store)
                 initial_server_state = server_adapter.get_state()
 
         if session is not None:
@@ -210,8 +219,12 @@ class LocalExecutor(BaseExecutor):
                 raise ValueError("a multi-client session needs client slices: set sl.setting "
                                  "to vanilla or u_shaped (pipeline hosts none on the data owner)")
             check_session_ties(self.tied_groups, self._placement)
-            adapter = SplitLayerClientState({i: self.split_layers[i] for i in clients})
-            batches = session.batches(adapter, epoch)
+            layers = {i: self.split_layers[i] for i in clients}
+            if self._client_store is None:      # once: later rounds see the states' own memory
+                self._client_store = resolve_client_store(self._client_states, layers, session.n_clients)
+            adapter = SplitLayerClientState(layers, store=self._client_store)
+            selected = select_clients(self._algorithm, session.n_clients, epoch)
+            batches = session.batches(adapter, epoch, clients=selected)
         else:
             batches = ((None, b) for b in data_loader)
         self._meter.reset()
@@ -306,15 +319,10 @@ class LocalExecutor(BaseExecutor):
 
         # Algorithm round-end: aggregation and per-client state updates
         if session is not None:
-            new_states = self._algorithm.on_round_end(
-                list(session.states), epoch_metrics, epoch)
-            if new_states is not None:
-                session.replace_states(new_states, adapter)
-            all_server_states = list(server_states.values()) if server_states else []
-            agg_client, agg_server = self._algorithm.aggregate(
-                list(session.states), all_server_states, epoch)
-            if agg_client is not None:
-                session.replace_states([agg_client] * len(session.states), adapter)
+            if len(selected) < session.n_clients:
+                epoch_metrics["clients"] = selected
+            agg_server = algorithm_round_end(session, self._algorithm, adapter, selected,
+                                             epoch_metrics, epoch, server_states)
             if agg_server is not None and server_adapter is not None:
                 server_adapter.set_state(agg_server)
                 for k in list(server_states):

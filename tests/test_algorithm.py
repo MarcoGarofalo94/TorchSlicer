@@ -336,7 +336,7 @@ def test_config_unknown_algorithm_raises():
 
 # ── SplitFed against a plain-PyTorch reference ────────────────────────────────
 
-def _splitfed_reference(datas, v1: bool, rounds=2):
+def _splitfed_reference(datas, v1: bool, rounds=2, select=None):
     """SplitFed in plain PyTorch, parallel clients: each client has its own client model
     and optimizer; the server is shared (V2) or one copy per client (V1). At round end
     the client models (and V1's server copies) are averaged and their optimizer states
@@ -350,10 +350,11 @@ def _splitfed_reference(datas, v1: bool, rounds=2):
     c_opts = [sgd(c) for c in clients]
     s_opts = [sgd(s) for s in servers] if v1 else [sgd(server0)] * k
     out = []
-    for _ in range(rounds):
+    for r in range(1, rounds + 1):
+        part = select(r) if select else list(range(k))
         losses = []
         for b in range(len(datas[0])):
-            for i in range(k):
+            for i in part:
                 x, y = datas[i][b]
                 a = clients[i](x)
                 a_in = a.detach().requires_grad_(True)
@@ -364,9 +365,9 @@ def _splitfed_reference(datas, v1: bool, rounds=2):
         out.append(sum(losses) / len(losses))
         groups = [(clients, c_opts)] + ([(servers, s_opts)] if v1 else [])
         for models, opts in groups:
-            with torch.no_grad():
+            with torch.no_grad():       # average the participants, give it to everyone
                 for ps in zip(*(m.parameters() for m in models)):
-                    avg = torch.stack([p for p in ps]).mean(0)
+                    avg = torch.stack([ps[i] for i in part]).mean(0)
                     for p in ps:
                         p.copy_(avg)
             for o in opts:
@@ -388,9 +389,56 @@ def test_splitfed_matches_reference(algo_cls, v1):
     assert [h["loss"] for h in hist] == pytest.approx(_splitfed_reference(datas, v1), abs=1e-6)
 
 
-def test_unused_select_clients_is_refused():
-    class Sampler(ts.Algorithm):
+class _Sample(ts.Algorithm):
+    """Two of three clients per round, rotating."""
+    def select_clients(self, available, round):
+        return [available[round % 3], available[(round + 1) % 3]]
+
+
+class _SampledSplitFed(_Sample, SplitFedAlgorithm):
+    pass
+
+
+def _three_clients():
+    g = torch.Generator().manual_seed(5)
+    return [[(torch.randn(B, D_IN, generator=g), torch.randint(0, 4, (B,), generator=g))
+             for _ in range(3)] for _ in range(3)]
+
+
+def test_client_sampling_runs_only_the_selected_clients():
+    datas = _three_clients()
+    cfg = _cfg(epochs=3)
+    cfg.sl.setting = "vanilla"
+    session = ts.ClientSession(datas, mode="parallel")
+    seen = []
+    orig = session.batches
+    def spy(adapter, epoch, clients=None):
+        for k, b in orig(adapter, epoch, clients):
+            seen.append((epoch, k))
+            yield k, b
+    session.batches = spy
+    hist = ts.slice(_model(), n=2, cuts=["1"]).train(session, run_config=cfg, algorithm=_Sample())
+    for r in (1, 2, 3):
+        assert sorted({k for e, k in seen if e == r}) == sorted([r % 3, (r + 1) % 3])
+        assert hist[r - 1]["clients"] == [r % 3, (r + 1) % 3]
+
+
+def test_splitfed_with_sampling_matches_reference():
+    datas = _three_clients()
+    cfg = _cfg(epochs=3)
+    cfg.sl.setting = "vanilla"
+    session = ts.ClientSession(datas, mode="parallel")
+    hist = ts.slice(_model(), n=2, cuts=["1"]).train(session, run_config=cfg, algorithm=_SampledSplitFed())
+    ref = _splitfed_reference(datas, v1=False, rounds=3, select=lambda r: [r % 3, (r + 1) % 3])
+    assert [h["loss"] for h in hist] == pytest.approx(ref, abs=1e-6)
+
+
+def test_bad_client_selection_is_refused():
+    class Bad(ts.Algorithm):
         def select_clients(self, available, round):
-            return available[:1]
-    with pytest.raises(ValueError, match="select_clients"):
-        _run(algorithm=Sampler(), epochs=1)
+            return [0, 0]
+    cfg = _cfg(epochs=1)
+    cfg.sl.setting = "vanilla"
+    with pytest.raises(ValueError, match="distinct client indices"):
+        ts.slice(_model(), n=2, cuts=["1"]).train(ts.ClientSession(_three_clients(), mode="parallel"),
+                                                 run_config=cfg, algorithm=Bad())

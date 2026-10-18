@@ -279,6 +279,10 @@ class SLConfig:
                    returns one loader per client  (env: SL_CLIENTS)
         client_mode: "sequential" | "parallel"  (env: SL_CLIENT_MODE)
         handoff:   sequential sessions: "copy" | "keep"  (env: SL_HANDOFF)
+        client_states: where a session keeps the clients' states: "cpu" | "gpu" |
+                   "cuda:i" | "auto" (the slices' GPU if they fit, else host RAM). A run
+                   whose states don't fit in 80 % of the free memory stops before
+                   training  (env: SL_CLIENT_STATES)
     """
     setting:             str   = ""
     cut_hooks:           list  = field(default_factory=list)
@@ -289,6 +293,7 @@ class SLConfig:
     client_mode:         str   = "sequential"
     handoff:             str   = "copy"
     algorithm:           str   = ""
+    client_states:       str   = "cpu"
 
     def __post_init__(self):
         if self.cut_hooks is None:
@@ -619,6 +624,7 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("OFFLOAD_SLOTS",          lambda cfg, v: setattr(cfg.offload, "slots",          int(v))),
     ("OFFLOAD_DIRECT_IO",      lambda cfg, v: setattr(cfg.offload, "direct_io",      _parse_bool(v))),
     ("OFFLOAD_DEVICE",         lambda cfg, v: setattr(cfg.offload, "device",         v.strip().lower())),
+    ("SL_CLIENT_STATES",       lambda cfg, v: setattr(cfg.sl, "client_states",       v.strip().lower())),
     ("SL_HANDOFF",             lambda cfg, v: setattr(cfg.sl, "handoff",             v.strip().lower())),
 )
 

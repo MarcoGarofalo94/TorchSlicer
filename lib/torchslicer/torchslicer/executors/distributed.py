@@ -31,7 +31,8 @@ from ..core.tied import find_tied_parameters as _find_ties
 from ..sl.hooks import resolve_cut_hooks, tensor_nbytes
 from ..sl.roles import Placement, resolve_setting
 from ..sl.metrics import CommMeter
-from ..sl.clients import ClientSession, SplitLayerClientState
+from ..sl.clients import (ClientSession, SplitLayerClientState, algorithm_round_end,
+                          resolve_client_store, select_clients)
 from ..transport.tunnel import Router
 
 try:
@@ -525,10 +526,10 @@ class DistributedExecutor(BaseExecutor):
             "loss": "a custom loss",
             "client_loss": "local-loss training",
             "step_aux": "local-loss auxiliary optimizers",
-            "select_clients": "client sampling",
             "needs_per_client_server_state": "per-client server copies, e.g. SplitFed V1",
         })
         self._algorithm.configure(len(partitions), None, self._placement)
+        self._client_store = None
 
         # Notify callbacks that training is about to begin
         for cb in self._callbacks:
@@ -552,8 +553,9 @@ class DistributedExecutor(BaseExecutor):
                              f"BackwardPolicy.FULL (round {epoch} asked for "
                              f"{self._algorithm.backward_policy(epoch).name})")
         if session is not None:
-            adapter = self._session_adapter()
-            batches = session.batches(adapter, epoch)
+            adapter = self._session_adapter(session.n_clients)
+            selected = select_clients(self._algorithm, session.n_clients, epoch)
+            batches = session.batches(adapter, epoch, clients=selected)
         else:
             batches = ((None, b) for b in data_loader)
         self._meter.reset()
@@ -668,12 +670,7 @@ class DistributedExecutor(BaseExecutor):
         # one get_stats per worker: communication + compute (always), profiling (verbosity)
         # Algorithm round-end (aggregation)
         if session is not None and hasattr(self, "_algorithm"):
-            new_states = self._algorithm.on_round_end(list(session.states), {}, epoch)
-            if new_states is not None:
-                session.replace_states(new_states, adapter)
-            agg_client, _ = self._algorithm.aggregate(list(session.states), [], epoch)
-            if agg_client is not None:
-                session.replace_states([agg_client] * len(session.states), adapter)
+            algorithm_round_end(session, self._algorithm, adapter, selected, {}, epoch)
         stats = self._epoch_stats(epoch)
         self._add_worker_comm(stats)
         sl_metrics = self._meter.summary(self._placement, self._run_config.sl.link_bandwidth_mbps,
@@ -1306,7 +1303,7 @@ class DistributedExecutor(BaseExecutor):
             out[n - 1] = (self._tail, self._tail_address())
         return out
 
-    def _session_adapter(self):
+    def _session_adapter(self, n_clients: int):
         """Client-state swapping for a multi-client session: over the client slices,
         which this process hosts (so swapping needs no network)."""
         if not self._placement.client_slices:
@@ -1319,7 +1316,10 @@ class DistributedExecutor(BaseExecutor):
         layers = self._stored_layers
         check_session_ties(_find_ties([[layers[j] for j in p.layer_indices] for p in self.partitions]),
                            self._placement)
-        return SplitLayerClientState({i: self._local[i].layer for i in self._placement.client_slices})
+        layers = {i: self._local[i].layer for i in self._placement.client_slices}
+        if getattr(self, "_client_store", None) is None:   # once per run
+            self._client_store = resolve_client_store(self._run_config.sl.client_states, layers, n_clients)
+        return SplitLayerClientState(layers, store=self._client_store)
 
     def _discover(self, n: int) -> list:
         """The ``n`` nodes to run on, in slice order (slice i goes to node i): the slices

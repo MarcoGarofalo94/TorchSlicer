@@ -592,3 +592,76 @@ def test_distributed_refuses_algorithm_hooks_it_does_not_run():
     cfg = _cfg("p2p", "vanilla", clients=2, client_mode="parallel", algorithm="splitfed_v1")
     with pytest.raises(ValueError, match="per-client server copies"):
         _run(cfg, data_fn=two)
+
+
+# ── client-state store (M11 step 3) ──────────────────────────────────────────
+
+def _session_run(cfg, mode="sequential", handoff="copy", opt=None, spy=None):
+    data = _data()
+    s = ts.ClientSession([data[:2], data[2:]], mode=mode, handoff=handoff)
+    if spy:
+        spy(s)
+    if opt:
+        cfg.training.optimizer = opt
+    return s, ts.slice(_model(), n=3, cuts=CUTS).train(s, run_config=cfg)
+
+
+def test_stored_states_are_never_aliased_by_the_live_slices():
+    # Adam's state (and its in-place step counter) must not leak back into a stored
+    # state: with handoff "copy", client 1 starts from client 0's stored state.
+    snaps = {}
+    def spy(s):
+        orig = s._switch
+        def switch(adapter, k, epoch):
+            orig(adapter, k, epoch)
+            if k == 1 and epoch == 1:
+                import copy as _c
+                snaps["c0"] = _c.deepcopy(s.states[0])
+        s._switch = switch
+    cfg = _cfg(setting="vanilla")
+    cfg.training.epochs = 1
+    s, _ = _session_run(cfg, opt={"name": "Adam", "params": {"lr": 0.01}}, spy=spy)
+    after = s.states[0][0]
+    assert all(torch.equal(after["model"][k], v) for k, v in snaps["c0"][0]["model"].items())
+    for pid, st in snaps["c0"][0]["optimizer"]["state"].items():
+        for key, v in st.items():
+            assert torch.equal(after["optimizer"]["state"][pid][key], v), key
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
+def test_gpu_client_store_matches_cpu_store(mode):
+    def run(store):
+        cfg = _cfg(setting="vanilla", client_states=store)
+        cfg.network.device = "cuda"
+        torch.backends.cudnn.deterministic = True
+        s = ts.ClientSession([_data()[:2], _data()[2:]], mode=mode)
+        h = ts.slice(_model().cuda(), n=3, cuts=CUTS).train(s, run_config=cfg)
+        return s, h
+    (sc, hc), (sg, hg) = run("cpu"), run("gpu")
+    assert _losses(hg) == pytest.approx(_losses(hc), abs=1e-6)
+    assert sg.states[0][0]["model"]["layers.0.weight"].is_cuda
+    assert not sc.states[0][0]["model"]["layers.0.weight"].is_cuda
+
+
+def test_client_states_that_do_not_fit_stop_before_training(monkeypatch):
+    import torchslicer.sl.clients as clients
+    monkeypatch.setattr(clients, "available_bytes", lambda device: 1000)
+    with pytest.raises(ValueError, match="client states need"):
+        _session_run(_cfg(setting="vanilla"))
+    # auto falls back to the host when the GPU is too small
+    monkeypatch.setattr(clients, "available_bytes",
+                        lambda device: 1000 if str(device).startswith("cuda") else 1 << 40)
+    layers = {0: ts.SplitLayer([nn.Linear(4, 4)])}
+    assert clients.resolve_client_store("auto", layers, 10) == "cpu"
+
+
+def test_state_nbytes_counts_optimizer_slots():
+    from torchslicer.sl.clients import state_nbytes
+    def layer(opt):
+        sl = ts.SplitLayer([nn.Linear(10, 10)])           # 110 params, 440 bytes
+        sl.set_optimizer(opt(sl.parameters()))
+        return {0: sl}
+    assert state_nbytes(layer(lambda p: torch.optim.SGD(p, lr=0.1))) == 440
+    assert state_nbytes(layer(lambda p: torch.optim.SGD(p, lr=0.1, momentum=0.9))) == 880
+    assert state_nbytes(layer(lambda p: torch.optim.Adam(p))) == 1320

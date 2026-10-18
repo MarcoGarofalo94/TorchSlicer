@@ -522,10 +522,13 @@ Last updated 2026-10-17, M9 done (version 0.9.0); NCCL unvalidated on this hardw
     Done: steps 1–2 = partitioners (`ts.data.partition`), datasets, the `data:` config section
     (`ts.run(model_fn)` without `data_fn`), evaluation on the local executor
     (`docs/tutorials/data.md`); bugs 27–29 fixed (SplitFed aggregation and optimizer state,
-    distributed executor ignoring Algorithm hooks). Next: step 3, the client-state store for
-    1000 clients (measure `ClientSession`'s per-switch deepcopy first), with client sampling
-    (`select_clients`); step 4, heterogeneity profiles and calibrated `sim_*_comm_s`; step 5,
+    distributed executor ignoring Algorithm hooks). Step 3 done: no-copy client switches,
+    `sl.client_states: cpu|gpu|auto` with a memory check before training, client sampling
+    (`select_clients`); 1000 clients × 2.1M-param client slices run here on the GPU store
+    (1.5 s/round). Next: step 4, heterogeneity profiles and calibrated `sim_*_comm_s`; step 5,
     batched client execution. Every step only adds code; losses and defaults stay unchanged.
+    **This container has 16 GB RAM and may be shut down if it exceeds it:** estimate every
+    scaling run first and use the watchdog in `benchmarks/clients/bench_clients.py`.
     Open item from M9: run `MATRIX_NCCL=1 MATRIX_DEVICE=cuda run_matrix.py` and the NCCL
     transport benchmark once a machine with ≥2 distinct GPUs is available (at the latest in M14).
     Other open items:

@@ -1151,3 +1151,48 @@ The 4 failures are GPU-only tests that step 2 doesn't touch: 3 × `test_offload.
 GPU: 33/33 for both files, and the IPC test 6/6 in 3 more runs. So the IPC test is also load-sensitive
 (open, like the offload one). CPU matrix 115/117 (the 2 known GPipe + BatchNorm cells); every
 cell's losses identical to before M11.
+
+### Step 3: many clients (2026-10-18)
+
+Context: the container has 16 GB RAM, and exceeding it may get the container shut down. So
+every scaling run had an estimate first and a watchdog (`benchmarks/clients/bench_clients.py`
+kills itself above 11 GB of cgroup memory). The container peak stayed under 6 GB.
+
+**Measured before changing anything** (old code):
+- 1000 clients with a tiny client slice (the example CNN's conv1, 896 params): 2.0 ms/client,
+  1.2 GB. Many clients were never the problem for small client slices.
+- Per-client RAM ≈ 1.4 × (weights + optimizer state): 200 × 2.1M params used 4.7 GB vs
+  3.4 GB of states. The extra came from transient deep copies.
+- A switch deep-copied each state twice on top of the copies in `get_state`/`set_state`:
+  4.4 ms (CPU) to 52 ms (GPU slices, CPU store) at 2.1M params; 233 / 478 ms at 33M.
+
+**Changes:**
+- `get_state` makes the only copy, `set_state` never aliases (`Optimizer.load_state_dict`
+  keeps tensors already on the parameter's device, and Adam's `step` is updated in place),
+  so `ClientSession` no longer deep-copies. Same-harness A/B: 2.1–3.4× faster on CPU,
+  1.5–2.6× with GPU slices and a CPU store. Test: `test_stored_states_are_never_aliased_by_the_live_slices`
+  (Adam, copy handoff). With a naive non-copying `set_state` it fails.
+- `sl.client_states: cpu | gpu | cuda:i | auto`: where states live. GPU store switch:
+  0.34–1.0 ms for 0.13M–33M params. Losses are equal to the CPU store at 1e-6
+  (`test_gpu_client_store_matches_cpu_store`).
+- Memory check before training (`resolve_client_store`): N × estimated state bytes must fit
+  in 80 % of the store's free memory, else a `ValueError` with the numbers. Verified live:
+  1000 × 2.1M params on the CPU store was refused (15.6 GB needed, 14.8 GB free) before any
+  allocation.
+- Client sampling (`Algorithm.select_clients`), in local and distributed sessions.
+  `on_round_end`/`aggregate` see the participants; the aggregate goes to every client.
+  SplitFed with 2-of-3 rotating sampling matches the plain-PyTorch reference at 1e-6.
+  The `select_clients` refusal from issue 29 is lifted.
+
+**Result** (SplitFed V2, 2.1M-param client slices, quiet GPU): 200 clients 9.2 → 3.7 ms/client
+(CPU store) / 1.4 ms (GPU store); 1000 clients, impossible before (17 GB of states in 16 GB
+RAM), now 1.5 s/round with 19.6 GB GPU and 1.0 GB RAM. The first measurement of the 200-client
+rounds gave 27–47 ms/client while another tenant used the GPU; repeated on a quiet GPU it gave
+the numbers above. GPU timings here are only meaningful when `nvidia-smi` shows it idle.
+
+Verification of step 3: tests 314/314 on the last full run. The two runs before it each had
+`test_transport.py::test_ipc_matches_tcp_on_gpu` failing at the launched subprocess's exit
+code (not a loss mismatch). It passes alone (8/8) and after `test_sl.py`, so it is intermittent
+in full runs, 2 of the last 4. The error text was lost to `tail`; open: capture it (the test
+prints the subprocess's stdout/stderr on failure). CPU matrix 115/117 (known GPipe + BatchNorm),
+all losses identical. Container memory peak during all of this: 6.2 GB.

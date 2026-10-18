@@ -68,3 +68,42 @@ the history entries.
 - **Supported on the local executor** (the simulator). Distributed, P2P and offload refuse
   `eval_data` with a clear error for now. With a `data` section on those topologies, set
   `data.eval_every: 0`.
+
+## Many clients
+
+A session keeps one state per client: its client slices' weights and optimizer state,
+about `(1 + optimizer slots) × client-slice parameters × 4` bytes. Switching clients
+copies one state out of the slices and the next one in.
+
+- **`sl.client_states`**: where the states live. `cpu` (host RAM, the default), `gpu`
+  (`cuda:i`), or `auto` (the slices' GPU if they fit, else RAM). With GPU slices, the GPU
+  store makes a switch a device-to-device copy: 0.35 ms instead of 11 ms for a 2.1M-parameter
+  client slice on an A100 (`benchmarks/clients/`).
+- **TorchSlicer checks before training** that N states fit in 80 % of the free memory of
+  the chosen store (for the host: the smaller of the cgroup limit's remainder and
+  `MemAvailable`), and stops with the numbers otherwise. A machine that runs out of memory
+  mid-run, or a container that gets killed, loses more than the run.
+- **Client sampling:** override `Algorithm.select_clients(available, round)` to return the
+  round's participants; only they train. `on_round_end` gets their states, and
+  `aggregate`'s client state (e.g. FedAvg of the participants) goes to every client, as
+  in FedAvg. The history entry lists the round's `clients` when not all took part.
+
+```python
+class TenPerRound(ts.SplitFedAlgorithm):
+    def select_clients(self, available, round):
+        rng = random.Random(round)
+        return sorted(rng.sample(available, 10))
+```
+
+Measured on one A100 with a 16 GB container (SplitFed V2, 2.1M-parameter client slices,
+one batch of 16 per client):
+
+| clients | store | round | per client | peak RAM | peak GPU |
+|---|---|---|---|---|---|
+| 200 | cpu | 0.74 s | 3.7 ms | 4.8 GB | 0.04 GB |
+| 200 | gpu | 0.29 s | 1.4 ms | 0.9 GB | 4.0 GB |
+| 1000 | gpu | 1.49 s | 1.5 ms | 1.0 GB | 19.6 GB |
+| 1000 | cpu | refused before training: 15.6 GB needed, 14.8 GB free | | | |
+
+Clients with a small client slice (a conv layer or two) are cheap anywhere: 1000 clients of
+the example CNN take 2 s per round and 1.2 GB.
