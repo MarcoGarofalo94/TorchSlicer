@@ -35,6 +35,7 @@ Format: title — year, venue — link — idea — setting — numbers. `[abstr
 - **Depth Gives a False Sense of Privacy: LLM Internal States Inversion** (Dong et al.) — 2025, USENIX Security — https://arxiv.org/abs/2507.16372 — inverts middle-layer states; 4,112-token prompt recovered at 86.88 token F1 from middle layer of Llama-3; 4 defenses insufficient.
 - **Privacy Failure in Split-LLM Training: The Returned Gradient Nullifies the Decoys** (Politis, Pappas) — 2026, arXiv — https://arxiv.org/abs/2609.04382 — decoy rows get zero gradient → 4096/4096 real rows identified; forward-only privacy checks miss gradient channel. Vanilla 2-node.
 - **UnSplit** — 2022, WPES — https://eprint.iacr.org/2021/1074 `[abstract-only]` — honest-but-curious server recovers inputs + client model knowing only architecture.
+- **NoPeek: Information leakage reduction to share activations in distributed deep learning** (Vepakomma, Singh, Gupta, Raskar) — 2020, arXiv (venue not stated) — https://arxiv.org/abs/2008.09161 `[abstract-only]` — adds a loss term minimizing the distance correlation between raw inputs and the shared cut activations, against reconstruction attacks, while keeping accuracy. No numbers in the abstract.
 
 ## Leakage from weight updates (copied from the research branches, 2026-10-18)
 - **Deep Leakage from Gradients** (Zhu, Liu, Han) — 2019, NeurIPS `[unverified: venue]` — https://arxiv.org/abs/1906.08935 — pixel-/token-accurate reconstruction from shared gradients.
