@@ -1,6 +1,6 @@
 # TorchSlicer
 
-<img src="https://github.com/MarcoGarofalo94/TorchSlicer/assets/47697181/3b9d71dc-64f0-4adf-ac9b-40576593f532" width="156" height="156" />
+<img src="docs/torchslicer-logo.png" width="156" height="156" />
 
 **A split-learning framework for PyTorch.** TorchSlicer cuts any `nn.Module` into a chain of
 slices and trains them end to end. The slices can run in one process (a simulator), on
