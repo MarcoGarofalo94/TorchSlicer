@@ -5,7 +5,7 @@ env:   MATRIX_DEVICE=cpu|cuda, MATRIX_OPT='{"name": ..., "params": {...}}', MATR
        MATRIX_MODES=local,offload,... (a subset of the modes; only a full run writes results),
        MATRIX_NCCL=1 (add {central,p2p}-nccl: on CUDA they need one GPU per slice; on CPU they
        run the same code path on the gloo backend)
-A full run (no model args) writes results/results_<device>_<opt>.json; see notes/validation.md.
+A full run (no model args) writes results/results_<device>_<opt>.json.
 """
 import json
 import os

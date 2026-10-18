@@ -402,7 +402,7 @@ class Scale(nn.Module):      # module level: slices are pickled to the workers
 
 
 def test_coordinator_sends_uint8_inputs():
-    """Regression (validation.md issue 16): uint8 inputs were sent as float32 bytes."""
+    """Regression: uint8 inputs were sent as float32 bytes."""
     def model():
         torch.manual_seed(0)
         return nn.Sequential(Scale(), nn.Linear(D_IN, D_H), nn.ReLU(), nn.Linear(D_H, 4))
@@ -422,7 +422,7 @@ def test_coordinator_sends_uint8_inputs():
 
 
 def test_late_labels_are_not_kept_on_the_last_worker(monkeypatch):
-    """Regression (validation.md issue 17): a label arriving after its activation was
+    """Regression: a label arriving after its activation was
     used and also stored, so the last worker kept every such label until the run ended."""
     from torchslicer.executors import distributed as dist
     left = []
@@ -586,7 +586,7 @@ def test_u_shaped_recovery_keeps_the_tail_on_the_data_owner(tmp_path):
 
 
 def test_distributed_refuses_algorithm_hooks_it_does_not_run():
-    # It used to ignore them and train plain SplitNN instead (validation.md M11).
+    # It used to ignore them and train plain SplitNN instead.
     data = _data()
     two = lambda: [data[:2], data[2:]]
     cfg = _cfg("p2p", "vanilla", clients=2, client_mode="parallel", algorithm="splitfed_v1")

@@ -1,5 +1,5 @@
 """``OffloadExecutor``: train a model that does not fit in device memory on one node, by
-paging its slices in one at a time (M5). Survey and design choices: notes/offload.md.
+paging its slices in one at a time (M5).
 
 Schedule per batch (layer-major, as in L2L and Harmony):
 

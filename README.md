@@ -24,7 +24,7 @@ history[-1]["loss"], history[-1]["bytes_fwd"]        # loss, bytes per cut
 Splitting doesn't change the math. On CPU every model in the validation matrix (DNN, CNN,
 ResNet-18, TinyGPT, GPT-2, Llama, plus LoRA on the language models) gives the same losses
 as unsplit PyTorch with the same seed, in every executor, topology and transport
-([`benchmarks/equivalence/`](benchmarks/equivalence/), [`notes/validation.md`](notes/validation.md)).
+([`benchmarks/equivalence/`](benchmarks/equivalence/)).
 The one known difference is GPipe with BatchNorm, which micro-batching causes by design.
 
 ---
@@ -285,7 +285,7 @@ A `ClientSession` keeps one state per client (client-slice weights and optimizer
 swaps it in between batches. States live in host RAM or on the GPU (`sl.client_states:
 cpu|gpu|auto`), and TorchSlicer checks before training that they fit in memory. Today all
 clients are simulated in the data owner's process. Clients as separate nodes with their
-own data are planned (roadmap M10).
+own data are planned.
 
 ## Data, client splits and evaluation
 
@@ -443,7 +443,6 @@ examples/                      entry points: run_anywhere, sl, data, train/{cent
 experiments/                   RunConfig YAML files
 benchmarks/                    equivalence matrix, transport, NAT, offload, clients
 tests/                         pytest suite
-notes/                         roadmap, validation log, SL literature and experiment notes
 ```
 
 ## Development
@@ -463,9 +462,7 @@ cd lib/torchslicer && python -m grpc_tools.protoc -I . --python_out=. --grpc_pyt
 
 There are two `pyproject.toml` files: the root one for editable installs, and
 `lib/torchslicer/pyproject.toml`, which CI publishes to PyPI on `v*.*.*` tags. Keep their
-versions and dependencies in sync, along with `__version__`. The roadmap and the record of
-every bug found and fixed are in [`notes/roadmap.md`](notes/roadmap.md) and
-[`notes/validation.md`](notes/validation.md).
+versions and dependencies in sync, along with `__version__`.
 
 **Known limits:** test-set evaluation runs on the local executor only; multi-client
 sessions simulate all clients in one process; channels are unencrypted and

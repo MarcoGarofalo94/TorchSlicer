@@ -378,7 +378,7 @@ def _splitfed_reference(datas, v1: bool, rounds=2, select=None):
 @pytest.mark.parametrize("algo_cls,v1", [(SplitFedAlgorithm, False), (SplitFedV1Algorithm, True)])
 def test_splitfed_matches_reference(algo_cls, v1):
     # Regressions: after aggregation the last client of a round kept its old weights, and
-    # every client kept the previous client's momentum (validation.md M11).
+    # every client kept the previous client's momentum.
     g = torch.Generator().manual_seed(5)
     datas = [[(torch.randn(B, D_IN, generator=g), torch.randint(0, 4, (B,), generator=g))
               for _ in range(3)] for _ in range(3)]

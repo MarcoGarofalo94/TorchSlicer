@@ -13,7 +13,7 @@ and written with ``pread``/``pwrite`` in 4 KiB-aligned chunks spread over a few 
 threads, through one pinned staging buffer per slot; one I/O "lane" thread per slot keeps
 each slot's reads and writes in order. ``direct_io=True`` opens them with ``O_DIRECT``
 (no page cache); it is off by default because on the machine M5 was measured on it was
-3x slower under training's mixed reads and writes (notes/offload.md, "Measurements").
+3x slower under training's mixed reads and writes.
 
 The device has a few **slots** (two by default: double buffering), each one byte buffer
 allocated once and holding one slice as ``[pb | g | s]``. Paging a slice in is one

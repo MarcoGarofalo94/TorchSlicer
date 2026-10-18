@@ -370,7 +370,7 @@
      4.622915267944336
     ],
     "verdict": "OK (max|\u0394|=0.0e+00)",
-    "note": "first attempt hit the 5 s worker-init RPC deadline (issue 3 in notes/validation.md); rerun alone after raising it to 300 s"
+    "note": "first attempt hit the 5 s worker-init RPC deadline (since fixed); rerun alone after raising it to 300 s"
    }
   },
   "p2p-grpc": {

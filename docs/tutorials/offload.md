@@ -6,7 +6,7 @@ paged into the GPU when it computes, while the next slice is already being copie
 losses are the same as training the whole model in GPU memory: the
 [equivalence matrix](../../benchmarks/equivalence/) checks every model at 1e-5.
 
-The design follows L2L and Harmony (survey and decision: `notes/offload.md`):
+The design follows L2L and Harmony:
 
 1. **Forward**, slice by slice, without an autograd graph. Only each slice's input (the cut
    tensor) and the RNG state are kept.
@@ -105,7 +105,7 @@ Every epoch entry has the usual SL metrics (bytes per cut, compute per slice), p
   through pinned staging buffers. By default this goes through the page cache, which the
   kernel reclaims as needed. `direct_io=True` (config `offload.direct_io`) uses `O_DIRECT`
   instead, so the bytes really go to the SSD. Measure both on your machine: where M5 was
-  measured, `O_DIRECT` was 3x slower (`notes/offload.md`). Between pages, and after
+  measured, `O_DIRECT` was 3x slower. Between pages, and after
   training, the parameters are memory-mapped views of the files. They cost no RAM until
   read, so `state_dict()` works even for a model larger than RAM.
 - **The cpu tier must fit in RAM.** `mode="cpu"` keeps the parameters and the optimizer state

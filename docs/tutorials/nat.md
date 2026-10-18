@@ -180,8 +180,7 @@ k8s), and `ROLE=all` starts one on loopback.
 
 `benchmarks/nat/bench_nat.py` runs one U-shaped P2P run as OS processes on loopback,
 with 1 MiB per cut and direction per batch. It runs the same thing with every node
-reachable, with the client behind NAT, and with everything through a relay. The numbers
-are in `notes/validation.md` (round 7). The tunnel costs about as much as the direct
+reachable, with the client behind NAT, and with everything through a relay. The tunnel costs about as much as the direct
 gRPC path it replaces. The relay adds a hop to every message. Over a real WAN the extra
 hop matters more than the extra copy.
 

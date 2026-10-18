@@ -12,7 +12,7 @@ and all control calls stay on gRPC whatever the mode.
 | `nccl` | one GPU per slice, multi-GPU or RDMA clusters | any, one GPU each |
 
 Measured on one A100, 2 slices in 2 processes, steady state, mean ± std of 3
-(`benchmarks/transport/`, notes/experiments.md 2026-10-17):
+(`benchmarks/transport/`):
 
 | cut per batch | grpc | tcp | ipc |
 |---|---|---|---|
