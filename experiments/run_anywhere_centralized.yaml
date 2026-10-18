@@ -1,0 +1,21 @@
+# examples/run_anywhere/train.py as a coordinator + 3 workers.
+# Same training in every run_anywhere_*.yaml, on every target: the losses must match
+# (tests/test_deploy.py). Launch: python -m torchslicer launch <script> -c <this> -t <target>.
+run_id: run_anywhere_centralized
+
+training:
+  epochs: 2
+  optimizer: {name: SGD, params: {lr: 0.05, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+
+discovery:
+  n_workers: 3          # slices
+
+logging:
+  enabled: false
+
+deploy:
+  topology: centralized
+
+network:
+  device: cpu          # every node; "auto" = cuda when present

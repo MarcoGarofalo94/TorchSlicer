@@ -1,0 +1,30 @@
+# U-shaped split learning, P2P: the driver (data owner) hosts the client front (conv1)
+# and the client tail (fc + loss); one follower hosts the server part (conv2).
+# Raw data and labels never leave the driver; cut 0 is quantized to 8 bits.
+# Run: python examples/sl/train.py   (every node in-process), or
+#      python -m torchslicer launch examples/sl/train.py -c experiments/sl_u_shaped_p2p.yaml -t processes
+run_id: sl_u_shaped_p2p
+
+training:
+  epochs: 2
+  optimizer: {name: SGD, params: {lr: 0.05, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+
+discovery:
+  n_workers: 3          # slices: the driver hosts 2 of them (u_shaped), 1 follower
+
+logging:
+  enabled: false
+
+deploy:
+  topology: p2p
+
+network:
+  device: cpu
+
+sl:
+  setting: u_shaped
+  cut_hooks:
+    - {cut: 0, name: quantize, params: {bits: 8}}
+  link_bandwidth_mbps: 50     # simulated client link, for sim_*_comm_s
+  link_latency_ms: 10

@@ -1,0 +1,439 @@
+{
+ "dnn": {
+  "reference": [
+   1.3829801082611084,
+   1.3546229004859924
+  ],
+  "local": {
+   "losses": [
+    1.38298,
+    1.354623
+   ],
+   "verdict": "OK (max|\u0394|=1.1e-07)"
+  },
+  "gpipe": {
+   "losses": [
+    1.38298,
+    1.354623
+   ],
+   "verdict": "OK (max|\u0394|=1.1e-07)"
+  },
+  "central-grpc": {
+   "losses": [
+    1.3829801082611084,
+    1.3546229004859924
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "central-tcp": {
+   "losses": [
+    1.3829801082611084,
+    1.3546229004859924
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "p2p-grpc": {
+   "losses": [
+    1.383,
+    1.3546
+   ],
+   "verdict": "OK (max|\u0394|=2.3e-05)"
+  },
+  "p2p-tcp": {
+   "losses": [
+    1.383,
+    1.3546
+   ],
+   "verdict": "OK (max|\u0394|=2.3e-05)"
+  }
+ },
+ "cnn": {
+  "reference": [
+   2.3883652091026306,
+   2.1474223732948303
+  ],
+  "local": {
+   "losses": [
+    2.388365,
+    2.147422
+   ],
+   "verdict": "OK (max|\u0394|=3.7e-07)"
+  },
+  "gpipe": {
+   "losses": [
+    2.388365,
+    2.147422
+   ],
+   "verdict": "OK (max|\u0394|=3.7e-07)"
+  },
+  "central-grpc": {
+   "losses": [
+    2.3883652091026306,
+    2.1474223732948303
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "central-tcp": {
+   "losses": [
+    2.3883652091026306,
+    2.1474223732948303
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "p2p-grpc": {
+   "losses": [
+    2.3884,
+    2.1474
+   ],
+   "verdict": "OK (max|\u0394|=3.5e-05)"
+  },
+  "p2p-tcp": {
+   "losses": [
+    2.3884,
+    2.1474
+   ],
+   "verdict": "OK (max|\u0394|=3.5e-05)"
+  }
+ },
+ "resnet18": {
+  "reference": [
+   2.421781301498413,
+   0.18798544071614742
+  ],
+  "local": {
+   "losses": [
+    2.421781,
+    0.187985
+   ],
+   "verdict": "OK (max|\u0394|=4.4e-07)"
+  },
+  "gpipe": {
+   "losses": [
+    2.425623,
+    0.207172
+   ],
+   "verdict": "DIFF (max|\u0394|=1.9e-02)"
+  },
+  "central-grpc": {
+   "losses": [
+    2.421781301498413,
+    0.18798544071614742
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "central-tcp": {
+   "losses": [
+    2.421781301498413,
+    0.18798544071614742
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "p2p-grpc": {
+   "losses": [
+    2.4218,
+    0.188
+   ],
+   "verdict": "OK (max|\u0394|=1.9e-05)"
+  },
+  "p2p-tcp": {
+   "losses": [
+    2.4218,
+    0.188
+   ],
+   "verdict": "OK (max|\u0394|=1.9e-05)"
+  }
+ },
+ "tinygpt": {
+  "reference": [
+   4.800049662590027,
+   3.405690312385559
+  ],
+  "local": {
+   "losses": [
+    4.80005,
+    3.40569
+   ],
+   "verdict": "OK (max|\u0394|=3.4e-07)"
+  },
+  "gpipe": {
+   "losses": [
+    4.80005,
+    3.40569
+   ],
+   "verdict": "OK (max|\u0394|=3.4e-07)"
+  },
+  "central-grpc": {
+   "losses": [
+    4.800049662590027,
+    3.405690312385559
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "central-tcp": {
+   "losses": [
+    4.800049662590027,
+    3.405690312385559
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "p2p-grpc": {
+   "losses": [
+    4.8,
+    3.4057
+   ],
+   "verdict": "OK (max|\u0394|=5.0e-05)"
+  },
+  "p2p-tcp": {
+   "losses": [
+    4.8,
+    3.4057
+   ],
+   "verdict": "OK (max|\u0394|=5.0e-05)"
+  }
+ },
+ "gpt2": {
+  "reference": [
+   4.622698545455933,
+   4.455532431602478
+  ],
+  "local": {
+   "losses": [
+    4.622699,
+    4.455532
+   ],
+   "verdict": "OK (max|\u0394|=4.5e-07)"
+  },
+  "gpipe": {
+   "losses": [
+    4.622698,
+    4.455533
+   ],
+   "verdict": "OK (max|\u0394|=5.7e-07)"
+  },
+  "central-grpc": {
+   "losses": [
+    4.622698545455933,
+    4.455532431602478
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "central-tcp": {
+   "losses": [
+    4.622698545455933,
+    4.455532431602478
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "p2p-grpc": {
+   "losses": [
+    4.6227,
+    4.4555
+   ],
+   "verdict": "OK (max|\u0394|=3.2e-05)"
+  },
+  "p2p-tcp": {
+   "losses": [
+    4.6227,
+    4.4555
+   ],
+   "verdict": "OK (max|\u0394|=3.2e-05)"
+  }
+ },
+ "llama": {
+  "reference": [
+   4.614632964134216,
+   4.46731424331665
+  ],
+  "local": {
+   "losses": [
+    4.614633,
+    4.467314
+   ],
+   "verdict": "OK (max|\u0394|=2.4e-07)"
+  },
+  "gpipe": {
+   "losses": [
+    4.614633,
+    4.467314
+   ],
+   "verdict": "OK (max|\u0394|=2.4e-07)"
+  },
+  "central-grpc": {
+   "losses": [
+    4.614632964134216,
+    4.46731424331665
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "central-tcp": {
+   "losses": [
+    4.614632964134216,
+    4.46731424331665
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "p2p-grpc": {
+   "losses": [
+    4.6146,
+    4.4673
+   ],
+   "verdict": "OK (max|\u0394|=3.3e-05)"
+  },
+  "p2p-tcp": {
+   "losses": [
+    4.6146,
+    4.4673
+   ],
+   "verdict": "OK (max|\u0394|=3.3e-05)"
+  }
+ },
+ "tinygpt-lora": {
+  "reference": [
+   4.714797735214233,
+   4.708075046539307
+  ],
+  "local": {
+   "losses": [
+    4.714798,
+    4.708075
+   ],
+   "verdict": "OK (max|\u0394|=2.6e-07)"
+  },
+  "gpipe": {
+   "losses": [
+    4.714798,
+    4.708075
+   ],
+   "verdict": "OK (max|\u0394|=2.6e-07)"
+  },
+  "central-grpc": {
+   "losses": [
+    4.714797735214233,
+    4.708075046539307
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "central-tcp": {
+   "losses": [
+    4.714797735214233,
+    4.708075046539307
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "p2p-grpc": {
+   "losses": [
+    4.7148,
+    4.7081
+   ],
+   "verdict": "OK (max|\u0394|=2.5e-05)"
+  },
+  "p2p-tcp": {
+   "losses": [
+    4.7148,
+    4.7081
+   ],
+   "verdict": "OK (max|\u0394|=2.5e-05)"
+  }
+ },
+ "gpt2-lora": {
+  "reference": [
+   4.624537706375122,
+   4.622915267944336
+  ],
+  "local": {
+   "losses": [
+    4.624538,
+    4.622915
+   ],
+   "verdict": "OK (max|\u0394|=2.9e-07)"
+  },
+  "gpipe": {
+   "losses": [
+    4.624538,
+    4.622915
+   ],
+   "verdict": "OK (max|\u0394|=2.9e-07)"
+  },
+  "central-grpc": {
+   "losses": [
+    4.624537706375122,
+    4.622915267944336
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "central-tcp": {
+   "losses": null,
+   "verdict": "FAIL (no result)",
+   "rerun": {
+    "losses": [
+     4.624537706375122,
+     4.622915267944336
+    ],
+    "verdict": "OK (max|\u0394|=0.0e+00)",
+    "note": "first attempt hit the 5 s worker-init RPC deadline (since fixed); rerun alone after raising it to 300 s"
+   }
+  },
+  "p2p-grpc": {
+   "losses": [
+    4.6245,
+    4.6229
+   ],
+   "verdict": "OK (max|\u0394|=3.8e-05)"
+  },
+  "p2p-tcp": {
+   "losses": [
+    4.6245,
+    4.6229
+   ],
+   "verdict": "OK (max|\u0394|=3.8e-05)"
+  }
+ },
+ "llama-lora": {
+  "reference": [
+   4.615967035293579,
+   4.611044645309448
+  ],
+  "local": {
+   "losses": [
+    4.615967,
+    4.611045
+   ],
+   "verdict": "OK (max|\u0394|=3.5e-07)"
+  },
+  "gpipe": {
+   "losses": [
+    4.615967,
+    4.611044
+   ],
+   "verdict": "OK (max|\u0394|=6.5e-07)"
+  },
+  "central-grpc": {
+   "losses": [
+    4.615967035293579,
+    4.611044645309448
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "central-tcp": {
+   "losses": [
+    4.615967035293579,
+    4.611044645309448
+   ],
+   "verdict": "OK (max|\u0394|=0.0e+00)"
+  },
+  "p2p-grpc": {
+   "losses": [
+    4.616,
+    4.611
+   ],
+   "verdict": "OK (max|\u0394|=4.5e-05)"
+  },
+  "p2p-tcp": {
+   "losses": [
+    4.616,
+    4.611
+   ],
+   "verdict": "OK (max|\u0394|=4.5e-05)"
+  }
+ }
+}

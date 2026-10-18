@@ -9,6 +9,19 @@ service WorkerService {
     rpc shutdown         (ShutdownRequest)  returns (Ack);
     rpc get_stats        (GetStatsRequest)  returns (WorkerStatsResponse);
     rpc save_checkpoint  (ShutdownRequest)  returns (Ack);  // save without stopping server
+    rpc tied_grad        (TiedTensor)       returns (Ack);  // replica → owner: gradient of a tied parameter
+    rpc tied_update      (TiedTensor)       returns (Ack);  // owner → replica: value after the optimizer step
+    rpc describe         (DescribeRequest)  returns (NodeDescription);  // capabilities, for planning
+    rpc echo             (EchoRequest)      returns (EchoReply);        // network probe target
+    rpc probe_link       (LinkProbeRequest) returns (LinkProbeReply);   // measure this worker → target
+}
+
+// NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
+// opens this stream to a node that does (a peer or a relay); afterwards the callee
+// sends its calls to the NAT'd node down the stream instead of dialing it. Every
+// TorchSlicer gRPC server (worker, coordinator, tail slice, relay) serves it.
+service TunnelService {
+    rpc open (stream TunnelFrame) returns (stream TunnelFrame);
 }
 
 // ── tensor ────────────────────────────────────────────────────────────────────
@@ -20,6 +33,9 @@ enum DType {
     FLOAT64 = 3;
     INT64   = 4;
     INT32   = 5;
+    UINT8   = 6;  // packed cut-hook payloads (torchslicer.sl.hooks.pack_payload)
+    INT8    = 7;
+    BOOL    = 8;
 }
 
 message Tensor {
@@ -69,6 +85,19 @@ message SliceConfig {
     uint32  profile_verbosity      = 12; // 0=off 1=epoch totals 2=phase breakdown 3=per-batch
     bool    profile_memory         = 13; // capture GPU memory snapshots per phase
     repeated PredecessorList predecessors = 14; // intra-partition DAG; one entry per layer
+    repeated TiedParam tied        = 15; // parameters shared with other layers (tied weights)
+    string  init_token             = 16; // unique per init round; tied messages from other rounds are dropped
+    bytes   cut_hooks              = 17; // torch.save({cut: CutHook}) for this slice's input/output cuts
+    uint32  n_slices               = 18; // number of slices in the run (cut hooks' context)
+}
+
+// A parameter reachable under several names, possibly on several workers.
+// The owner (lowest worker index using it) is the only one that optimizes it.
+message TiedParam {
+    uint32          group = 1;
+    repeated string names = 2;  // local names (SplitLayer-relative) that must share one tensor
+    bool            owner = 3;
+    repeated string peers = 4;  // owner: replica addresses; replica: [owner address]; empty if local-only
 }
 
 // ── forward / backward ────────────────────────────────────────────────────────
@@ -148,6 +177,24 @@ message WorkerStatsResponse {
     // non-empty if this worker hit a fatal runtime error (lets the coordinator
     // confirm a failure report with the reported worker itself)
     string fatal_error = 15;
+    // communication sent by this worker since the last epoch read (always counted):
+    // payload bytes on the wire (after cut hooks) and before encoding, per direction
+    uint64 bytes_fwd     = 16;  // activations to the next slice
+    uint64 bytes_bwd     = 17;  // gradients to the previous slice
+    uint64 raw_bytes_fwd = 18;
+    uint64 raw_bytes_bwd = 19;
+    uint64 msgs_fwd      = 20;
+    uint64 msgs_bwd      = 21;
+    double compute_ms    = 22;  // forward + backward + optimizer wall time of this slice
+}
+
+// ── tied parameters ───────────────────────────────────────────────────────────
+
+message TiedTensor {
+    uint32 group      = 1;
+    uint32 batch_id   = 2;  // full-batch id (micro-batch id // n_micro)
+    string init_token = 3;
+    Tensor tensor     = 4;
 }
 
 // ── responses ─────────────────────────────────────────────────────────────────
@@ -160,4 +207,61 @@ message StatusMessage {
     bool   ok      = 1;
     string message = 2;
     string hostname = 3;
+}
+
+// ── capabilities (planning) ───────────────────────────────────────────────────
+
+message DescribeRequest {}
+
+message NodeDescription {
+    string          device         = 1;
+    uint64          memory_mb      = 2;  // available memory on the device
+    double          compute_gflops = 3;  // measured (or declared) matmul GFLOP/s
+    uint64          max_memory_mb  = 4;  // declared cap; 0 = none
+    bool            first_slice    = 5;
+    repeated string tags           = 6;
+    string          hostname       = 7;
+}
+
+message EchoRequest {
+    bytes payload = 1;  // ignored; its size is what is being measured
+}
+
+message EchoReply {
+    uint64 n_bytes = 1;
+}
+
+message LinkProbeRequest {
+    string target  = 1;  // host:port of the worker to measure
+    uint64 n_bytes = 2;
+    uint32 repeats = 3;
+}
+
+message LinkProbeReply {
+    double rtt_ms         = 1;
+    double bandwidth_mbps = 2;
+    string error          = 3;
+}
+
+// ── tunnel (NAT traversal) ────────────────────────────────────────────────────
+
+// One message on a tunnel, in either direction. A REQUEST carries a unary call of
+// any TorchSlicer service, serialized exactly as gRPC would send it.
+message TunnelFrame {
+    enum Kind {
+        HELLO    = 0;  // first frame of the dialing side: the addresses it serves
+        REQUEST  = 1;
+        RESPONSE = 2;
+        ERROR    = 3;
+        PING     = 4;  // keeps NAT mappings open on an idle tunnel; ignored
+    }
+    Kind            kind      = 1;
+    uint64          call_id   = 2;  // matches a RESPONSE/ERROR to its REQUEST
+    string          target    = 3;  // REQUEST: address of the node being called
+    string          method    = 4;  // REQUEST: full method name, "/package.Service/method"
+    bytes           payload   = 5;  // REQUEST / RESPONSE: the serialized message
+    int32           code      = 6;  // ERROR: grpc.StatusCode value
+    string          details   = 7;  // ERROR
+    repeated string addresses = 8;  // HELLO
+    double          timeout_s = 9;  // REQUEST: the caller's deadline; 0 = none
 }

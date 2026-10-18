@@ -1,0 +1,282 @@
+# Split-learning settings: roles, cut hooks, metrics, multiple clients
+
+TorchSlicer slices a model into a chain of slices. Split learning (SL) adds three
+questions on top of the chain:
+
+1. **Who runs which slice?** The *data owner* (the client) must keep its raw data, and
+   in some settings its labels too.
+2. **What crosses each cut?** Activations go forward and gradients come back. You may
+   want to compress them, add noise, or watch them as an attacker would.
+3. **What does it cost?** That means bytes per cut, compute on the client, and time on
+   a given link.
+
+A fourth question follows: **what if there are many clients?** This page covers all
+four. Every code block below runs as written (`tests/test_docs.py` executes them).
+
+## 1. Settings: what the data owner hosts
+
+The data owner is the process that holds the data. That is the process that calls
+`data_fn` in `ts.run`, or the one that iterates the loader. Which process it is
+depends on the topology:
+
+- the P2P driver;
+- the centralized coordinator;
+- the single process of a local run.
+
+The setting (`sl.setting`, env `SL_SETTING`) says which slices this process hosts
+*in-process*. What it hosts never crosses the network:
+
+| setting    | data owner hosts       | raw inputs | labels | usual name |
+|------------|------------------------|------------|--------|------------|
+| `pipeline` | nothing                | leave      | leave  | pipeline parallelism |
+| `vanilla`  | slice 0                | stay       | leave  | split learning with label sharing |
+| `u_shaped` | slice 0 and the last   | stay       | stay   | U-shaped split learning (no label sharing) |
+
+The default is `pipeline` for the centralized topology, because its coordinator holds
+no layers (this is the pre-M4 behaviour). It is `vanilla` everywhere else, since a P2P
+driver always holds slice 0. `u_shaped` needs at least 3 slices: the client front, the
+server, and the client tail (the head and the loss).
+
+A setting never changes the math. Training is the same as unsplit PyTorch in every
+setting and topology. What changes is where each slice runs, and so which tensors
+cross the network. The metrics show it:
+
+```python
+import torch
+import torch.nn as nn
+import torchslicer as ts
+
+
+def build_model():
+    torch.manual_seed(0)
+    return nn.Sequential(nn.Linear(8, 32), nn.ReLU(), nn.Linear(32, 32), nn.ReLU(),
+                         nn.Linear(32, 4))
+
+
+def get_data():
+    g = torch.Generator().manual_seed(1)
+    x, y = torch.randn(64, 8, generator=g), torch.randint(0, 4, (64,), generator=g)
+    return [(x[i:i + 16], y[i:i + 16]) for i in range(0, 64, 16)]
+
+
+def config(setting="", topology="local", **sl):
+    cfg = ts.RunConfig()
+    cfg.training.epochs = 1
+    cfg.training.optimizer = {"name": "SGD", "params": {"lr": 0.05}}
+    cfg.discovery.n_workers = 3                  # slices
+    cfg.deploy.topology = topology
+    cfg.network.device = "cpu"
+    cfg.logging.enabled = False
+    cfg.sl.setting = setting
+    for k, v in sl.items():
+        setattr(cfg.sl, k, v)
+    return cfg
+
+
+for setting in ["pipeline", "vanilla", "u_shaped"]:
+    h = ts.run(build_model, get_data, run_config=config(setting), cuts=["1", "3"], verbose=False)
+    e = h[0]
+    print(f"{setting:9} loss={e['loss']:.4f} client bytes={e['bytes_client']:6} "
+          f"(inputs {e['bytes_input']}, labels {e['bytes_label']}, per cut {e['bytes_fwd']})")
+```
+
+`bytes_client` counts what crosses the data owner's boundary: the cuts between one of
+its slices and a server slice, plus any raw inputs and labels that leave it.
+
+In a distributed run the data owner hosts those slices itself:
+
+- **P2P:** the driver hosts slice 0 on its own gRPC server, as before. With
+  `u_shaped` it also hosts the last slice on `sl.tail_port`. The default tail port is
+  the driver's port + 2, and the TCP listener is that port + `transport.tensor_port_offset`.
+- **Centralized:** with `vanilla` or `u_shaped`, the coordinator hosts the same
+  slices, so raw inputs no longer reach worker 0.
+
+Either way, `discovery.n_workers` stays the number of slices, and there is one remote
+worker per slice the data owner doesn't host. The launcher counts nodes the same way:
+`u_shaped` on 4 slices is the driver plus 2 followers. On k8s, the driving node's
+Service also exposes the tail port.
+
+```python
+h = ts.run(build_model, get_data, run_config=config("u_shaped", topology="p2p"),
+           cuts=["1", "3"], verbose=False)      # driver + 1 follower, on loopback
+assert h[0]["bytes_label"] == 0 and h[0]["bytes_input"] == 0
+```
+
+## 2. Cut hooks: change or watch what crosses a cut
+
+Cut `k` is the boundary between slice `k` and slice `k + 1`. A `ts.CutHook` has four
+methods, one for each side of the cut and each direction. Each method defaults to the
+identity:
+
+| method        | runs on          | does |
+|---------------|------------------|------|
+| `encode`      | slice `k`        | activation -> payload sent on the wire |
+| `decode`      | slice `k + 1`    | payload -> activation it computes on |
+| `encode_grad` | slice `k + 1`    | gradient -> payload |
+| `decode_grad` | slice `k`        | payload -> gradient it backpropagates |
+
+A payload is a tensor or a list of tensors. Slice `k + 1` takes its gradient with
+respect to what it received, and slice `k` backpropagates the decoded gradient
+straight through. This is what a lossy cut means in split learning.
+
+These hooks are built in:
+
+| hook | what it does |
+|------|--------------|
+| `Float16`, `BFloat16` | send the tensor at half precision |
+| `Quantize(bits=1/2/4/8)` | uniform per-tensor quantization, bit-packed |
+| `TopK(ratio)` | per-sample top-k sparsification |
+| `GaussianNoise(std)` | add noise, from a generator seeded per `(seed, cut, batch)`, so the global RNG is untouched and runs reproduce in every topology |
+| `Recorder` | an observer; see below |
+| `Chain([...])` | several hooks on one cut |
+
+```python
+plain = ts.run(build_model, get_data, run_config=config(), cuts=["1", "3"], verbose=False)
+q4 = ts.run(build_model, get_data, run_config=config(), cuts=["1", "3"], verbose=False,
+            cut_hooks={0: ts.Quantize(bits=4)})          # only the client -> server cut
+print("bytes on cut 0:", plain[0]["bytes_fwd"][0], "->", q4[0]["bytes_fwd"][0])
+print("loss:", plain[0]["loss"], "->", q4[0]["loss"])
+```
+
+The bytes are what actually goes on the wire. A hook's payload is packed into one
+uint8 tensor, and its small header is counted too. `raw_bytes_total` is the same
+traffic before encoding.
+
+To write your own hook, override what you need. This one sends the activation's sign
+and its mean magnitude, which is 1-bit compression of the forward pass only:
+
+```python
+class SignHook(ts.CutHook):
+    def encode(self, x, ctx):
+        return [x.sign().to(torch.int8), x.abs().mean().reshape(1)]
+
+    def decode(self, payload, ctx):
+        sign, scale = payload
+        return sign.float() * scale
+
+
+h = ts.run(build_model, get_data, run_config=config(), cuts=["1", "3"], verbose=False,
+           cut_hooks={0: SignHook()})
+print("sign hook: cut 0 sends", h[0]["bytes_fwd"][0], "bytes")
+```
+
+In a distributed run, each side gets its own copy of the hook (it is shipped with the
+slice). A custom hook class must therefore be importable on the workers, like a custom
+layer, and hook state is per side. The hook above is defined in a script, so here it
+only runs locally.
+
+Config files name the built-in hooks, and `ts.register_hook(name, cls)` adds yours:
+
+```yaml
+sl:
+  cut_hooks:
+    - {cut: 0, name: quantize, params: {bits: 8}}
+    - {cut: all, name: gaussian_noise, params: {std: 0.01}}   # several on one cut: chained
+```
+
+### Observing a cut (attack metrics)
+
+`ts.Recorder` keeps CPU copies of what the receiving side gets:
+activations at slice `k + 1`, gradients at slice `k`. Those are the inputs to a
+reconstruction or label-inference attack. In a distributed run the recorder runs on
+the worker; pass `path=` to get its records back as files. Here it watches the
+gradients the server sends back to the client in vanilla SL:
+
+```python
+rec = ts.Recorder(what="backward", max_batches=4)
+ts.run(build_model, get_data, run_config=config("vanilla"), cuts=["1", "3"], verbose=False,
+       cut_hooks={0: rec})
+grads = [t for _, _, t in rec.records]            # [16, 32] gradients at cut 0, one per batch
+labels = torch.cat([y for _, y in get_data()])
+norms = torch.cat([g.norm(dim=1) for g in grads])
+print("per-sample gradient norm, by label:",
+      [round(norms[labels == c].mean().item(), 4) for c in range(4)])
+```
+
+## 3. Metrics
+
+Every epoch's history entry (and its `metrics.jsonl` row) carries these keys, in every
+executor:
+
+| key | meaning |
+|-----|---------|
+| `bytes_fwd`, `bytes_bwd` | per cut, payload bytes sent forward / backward |
+| `bytes_input`, `bytes_label` | raw inputs / labels sent over the network (0 when they stay on the data owner) |
+| `bytes_total`, `bytes_per_batch`, `raw_bytes_total` | all of the above; before hooks for `raw_` |
+| `bytes_client` | what crosses the data owner's boundary |
+| `compute_s`, `client_compute_s`, `server_compute_s` | forward + backward + optimizer wall time per slice, and summed by owner |
+| `sim_comm_s`, `sim_client_comm_s` | with `sl.link_bandwidth_mbps` / `sl.link_latency_ms`: the time those bytes would take on that link (per message: latency + bytes / bandwidth, no overlap), for every message and for the client's only |
+| `sl_setting` | the setting in effect |
+
+The bytes are tensor payload bytes, without gRPC/TCP framing. They are identical
+whether `LocalExecutor` counts them or the workers do (the tests check this). So a
+local run predicts a distributed run's traffic exactly. Compute time is wall time; on
+CUDA it is measured with a synchronize at the end of each phase.
+
+```python
+h = ts.run(build_model, get_data, run_config=config("vanilla", link_bandwidth_mbps=10,
+           link_latency_ms=20), cuts=["1", "3"], verbose=False)
+e = h[0]
+print(f"client compute {e['client_compute_s'] * 1e3:.2f} ms, server {e['server_compute_s'] * 1e3:.2f} ms, "
+      f"client link time on 10 Mbit/s + 20 ms: {e['sim_client_comm_s']:.3f} s")
+```
+
+## 4. Several clients: `ts.ClientSession`
+
+Each client has its own data and its own copy of the client slices (the slices the
+data owner hosts). The server slices are shared. The executor holds one copy of the
+client slices and swaps each client's state in and out between batches. So sessions
+work wherever the client slices are in-process: local runs, P2P, and centralized runs
+with `vanilla` or `u_shaped`.
+
+- `mode="sequential"`: client 0 trains on all its batches, then client 1, and so on.
+  One round is one epoch. Moving from one client to the next calls `handoff`:
+  - `"copy"` (the default) passes the client model on, with its weights and optimizer
+    state, as in multi-client SplitNN. With "copy", a sequential session trains
+    exactly like one client on the concatenated data.
+  - `"keep"` gives each client back its own state, so only the server is shared.
+  - A callable `handoff(prev_state, next_state, info)` does anything else.
+- `mode="parallel"`: the clients take turns one batch at a time, each with its own
+  client state. At the end of each round, `on_round_end(states, info)` may combine
+  them. TorchSlicer itself never averages: averaging is a hook. FedAvg over the client
+  slices, as in SplitFed, is a few lines.
+
+```python
+data = get_data()
+clients = [data[:2], data[2:]]                   # two data owners
+
+
+def fedavg(states, info):
+    """Average the clients' client-side weights (SplitFed-style); keep optimizer states."""
+    avg = {i: {"model": {k: sum(s[i]["model"][k] for s in states) / len(states)
+                         for k in states[0][i]["model"]}} for i in states[0]}
+    return [{i: {**s[i], "model": avg[i]["model"]} for i in s} for s in states]
+
+
+seq = ts.ClientSession(clients, mode="sequential")                  # handoff="copy"
+par = ts.ClientSession(clients, mode="parallel", on_round_end=fedavg)
+for session in (seq, par):
+    sliced = ts.slice(build_model(), cuts=["1", "3"])
+    h = sliced.train(session, run_config=config("u_shaped"))
+    print(session.mode, h[0]["loss"], "client slices per state:", sorted(session.states[0]))
+```
+
+A state is `{slice_index: {"model": state_dict, "optimizer": state_dict}}`. After
+training, `session.states[k]` is client `k`'s final client-side state. With
+`ts.run`, set `sl.clients: K` (and `sl.client_mode`, `sl.handoff`), and `data_fn()`
+returns one loader per client.
+
+## Limits
+
+- **Where clients run.** All clients run in the data owner's process: one process
+  holds every client's data, as in a simulation. Clients spread over several machines
+  with their own data are not supported yet.
+- **Server batches.** In `parallel` mode the server takes the clients' batches one
+  at a time and updates after each one. There are no per-client server copies and no
+  batching across clients.
+- **Labels on another party.** Every setting assumes that the data owner holds both
+  the inputs and the labels. Vertical SL, where a separate party holds the labels, is
+  not supported.
+- **Lost slices.** If one of the data owner's own slices fails, the run stops: those
+  slices hold the data (and with `u_shaped`, the labels), so they can't move. Sessions
+  can't be combined with `fault_tolerance.enabled`.

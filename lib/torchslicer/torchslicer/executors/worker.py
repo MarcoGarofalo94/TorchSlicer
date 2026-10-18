@@ -5,25 +5,32 @@ Shared by centralized and P2P topologies. Centralised workers register
 with a coordinator; P2P workers wait for init() from the driver node.
 """
 
+import datetime
 import io
 import os
+import pickle
 import socket
 import struct
 import threading
 import traceback
+import warnings
 from concurrent import futures
+from multiprocessing.reduction import ForkingPickler
 
 import torch
 from torch import nn, optim
 
 from ..config import RunConfig
 from ..core.split_layer import SplitLayer
+from ..core.tied import optimizer_parameters, retie
+from ..sl.hooks import CutContext, pack_payload, unpack_payload, tensor_nbytes
 
 _UNSET = object()  # sentinel: distinguish "not provided" from explicit None
 from ..monitor import tracer as _tracer
 from ..monitor import WorkerProfiler
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
 from ..retry import RetryPolicy
+from ..transport.tunnel import Router
 
 try:
     import grpc
@@ -43,6 +50,9 @@ _GRPC_OPTS = [
 ]
 
 _LOG = get_logger("torchslicer.worker")
+
+# How long a tied-parameter owner waits for the replicas' gradients before failing.
+_TIED_GRAD_TIMEOUT_S = 300.0
 # TCP tensor frame format (big-endian):
 #   kind(1c) | batch_id(4I) | dtype(1B) | ndim(2H) | ctx_len(2H)
 #   followed by: ctx_bytes(ctx_len) | shape(ndim×8q) | payload_len(8Q) | payload
@@ -52,9 +62,23 @@ _SHAPE_ITEM = struct.Struct("!q")
 _PAYLOAD_LEN = struct.Struct("!Q")
 _HOSTNAME = socket.gethostname()
 
+# IPC frame (CUDA shared-memory handle exchange over TCP):
+#   kind(1c) | batch_id(4I) | handle_len(4I) | ctx_len(2H)
+#   followed by: ctx_bytes(ctx_len) | handle_bytes(handle_len)
+# kind "f" = forward via IPC, "b" = backward via IPC (lowercase distinguishes from "F"/"B").
+# After the frame the receiver sends a 1-byte ACK so the sender can release its IPC reference.
+_IPC_FRAME_HEADER = struct.Struct("!cIIH")
 
-def _channel(addr):
-    return grpc.insecure_channel(addr, options=_GRPC_OPTS)
+# Rest-of-frame structs read after the 1-byte kind (used by _handle_tensor_conn dispatch):
+_TCP_REST_HEADER = struct.Struct("!IBHH")   # batch_id(4I) dtype(1B) ndim(2H) ctx_len(2H)
+_IPC_REST_HEADER = struct.Struct("!IIH")    # batch_id(4I) handle_len(4I) ctx_len(2H)
+
+# Port offset added to the coordinator's port for the NCCL TCPStore rendezvous.
+_NCCL_STORE_PORT_OFFSET = 10
+
+# Set TCP_NO_PINNED=1 to disable pinned-memory async D2H (falls back to the old
+# synchronous .cpu().contiguous() path — useful for benchmarking the improvement).
+_TCP_NO_PINNED = os.environ.get("TCP_NO_PINNED", "0") == "1"
 
 
 class _StaleWorkError(RuntimeError):
@@ -89,6 +113,9 @@ def _init_dtype_maps():
         (worker_service_pb2.FLOAT64,  torch.float64),
         (worker_service_pb2.INT64,    torch.int64),
         (worker_service_pb2.INT32,    torch.int32),
+        (worker_service_pb2.UINT8,    torch.uint8),
+        (worker_service_pb2.INT8,     torch.int8),
+        (worker_service_pb2.BOOL,     torch.bool),
     ]
     for proto_t, torch_t in mapping:
         _DTYPE_MAP[proto_t]      = torch_t
@@ -111,9 +138,19 @@ def _tensor_payload_view(arr: torch.Tensor):
     return memoryview(arr.numpy()).cast("B")
 
 
-def deserialize_tensor(msg) -> torch.Tensor:
+def deserialize_tensor(msg, device="cpu") -> torch.Tensor:
+    """``msg.data`` is already a fresh copy (upb copies on access): view it and let the
+    one ``.to`` be the only other copy, straight to ``device``. Each fresh buffer of
+    32 MB or more page-faults (glibc mmap threshold), so every copy saved counts."""
     dtype = _DTYPE_MAP.get(msg.dtype, torch.float32)
-    return torch.frombuffer(bytearray(msg.data), dtype=dtype).reshape(list(msg.shape)).clone()
+    shape = list(msg.shape)
+    data = msg.data
+    if not data:
+        return torch.empty(shape, dtype=dtype, device=device)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "The given buffer is not writable")
+        view = torch.frombuffer(data, dtype=dtype)
+    return view.reshape(shape).to(device, copy=True)   # bytes are immutable: always copy
 
 
 def serialize_tensor(t: torch.Tensor):
@@ -179,7 +216,7 @@ def _recv_into(sock: socket.socket, buf: bytearray, idle_timeout_ok: bool = Fals
 def _load_transport_settings() -> tuple[str, int]:
     cfg = RunConfig.load(os.environ.get("EXPERIMENT_CONFIG"))
     tensor_transport = cfg.transport.tensor.strip().lower()
-    if tensor_transport not in {"grpc", "tcp"}:
+    if tensor_transport not in {"grpc", "tcp", "ipc", "nccl"}:
         raise ValueError(f"unsupported tensor transport: {tensor_transport!r}")
     return tensor_transport, int(cfg.transport.tensor_port_offset)
 
@@ -221,15 +258,69 @@ def _tensor_addr(addr: str, offset: int) -> str:
 
 
 class _TensorPeerClient:
+    """TCP peer client with pinned-memory D2H for CUDA tensors.
+
+    On CUDA: copies the tensor into a per-connection pinned host buffer with
+    ``non_blocking=True`` (DMA), records a CUDA event, builds the frame header
+    in parallel, then synchronises the event right before ``sendall``.  The old
+    path (``.cpu()``) allocates fresh host memory per send, which page-faults
+    above glibc's 32 MB mmap threshold: 20 ms vs 1.4 ms for a 33.6 MB tensor.
+    ``TCP_NO_PINNED=1`` forces the old path (benchmarks).
+    On CPU (or when CUDA is unavailable): falls back to the original path.
+    The pinned buffer grows with a 25 % headroom (high-water-mark); it is never
+    shrunk and is allocated at most once per peer connection per run.
+    """
+
     def __init__(self, address: str):
         self.address = address
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
+        self._pinned: torch.Tensor | None = None   # uint8, pinned, high-water-mark
+        self._d2h_event: torch.cuda.Event | None = None
+
+    def _get_pinned(self, nbytes: int) -> torch.Tensor:
+        if self._pinned is None or self._pinned.numel() < nbytes:
+            alloc = max(nbytes, int(nbytes * 1.25))
+            self._pinned = torch.empty(alloc, dtype=torch.uint8, pin_memory=True)
+        return self._pinned[:nbytes]
 
     def send_tensor(self, kind: bytes, batch_id: int, tensor: torch.Tensor) -> None:
+        if torch.cuda.is_available() and tensor.is_cuda and not _TCP_NO_PINNED:
+            self._send_pinned(kind, batch_id, tensor)
+        else:
+            self._send_cpu(kind, batch_id, tensor)
+
+    def _send_pinned(self, kind: bytes, batch_id: int, tensor: torch.Tensor) -> None:
+        arr = tensor.detach().contiguous()          # keep on GPU, ensure contiguous
+        nbytes = arr.nbytes
+        buf = self._get_pinned(nbytes)
+        # Kick off async DMA: GPU → pinned host memory (does NOT block the GPU stream).
+        buf.copy_(arr.view(torch.uint8).flatten(), non_blocking=True)
+        # Record a CUDA event on the current stream; we'll sync it right before sendall.
+        if self._d2h_event is None:
+            self._d2h_event = torch.cuda.Event()
+        self._d2h_event.record()
+        # Build the frame header while the DMA runs (pure CPU work).
+        shape = list(arr.shape)
+        ctx_bytes = _tracer.inject_context_bytes()
+        header = _FRAME_HEADER.pack(kind, int(batch_id), _dtype_to_code(arr.dtype),
+                                     len(shape), len(ctx_bytes))
+        shape_bytes = b"".join(_SHAPE_ITEM.pack(int(d)) for d in shape)
+        payload_len_bytes = _PAYLOAD_LEN.pack(nbytes)
+        meta = header + ctx_bytes + shape_bytes + payload_len_bytes
+        # Synchronise: wait until DMA has written every byte to pinned memory.
+        self._d2h_event.synchronize()
+        with self._lock:
+            self._ensure_connected()
+            try:
+                self._sock.sendall(meta)
+                self._sock.sendall(buf.numpy())     # send directly from pinned memory
+            except Exception as exc:
+                self.close()
+                raise _TensorStreamError(f"tensor send failed peer={self.address}") from exc
+
+    def _send_cpu(self, kind: bytes, batch_id: int, tensor: torch.Tensor) -> None:
         header, ctx_bytes, shape_bytes, payload_len, payload = _pack_tensor_frame(kind, batch_id, tensor)
-        # Coalesce the small fixed-size fields into one syscall; payload is sent separately
-        # because it can be hundreds of KB and is already a memoryview (zero-copy).
         meta = header + ctx_bytes + shape_bytes + payload_len
         with self._lock:
             self._ensure_connected()
@@ -257,8 +348,142 @@ class _TensorPeerClient:
             self._sock = None
 
 
-def resolve_device() -> str:
-    """Resolve the target device from the DEVICE environment variable.
+def _is_same_machine(addr: str) -> bool:
+    """Return True if ``addr`` (host:port) resolves to the local machine."""
+    host = addr.rsplit(":", 1)[0].strip("[]")  # strip IPv6 brackets
+    if host in ("localhost", "127.0.0.1") or host.startswith("127."):
+        return True
+    try:
+        peer_ip = socket.gethostbyname(host)
+        local_ips = {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None)}
+        local_ips.add("127.0.0.1")
+        return peer_ip in local_ips
+    except Exception:
+        return False
+
+
+class _IpcPeerClient:
+    """CUDA IPC peer client for same-machine GPU-to-GPU tensor transfer.
+
+    Serialises the tensor as a CUDA IPC handle (a ~350-byte descriptor) via
+    ``ForkingPickler``, sends it over the existing TCP connection, and waits for
+    a 1-byte ACK from the receiver before returning.  The receiver reconstructs
+    the tensor from the handle without any host copy and sends the ACK after
+    cloning the result.
+
+    Falls back to ``_TensorPeerClient`` (pinned TCP) for CPU tensors or when the
+    peers are on different machines (guard in the factory code in ``init``).
+    """
+
+    def __init__(self, address: str, fallback: _TensorPeerClient):
+        self.address = address
+        self._fallback = fallback
+        self._sock: socket.socket | None = None
+        self._lock = threading.Lock()
+
+    def send_tensor(self, kind: bytes, batch_id: int, tensor: torch.Tensor) -> None:
+        if not (torch.cuda.is_available() and tensor.is_cuda):
+            self._fallback.send_tensor(kind, batch_id, tensor)
+            return
+
+        arr = tensor.detach().contiguous()
+        buf = io.BytesIO()
+        ForkingPickler(buf, pickle.HIGHEST_PROTOCOL).dump(arr)
+        handle_bytes = buf.getvalue()
+
+        ctx_bytes = _tracer.inject_context_bytes()
+        # Lowercase kind signals IPC to the receiver ("f" = forward, "b" = backward).
+        ipc_kind = kind.lower()
+        header = _IPC_FRAME_HEADER.pack(ipc_kind, int(batch_id), len(handle_bytes), len(ctx_bytes))
+        frame = header + ctx_bytes + handle_bytes
+
+        with self._lock:
+            self._ensure_connected()
+            try:
+                self._sock.sendall(frame)
+                # Block until receiver has cloned the tensor and released the IPC ref.
+                ack = _recv_exact(self._sock, 1)
+                if ack != b"\x00":
+                    raise _TensorStreamError(f"IPC ACK mismatch peer={self.address}")
+            except Exception as exc:
+                self.close()
+                raise _TensorStreamError(f"IPC tensor send failed peer={self.address}") from exc
+
+    def _ensure_connected(self) -> None:
+        if self._sock is not None:
+            return
+        host, port = self.address.rsplit(":", 1)
+        sock = socket.create_connection((host, int(port)), timeout=10.0)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._sock = sock
+
+    def close(self) -> None:
+        for client in (self, self._fallback):
+            if client._sock is not None:
+                try:
+                    client._sock.close()
+                except Exception:
+                    pass
+                client._sock = None
+
+
+class _RecvBuf:
+    """Per-connection high-water-mark receive buffer.
+
+    Re-uses the same ``bytearray`` across frames to avoid per-batch allocation.
+    Grows as needed (25 % headroom); never shrinks.  Call ``get(n)`` to obtain a
+    ``memoryview`` of exactly ``n`` writable bytes; the view is valid until the
+    next ``get()`` call.
+    """
+    __slots__ = ("_arr",)
+
+    def __init__(self):
+        self._arr: bytearray | None = None
+
+    def get(self, n: int) -> memoryview:
+        if self._arr is None or len(self._arr) < n:
+            self._arr = bytearray(max(n, int(n * 1.25)))
+        return memoryview(self._arr)[:n]
+
+
+def _read_tensor_frame_rest(
+    sock: socket.socket, recv_buf: _RecvBuf
+) -> tuple[int, torch.Tensor, bytes]:
+    """Read the rest of a regular TCP tensor frame after the 1-byte kind has been read."""
+    rest_buf = bytearray(_TCP_REST_HEADER.size)
+    _recv_into(sock, rest_buf)
+    batch_id, dtype_code, ndim, ctx_len = _TCP_REST_HEADER.unpack(rest_buf)
+    ctx_bytes = bytes(_recv_into(sock, bytearray(ctx_len))) if ctx_len else b""
+    shape_buf = bytearray(_SHAPE_ITEM.size * ndim)
+    shape_view = _recv_into(sock, shape_buf)
+    shape = [_SHAPE_ITEM.unpack_from(shape_view, i * _SHAPE_ITEM.size)[0] for i in range(ndim)]
+    payload_len_buf = bytearray(_PAYLOAD_LEN.size)
+    payload_len = _PAYLOAD_LEN.unpack(_recv_into(sock, payload_len_buf))[0]
+    buf = recv_buf.get(payload_len)
+    _recv_into(sock, buf)
+    dtype = _code_to_dtype(dtype_code)
+    # clone() so the caller can reuse recv_buf for the next frame
+    tensor = torch.frombuffer(buf, dtype=dtype).reshape(shape).clone()
+    return batch_id, tensor, ctx_bytes
+
+
+def _read_ipc_frame_rest(sock: socket.socket) -> tuple[int, torch.Tensor, bytes]:
+    """Read the rest of an IPC frame after the 1-byte kind, reconstruct the tensor, send ACK."""
+    rest_buf = bytearray(_IPC_REST_HEADER.size)
+    _recv_into(sock, rest_buf)
+    batch_id, handle_len, ctx_len = _IPC_REST_HEADER.unpack(rest_buf)
+    ctx_bytes = bytes(_recv_into(sock, bytearray(ctx_len))) if ctx_len else b""
+    handle_buf = bytearray(handle_len)
+    _recv_into(sock, handle_buf)
+    # Reconstruct the CUDA tensor from the IPC handle; clone immediately so the
+    # sender can safely release its allocation after receiving the ACK.
+    tensor = pickle.loads(handle_buf).clone()
+    sock.sendall(b"\x00")           # ACK: sender may now release its IPC reference
+    return batch_id, tensor, ctx_bytes
+
+
+def resolve_device(value: str | None = None) -> str:
+    """Resolve the target device from ``value``, else the DEVICE environment variable.
 
     DEVICE=auto  (default) — use ``cuda`` if available, else ``mps`` if
                              available, else ``cpu``
@@ -269,7 +494,7 @@ def resolve_device() -> str:
     DEVICE=cpu             — always use CPU regardless of hardware
     """
     import os
-    val = os.environ.get("DEVICE", "auto").lower().strip()
+    val = (value or os.environ.get("DEVICE", "auto")).lower().strip()
 
     def _mps_available() -> bool:
         return (
@@ -344,6 +569,54 @@ def current_mem_mb(device) -> float:
     return 0.0
 
 
+def measure_compute_gflops(device, n: int | None = None, repeats: int = 5) -> float:
+    """Median fp32 matmul throughput (GFLOP/s) of ``device``: a coarse speed for planning.
+
+    Uses constant matrices, so the global RNG (and with it data order and init) is
+    untouched.
+    """
+    import statistics
+    import time
+    dev = torch.device(device)
+    n = n or (2048 if dev.type == "cuda" else 384)
+    sync = (lambda: torch.cuda.synchronize(dev)) if dev.type == "cuda" else (lambda: None)
+    a = torch.full((n, n), 0.5, device=dev)
+    b = torch.full((n, n), 0.25, device=dev)
+    with torch.no_grad():
+        for _ in range(2):
+            a @ b
+        sync()
+        times = []
+        for _ in range(repeats):
+            t0 = time.perf_counter()
+            a @ b
+            sync()
+            times.append(time.perf_counter() - t0)
+    return 2 * n ** 3 / max(statistics.median(times), 1e-9) / 1e9
+
+
+def measure_link(stub, n_bytes: int = 1 << 20, repeats: int = 3, timeout: float = 30.0):
+    """(rtt_ms, bandwidth_mbps) to the worker behind ``stub``, using its ``echo`` RPC:
+    the median time of an empty echo, and ``n_bytes`` over the extra time a payload of
+    that size takes."""
+    import statistics
+    import time
+
+    def _time(payload: bytes) -> float:
+        out = []
+        for _ in range(repeats):
+            t0 = time.perf_counter()
+            stub.echo(worker_service_pb2.EchoRequest(payload=payload), timeout=timeout)
+            out.append(time.perf_counter() - t0)
+        return statistics.median(out)
+
+    _time(b"")                                   # connect
+    rtt = _time(b"")
+    data = _time(bytes(n_bytes)) if n_bytes else rtt
+    mbps = n_bytes * 8 / max(data - rtt, 1e-6) / 1e6 if n_bytes else 0.0
+    return rtt * 1e3, mbps
+
+
 # ── WorkerServicer ─────────────────────────────────────────────────────────────
 
 class WorkerServicer(
@@ -356,10 +629,26 @@ class WorkerServicer(
         self._generation = 0
         self._tensor_transport = "grpc"
         self._tensor_port_offset = 1
+        self._persistent = False
         self._tensor_server = None
         self._tensor_stop = threading.Event()
         self._tensor_threads: list[threading.Thread] = []
+        # Declared capabilities (network.worker_* config); measured ones fill the gaps.
+        self.declared = {"compute_gflops": 0.0, "max_memory_mb": 0, "first_slice": False, "tags": []}
+        self._measured_gflops = None
+        # In-process coordinator (P2P driver): called directly instead of over gRPC.
+        # Anything with the CoordinatorService stub methods works.
+        self.local_coordinator = None
+        # Where calls to other nodes go (transport/tunnel.py): direct, by tunnel, or
+        # through a relay. ``nat``: this worker accepts no connections, so it opens a
+        # tunnel to each neighbour at init (the coordinator's is opened at start).
+        self.router = Router()
+        self.nat = False
+        self._peer_tunnels: set = set()
 
+        self._tied_cond = threading.Condition()
+        self._dist_group  = None  # torch.distributed ProcessGroup for NCCL transport; None otherwise
+        self._nccl_future = None  # pending rendezvous Future; waited on before first NCCL transfer
         self._reset_state()
 
         # Single-worker compute pool: serialises forward/backward on this worker
@@ -371,7 +660,7 @@ class WorkerServicer(
         self._server = server
 
     def start_tensor_server(self, port: int):
-        if self._tensor_transport != "tcp":
+        if self._tensor_transport not in {"tcp", "ipc"}:
             return
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -417,29 +706,47 @@ class WorkerServicer(
             # unbounded list growth across reconnections.
 
     def _handle_tensor_conn(self, conn: socket.socket, addr):
+        recv_buf = _RecvBuf()
         try:
             while not self._tensor_stop.is_set():
+                # Read the 1-byte kind field; this is the only idle-timeout point.
+                kind_buf = bytearray(1)
                 try:
-                    kind, batch_id, tensor, ctx_bytes = _unpack_tensor_frame(conn)
+                    _recv_into(conn, kind_buf, idle_timeout_ok=True)
                 except socket.timeout:
-                    continue  # check _tensor_stop, then retry read
+                    continue
+                kind = kind_buf
                 generation = self._generation
-                # Attach the sender's trace context so worker spans become
-                # children of the coordinator's batch span (or the previous
-                # worker's forward/backward span).  No-op when tracing is off.
-                with _tracer.extract_context(ctx_bytes):
-                    if kind == "F":
-                        self._pool.submit(
-                            _tracer.propagate_to_thread(self._forward_tensor),
-                            batch_id, tensor, generation,
-                        )
-                    elif kind == "B":
-                        self._pool.submit(
-                            _tracer.propagate_to_thread(self._backward_tensor),
-                            batch_id, tensor, generation,
-                        )
-                    else:
-                        raise _TensorStreamError(f"unknown tensor frame kind={kind!r}")
+
+                if kind in (b"F", b"B"):
+                    batch_id, tensor, ctx_bytes = _read_tensor_frame_rest(conn, recv_buf)
+                    with _tracer.extract_context(ctx_bytes):
+                        if kind == b"F":
+                            self._pool.submit(
+                                _tracer.propagate_to_thread(self._forward_tensor),
+                                batch_id, tensor, generation,
+                            )
+                        else:
+                            self._pool.submit(
+                                _tracer.propagate_to_thread(self._backward_tensor),
+                                batch_id, tensor, generation,
+                            )
+                elif kind in (b"f", b"b"):
+                    # CUDA IPC frame: reconstruct GPU tensor from handle, send ACK inside helper.
+                    batch_id, tensor, ctx_bytes = _read_ipc_frame_rest(conn)
+                    with _tracer.extract_context(ctx_bytes):
+                        if kind == b"f":
+                            self._pool.submit(
+                                _tracer.propagate_to_thread(self._forward_tensor),
+                                batch_id, tensor, generation,
+                            )
+                        else:
+                            self._pool.submit(
+                                _tracer.propagate_to_thread(self._backward_tensor),
+                                batch_id, tensor, generation,
+                            )
+                else:
+                    raise _TensorStreamError(f"unknown tensor frame kind={kind!r}")
         except Exception as exc:
             if not self._tensor_stop.is_set() and not isinstance(exc, _TensorStreamClosed):
                 _LOG.warning("tensor transport connection closed addr=%s error=%s", addr, exc)
@@ -473,6 +780,22 @@ class WorkerServicer(
 
         self._profiler: WorkerProfiler = WorkerProfiler(verbosity=0)
 
+        # tied parameters (see core/tied.py): [{group, param, owner, stubs}]
+        self._tied:        list = []
+        self._tied_token:  str  = ""
+        self._tied_grads:  dict = {}   # (group, batch_id) → [grad from each replica]
+
+        # cut hooks on this slice's input cut (index - 1) and output cut (index)
+        self._hooks:    dict = {}
+        self._n_slices: int  = 0
+        self._reset_comm()
+
+    def _reset_comm(self):
+        """Communication sent and compute time since the last epoch read (get_stats)."""
+        self._comm = {"bytes_fwd": 0, "bytes_bwd": 0, "raw_bytes_fwd": 0, "raw_bytes_bwd": 0,
+                      "msgs_fwd": 0, "msgs_bwd": 0}
+        self._compute_s = 0.0
+
     # ── init ───────────────────────────────────────────────────────────────────
 
     def init(self, request, context):
@@ -490,6 +813,9 @@ class WorkerServicer(
             self.is_last = request.is_last
             self._run_id       = request.run_id
             self._worker_index = request.worker_index
+            self._n_slices     = request.n_slices
+            self._hooks = (torch.load(io.BytesIO(request.cut_hooks), weights_only=False)
+                           if request.cut_hooks else {})
 
             if request.is_last and request.HasField("criterion"):
                 crit_extra = (
@@ -502,10 +828,11 @@ class WorkerServicer(
                 torch.load(io.BytesIO(request.optimizer.extra_params), weights_only=False)
                 if request.optimizer.extra_params else {}
             )
-            trainable = [p for p in self.layer.parameters() if p.requires_grad]
-            params = trainable if trainable else list(self.layer.parameters())
+            self._configure_tied(request.tied, request.init_token)
+            params = optimizer_parameters(
+                self.layer, exclude={n for t in request.tied if not t.owner for n in t.names})
             opt = getattr(optim, request.optimizer.name)(
-                params, lr=request.optimizer.lr, **opt_extra)
+                params, **{"lr": request.optimizer.lr, **opt_extra}) if params else None
             self.layer.set_optimizer(opt)
 
             self.prev_worker = request.prev_worker or None
@@ -513,25 +840,52 @@ class WorkerServicer(
             self.coordinator = request.coordinator
             self._n_micro    = max(1, request.n_micro) if request.n_micro else 1
 
+            # gRPC stubs always (a peer behind a tunnel or relay is reached through
+            # them); raw TCP is used for a peer while it is directly reachable.
+            channel = self.router.channel
             if self.next_worker:
-                if self._tensor_transport == "tcp":
-                    self._next_tensor = _TensorPeerClient(
+                self._next_stub = worker_service_pb2_grpc.WorkerServiceStub(
+                    channel(self.next_worker))
+                if self._tensor_transport in {"tcp", "ipc"}:
+                    tcp_client = _TensorPeerClient(
                         _tensor_addr(self.next_worker, self._tensor_port_offset)
                     )
-                else:
-                    self._next_stub = worker_service_pb2_grpc.WorkerServiceStub(
-                        _channel(self.next_worker))
+                    if self._tensor_transport == "ipc" and _is_same_machine(self.next_worker):
+                        self._next_tensor = _IpcPeerClient(
+                            _tensor_addr(self.next_worker, self._tensor_port_offset),
+                            tcp_client,
+                        )
+                    else:
+                        self._next_tensor = tcp_client
             if self.prev_worker:
-                if self._tensor_transport == "tcp":
-                    self._prev_tensor = _TensorPeerClient(
+                self._prev_stub = worker_service_pb2_grpc.WorkerServiceStub(
+                    channel(self.prev_worker))
+                if self._tensor_transport in {"tcp", "ipc"}:
+                    tcp_client = _TensorPeerClient(
                         _tensor_addr(self.prev_worker, self._tensor_port_offset)
                     )
-                else:
-                    self._prev_stub = worker_service_pb2_grpc.WorkerServiceStub(
-                        _channel(self.prev_worker))
-            if self.coordinator:
+                    if self._tensor_transport == "ipc" and _is_same_machine(self.prev_worker):
+                        self._prev_tensor = _IpcPeerClient(
+                            _tensor_addr(self.prev_worker, self._tensor_port_offset),
+                            tcp_client,
+                        )
+                    else:
+                        self._prev_tensor = tcp_client
+            if self.local_coordinator is not None:
+                self._coord_stub = self.local_coordinator
+            elif self.coordinator:
                 self._coord_stub = coordinator_service_pb2_grpc.CoordinatorServiceStub(
-                    _channel(self.coordinator))
+                    channel(self.coordinator))
+            if self.nat:
+                self._open_peer_tunnels(request)
+
+            # NCCL ProcessGroup: all workers rendezvous on a TCPStore the coordinator
+            # hosts at coordinator_port + _NCCL_STORE_PORT_OFFSET.
+            if self._tensor_transport == "nccl" and request.n_slices > 0:
+                self._init_nccl_group(
+                    request.coordinator, request.worker_index, request.n_slices,
+                    request.init_token,
+                )
 
             if request.checkpoint_path:
                 self._load_checkpoint(request.checkpoint_path)
@@ -591,6 +945,89 @@ class WorkerServicer(
             return worker_service_pb2.StatusMessage(
                 ok=False, message=str(e), hostname=_HOSTNAME)
 
+    def _init_nccl_group(self, coordinator: str, rank: int, world_size: int,
+                         token: str = "") -> None:
+        """Kick off NCCL ProcessGroup init in a background thread.
+
+        init_process_group blocks until all world_size ranks have joined.
+        Calling it synchronously inside init() deadlocks when the coordinator
+        sends SliceConfigs sequentially: rank 0's init() would wait for rank 1
+        to join, but rank 1 hasn't received its SliceConfig yet.
+
+        Instead we launch the rendezvous in a thread and store a Future;
+        _wait_nccl() is called before the first NCCL send/recv. The outcome is
+        written to the store under ``ts/nccl/<token>/status/<rank>`` ("ok" or
+        "err:<reason>"), which the coordinator waits on after init
+        (``DistributedExecutor._wait_nccl_ready``), so a failure stops the run
+        with its reason instead of hanging the first transfer.
+        """
+        self._nccl_future: futures.Future | None = None
+        executor = futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="nccl-init")
+
+        def _rendezvous():
+            import torch.distributed as dist
+            coord_host, coord_port_str = coordinator.rsplit(":", 1)
+            nccl_port = int(coord_port_str) + _NCCL_STORE_PORT_OFFSET
+            store = dist.TCPStore(
+                host_name=coord_host,
+                port=nccl_port,
+                world_size=world_size,
+                is_master=False,
+                timeout=datetime.timedelta(seconds=60),
+            )
+            # one key space per init (recovery re-inits on the same store)
+            prefix = f"ts/nccl/{token}"
+            try:
+                if dist.is_initialized():
+                    dist.destroy_process_group()
+                cuda = self.device.type == "cuda"
+                if cuda:
+                    # NCCL allows one rank per GPU; with two it fails only at the first
+                    # transfer ("Duplicate GPU detected"). Check here, with a clear reason.
+                    gpu = f"{socket.gethostname()}/{torch.cuda.get_device_properties(self.device).uuid}"
+                    store.set(f"{prefix}/gpu/{rank}", gpu)
+                    keys = [f"{prefix}/gpu/{r}" for r in range(world_size)]
+                    store.wait(keys)
+                    owners = [store.get(k).decode() for k in keys]
+                    dup = [r for r, g in enumerate(owners) if g == gpu and r != rank]
+                    if dup:
+                        raise RuntimeError(
+                            f"transport.tensor=nccl needs one GPU per slice, but slices "
+                            f"{sorted([rank, *dup])} are on the same GPU ({gpu}); use "
+                            f"distinct GPUs, or transport.tensor=ipc on one GPU")
+                dist.init_process_group(
+                    backend="nccl" if cuda else "gloo",
+                    store=dist.PrefixStore(f"{prefix}/pg", store),
+                    rank=rank,
+                    world_size=world_size,
+                    # eager NCCL communicator: init errors surface here, not on first send
+                    **({"device_id": self.device} if cuda else {}),
+                )
+            except Exception as exc:
+                store.set(f"{prefix}/status/{rank}", f"err:{exc}")
+                raise
+            store.set(f"{prefix}/status/{rank}", "ok")
+            return dist.group.WORLD
+
+        self._nccl_future = executor.submit(_rendezvous)
+        executor.shutdown(wait=False)
+        _LOG.info("NCCL rendezvous started rank=%s world=%s (background)", rank, world_size)
+
+    def _wait_nccl(self) -> bool:
+        """Block until the background NCCL rendezvous completes. A failed rendezvous
+        raises: falling back to gRPC on one worker only would leave its peers blocked
+        in a NCCL recv that never comes."""
+        if self._nccl_future is None:
+            return False
+        try:
+            self._dist_group = self._nccl_future.result(timeout=120)
+        except Exception as exc:
+            raise RuntimeError(f"NCCL process group init failed: {exc}") from exc
+        finally:
+            self._nccl_future = None
+        _LOG.info("NCCL group ready device=%s", self.device)
+        return True
+
     # ── shutdown ───────────────────────────────────────────────────────────────
 
     def shutdown(self, request, context):
@@ -606,6 +1043,20 @@ class WorkerServicer(
                 except Exception as e:
                     _LOG.exception("shutdown checkpoint save failed: %s", e)
 
+            if self._persistent:
+                # End of run only: drop the slice (bumping the generation discards
+                # in-flight work of the finished run) and wait for the next init().
+                with self._lock:
+                    self._generation += 1
+                    for peer in (self._next_tensor, self._prev_tensor):
+                        if peer is not None:
+                            peer.close()
+                    self._reset_state()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                _LOG.info("run ended, worker persistent — waiting for next run hostname=%s", _HOSTNAME)
+                return
+
             _LOG.info("worker stopping hostname=%s", _HOSTNAME)
             self.stop_tensor_server()
             if self._server:
@@ -613,6 +1064,142 @@ class WorkerServicer(
 
         threading.Thread(target=_do_shutdown, daemon=True).start()
         return worker_service_pb2.Ack(batch_id=0)
+
+    # ── tied parameters ────────────────────────────────────────────────────────
+
+    def _configure_tied(self, tied: list, init_token: str) -> None:
+        """Re-tie shared parameters (layers arrive serialized one by one) and connect
+        to the workers holding other copies."""
+        self._tied_token = init_token
+        self._tied = [
+            {
+                "group": t.group,
+                "param": retie(self.layer, list(t.names)),
+                "owner": t.owner,
+                "stubs": [worker_service_pb2_grpc.WorkerServiceStub(self.router.channel(a))
+                          for a in t.peers],
+            }
+            for t in tied
+        ]
+
+    def tied_grad(self, request, context):
+        """Owner side: a replica's gradient for a tied parameter."""
+        if request.init_token == self._tied_token:
+            grad = deserialize_tensor(request.tensor)
+            with self._tied_cond:
+                self._tied_grads.setdefault((request.group, request.batch_id), []).append(grad)
+                self._tied_cond.notify_all()
+        return worker_service_pb2.Ack(batch_id=request.batch_id)
+
+    def tied_update(self, request, context):
+        """Replica side: the owner's value after its optimizer step."""
+        if request.init_token == self._tied_token:
+            value = deserialize_tensor(request.tensor)
+            for t in self._tied:
+                if t["group"] == request.group:
+                    with torch.no_grad():
+                        t["param"].copy_(value)
+        return worker_service_pb2.Ack(batch_id=request.batch_id)
+
+    def _tied_call(self, method, stub, group: int, key: int, tensor: torch.Tensor) -> None:
+        try:
+            getattr(stub, method)(worker_service_pb2.TiedTensor(
+                group=group, batch_id=key, init_token=self._tied_token,
+                tensor=serialize_tensor(tensor)))
+        except Exception as exc:
+            if self._is_unavailable_rpc(exc):
+                raise _PeerUnavailableError(
+                    f"peer unavailable phase={method} group={group} batch_id={key}") from exc
+            raise
+
+    def _optimize(self, batch_id: int) -> None:
+        """Optimizer step with tied-parameter sync across workers.
+
+        Replicas step first (they are downstream), so they hand their gradient to the
+        owner and drop it; the owner adds every replica gradient, steps, and pushes the
+        new value back before this batch completes — the next batch sees it everywhere.
+        """
+        synced = [t for t in self._tied if t["stubs"] and t["param"].requires_grad]
+        key = batch_id // self._n_micro if self._n_micro > 1 else batch_id
+        for t in synced:
+            if not t["owner"]:
+                p = t["param"]
+                self._tied_call("tied_grad", t["stubs"][0], t["group"], key,
+                                p.grad if p.grad is not None else torch.zeros_like(p))
+                p.grad = None
+        for t in synced:
+            if t["owner"]:
+                k = (t["group"], key)
+                with self._tied_cond:
+                    if not self._tied_cond.wait_for(
+                            lambda: len(self._tied_grads.get(k, ())) >= len(t["stubs"]),
+                            timeout=_TIED_GRAD_TIMEOUT_S):
+                        raise RuntimeError(f"tied gradient missing group={t['group']} batch_id={key}")
+                    grads = self._tied_grads.pop(k)
+                p = t["param"]
+                total = sum(g.to(p.device) for g in grads)
+                p.grad = total if p.grad is None else p.grad + total
+        self.layer.optimize()
+        for t in synced:
+            if t["owner"]:
+                for stub in t["stubs"]:
+                    self._tied_call("tied_update", stub, t["group"], key, t["param"].detach())
+
+    # ── NAT ────────────────────────────────────────────────────────────────────
+
+    def _open_peer_tunnels(self, request) -> None:
+        """A NAT'd worker can't be dialed, so it opens a tunnel to every node that sends
+        to it: its neighbours (activations, gradients) and tied-weight peers. The
+        coordinator's tunnel is already open. Through a relay nothing is needed."""
+        if self.router.relay:
+            return
+        wanted = {a for a in (request.prev_worker, request.next_worker) if a}
+        wanted |= {a for t in request.tied for a in t.peers}
+        wanted -= {request.coordinator, *self.router.addresses()}
+        for address in sorted(self._peer_tunnels - wanted):
+            self.router.release(address)
+        for address in sorted(wanted):
+            try:
+                self.router.keep(address, wait=30.0)
+            except grpc.RpcError as exc:
+                raise RuntimeError(
+                    f"this worker is behind NAT (transport.nat) and can't open a tunnel to its "
+                    f"peer {address}: {exc.details()}. If that peer is behind NAT too, route "
+                    "both through a relay (transport.relay).") from None
+        self._peer_tunnels = wanted
+
+    # ── capabilities (planning) ────────────────────────────────────────────────
+
+    def capabilities(self) -> dict:
+        """What this worker tells the planner (fields of ``NodeInfo``)."""
+        gflops = self.declared["compute_gflops"]
+        if not gflops:
+            if self._measured_gflops is None:
+                self._measured_gflops = measure_compute_gflops(self.device)
+            gflops = self._measured_gflops
+        dev = str(self.device)
+        return {
+            "device":         dev,
+            "memory_mb":      get_available_memory_mb(dev),
+            "compute_gflops": float(gflops),
+            "max_memory_mb":  int(self.declared["max_memory_mb"]),
+            "first_slice":    bool(self.declared["first_slice"]),
+            "tags":           list(self.declared["tags"]),
+        }
+
+    def describe(self, request, context):
+        return worker_service_pb2.NodeDescription(hostname=_HOSTNAME, **self.capabilities())
+
+    def echo(self, request, context):
+        return worker_service_pb2.EchoReply(n_bytes=len(request.payload))
+
+    def probe_link(self, request, context):
+        try:
+            stub = worker_service_pb2_grpc.WorkerServiceStub(self.router.channel(request.target))
+            rtt, mbps = measure_link(stub, request.n_bytes, max(1, request.repeats or 3))
+            return worker_service_pb2.LinkProbeReply(rtt_ms=rtt, bandwidth_mbps=mbps)
+        except Exception as e:
+            return worker_service_pb2.LinkProbeReply(error=str(e))
 
     # ── save_checkpoint ────────────────────────────────────────────────────────
 
@@ -634,9 +1221,19 @@ class WorkerServicer(
 
     def get_stats(self, request, context):
         epoch   = request.epoch
+        if epoch < 0:
+            # liveness probe (heartbeats, failure-report checks): read nothing, reset nothing
+            return worker_service_pb2.WorkerStatsResponse(
+                worker_index = self._worker_index,
+                run_id       = self._run_id,
+                epoch        = epoch,
+                fatal_error  = (self._fatal_error or {}).get("message", ""),
+            )
         summary = self._profiler.epoch_summary(epoch)
         records = self._profiler.batch_records()
         self._profiler.reset_epoch()
+        comm, compute_s = self._comm, self._compute_s
+        self._reset_comm()
 
         def _phase_stats(name: str):
             return worker_service_pb2.PhaseStats(
@@ -680,6 +1277,8 @@ class WorkerServicer(
             n_batches    = summary.get("n_batches", 0),
             batches      = batch_stats,
             fatal_error  = (self._fatal_error or {}).get("message", ""),
+            compute_ms   = compute_s * 1e3,
+            **comm,
         )
 
     # ── forward / backward RPCs (fire-and-forget) ──────────────────────────────
@@ -693,6 +1292,107 @@ class WorkerServicer(
         generation = self._generation
         self._pool.submit(_tracer.propagate_to_thread(self._backward), request, generation)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
+
+    def _take_label(self, batch_id: int, label: torch.Tensor, generation: int) -> None:
+        """A label for the last slice: run the loss now if the activation is already
+        here, else keep the label until it arrives."""
+        with self._lock:
+            self._ensure_generation(generation, "forward_last", batch_id)
+            cached = self._outputs.pop(batch_id, None)
+            if cached is None:
+                self._labels[batch_id] = label
+        if cached is not None:
+            out, x_ref = cached
+            self._run_backward_last(batch_id, out, x_ref, label, generation)
+
+    def submit_label(self, batch_id: int, label: torch.Tensor) -> None:
+        """In-process counterpart of ``forward(ForwardRequest(label=...))`` for the last
+        slice: a U-shaped data owner keeps its labels without serializing them."""
+        generation = self._generation
+
+        def _run():
+            try:
+                self._ensure_generation(generation, "forward_last", batch_id)
+                self._take_label(batch_id, label.to(self.device), generation)
+            except _StaleWorkError as e:
+                _LOG.info("%s", e)
+            except Exception as e:
+                self._report_fatal_error("label", batch_id, e)
+
+        self._pool.submit(_tracer.propagate_to_thread(_run))
+
+    def submit_input(self, batch_id: int, tensor: torch.Tensor, aux: dict | None = None) -> None:
+        """In-process counterpart of ``forward(ForwardRequest(input=...))`` for the first
+        slice: the P2P driver feeds its own slice without serializing the batch."""
+        generation = self._generation
+
+        def _run():
+            try:
+                self._ensure_generation(generation, "forward", batch_id)
+                self._before_runtime_phase("forward", batch_id)
+                self._profiler.begin_batch(batch_id)
+                self._profiler.mark_idle_end("fwd")
+                self._run_forward_stage(batch_id, tensor.to(self.device), generation,
+                                        aux={k: v.to(self.device) for k, v in (aux or {}).items()})
+            except _StaleWorkError as e:
+                _LOG.info("%s", e)
+            except _PeerUnavailableError as e:
+                _LOG.warning("%s", e)
+            except Exception as e:
+                self._report_fatal_error("forward", batch_id, e)
+
+        self._pool.submit(_tracer.propagate_to_thread(_run))
+
+    # ── cuts: hooks, byte counting, compute time ──────────────────────────────
+
+    def _clock(self) -> float:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        import time
+        return time.perf_counter()
+
+    def _ctx(self, cut: int, direction: str, batch_id: int) -> CutContext:
+        return CutContext(cut, direction, batch_id, self._n_slices)
+
+    def _encode_out(self, batch_id: int, out: torch.Tensor) -> torch.Tensor:
+        """The tensor sent to the next slice (output cut = this slice's index)."""
+        raw = tensor_nbytes(out)
+        hook = self._hooks.get(self._worker_index)
+        wire = out if hook is None else pack_payload(
+            hook.encode(out, self._ctx(self._worker_index, "forward", batch_id)))
+        self._comm["bytes_fwd"] += tensor_nbytes(wire)
+        self._comm["raw_bytes_fwd"] += raw
+        self._comm["msgs_fwd"] += 1
+        return wire
+
+    def _encode_grad(self, batch_id: int, grad: torch.Tensor) -> torch.Tensor:
+        """The tensor sent to the previous slice (input cut = index - 1)."""
+        cut = self._worker_index - 1
+        raw = tensor_nbytes(grad)
+        hook = self._hooks.get(cut)
+        wire = grad if hook is None else pack_payload(
+            hook.encode_grad(grad, self._ctx(cut, "backward", batch_id)))
+        self._comm["bytes_bwd"] += tensor_nbytes(wire)
+        self._comm["raw_bytes_bwd"] += raw
+        self._comm["msgs_bwd"] += 1
+        return wire
+
+    def _decode_in(self, batch_id: int, tensor_cpu: torch.Tensor) -> torch.Tensor:
+        """An activation from the previous slice, on this device (hooks decoded)."""
+        cut = self._worker_index - 1
+        hook = self._hooks.get(cut) if cut >= 0 else None
+        if hook is None:
+            return tensor_cpu.to(self.device)
+        return hook.decode(unpack_payload(tensor_cpu, self.device),
+                           self._ctx(cut, "forward", batch_id))
+
+    def _decode_grad(self, batch_id: int, tensor_cpu: torch.Tensor) -> torch.Tensor:
+        """A gradient from the next slice, on this device (hooks decoded)."""
+        hook = self._hooks.get(self._worker_index)
+        if hook is None:
+            return tensor_cpu.to(self.device)
+        return hook.decode_grad(unpack_payload(tensor_cpu, self.device),
+                                self._ctx(self._worker_index, "backward", batch_id))
 
     # ── internal forward ───────────────────────────────────────────────────────
 
@@ -726,13 +1426,27 @@ class WorkerServicer(
                 self._forward_last(batch_id, request, generation)
                 return
 
+            # NCCL path: shape/dtype arrive via gRPC (empty data = sentinel); tensor via dist.recv.
+            if self._tensor_transport == "nccl" and self._nccl_future is not None:
+                self._wait_nccl()
+            if (self._tensor_transport == "nccl" and self._dist_group is not None
+                    and not request.input.data):
+                import torch.distributed as dist
+                dtype = _DTYPE_MAP.get(request.input.dtype, torch.float32)
+                shape = list(request.input.shape)
+                tensor = torch.empty(shape, dtype=dtype, device=self.device)
+                dist.recv(tensor, src=self._worker_index - 1, group=self._dist_group)
+                tensor = self._decode_in(batch_id, tensor)
+                self._run_forward_stage(batch_id, tensor, generation, aux={})
+                return
+
             with _tracer.span(
                 "torchslicer.tensor.deserialize",
                 batch_id=batch_id,
                 worker=_HOSTNAME,
                 source="input",
             ):
-                tensor_cpu = deserialize_tensor(request.input)
+                tensor_cpu = deserialize_tensor(request.input, self.device)
             with _tracer.span(
                 "torchslicer.tensor.h2d",
                 batch_id=batch_id,
@@ -740,7 +1454,7 @@ class WorkerServicer(
                 source="input",
                 device=str(self.device),
             ):
-                tensor = tensor_cpu.to(self.device)
+                tensor = self._decode_in(batch_id, tensor_cpu)
             # Unpack aux inputs (multimodal models — sent to first worker only)
             aux = {}
             if request.aux_inputs:
@@ -751,7 +1465,7 @@ class WorkerServicer(
                         worker=_HOSTNAME,
                         source=f"aux:{k}",
                     ):
-                        aux_cpu = deserialize_tensor(v)
+                        aux_cpu = deserialize_tensor(v, self.device)
                     with _tracer.span(
                         "torchslicer.tensor.h2d",
                         batch_id=batch_id,
@@ -783,7 +1497,7 @@ class WorkerServicer(
                 source="input_tcp",
                 device=str(self.device),
             ):
-                tensor = tensor_cpu.to(self.device)
+                tensor = self._decode_in(batch_id, tensor_cpu)
             self._run_forward_stage(batch_id, tensor, generation, aux={})
         except _StaleWorkError as e:
             _LOG.info("%s", e)
@@ -801,9 +1515,11 @@ class WorkerServicer(
             is_last=self.is_last,
             input_shape=str(tuple(tensor.shape)),
         ) as s:
+            t0 = self._clock()
             with self._profiler.phase("forward"):
                 out = self.layer(tensor, **aux) if aux else self.layer(tensor)
                 x_ref = self.layer.x
+            self._compute_s += self._clock() - t0
             if s:
                 s.set_attribute("output_shape", str(tuple(out.shape)))
 
@@ -828,14 +1544,41 @@ class WorkerServicer(
         self._profiler.mark_idle_start("bwd")
 
     def _send_forward_peer(self, batch_id: int, out: torch.Tensor) -> None:
+        out = self._encode_out(batch_id, out)
         try:
-            if self._tensor_transport == "tcp" and self._next_tensor is not None:
+            # NCCL path: send shape/dtype via gRPC (no data), then tensor via dist.isend.
+            if self._tensor_transport == "nccl":
+                if self._nccl_future is not None:
+                    self._wait_nccl()
+            if (self._tensor_transport == "nccl" and self._dist_group is not None):
+                import torch.distributed as dist
                 with _tracer.span(
                     "torchslicer.worker.activation_send",
                     batch_id=batch_id,
                     worker=_HOSTNAME,
                     peer=self.next_worker,
-                    transport="tcp",
+                    transport="nccl",
+                ):
+                    # Kick off async NCCL send before gRPC metadata so the receiver
+                    # can call dist.recv as soon as the gRPC message arrives.
+                    work = dist.isend(out, dst=self._worker_index + 1, group=self._dist_group)
+                    self._next_stub.forward(worker_service_pb2.ForwardRequest(
+                        batch_id=batch_id,
+                        input=worker_service_pb2.Tensor(
+                            shape=list(out.shape),
+                            dtype=_TORCH_TO_DTYPE.get(out.dtype, worker_service_pb2.FLOAT32),
+                        ),
+                    ))
+                    work.wait()
+                return
+            if (self._tensor_transport in {"tcp", "ipc"} and self._next_tensor is not None
+                    and self.router.is_direct(self.next_worker)):
+                with _tracer.span(
+                    "torchslicer.worker.activation_send",
+                    batch_id=batch_id,
+                    worker=_HOSTNAME,
+                    peer=self.next_worker,
+                    transport=self._tensor_transport,
                 ):
                     self._next_tensor.send_tensor(b"F", batch_id, out)
                 return
@@ -862,6 +1605,39 @@ class WorkerServicer(
             self._ensure_generation(generation, "forward_last", batch_id)
             self._before_runtime_phase("forward_last", batch_id)
             is_label = bool(request.label.data)
+            # NCCL: shape/dtype in input, no data → receive tensor from previous worker.
+            if self._tensor_transport == "nccl" and self._nccl_future is not None:
+                self._wait_nccl()
+            is_nccl_input = (
+                not is_label
+                and not bool(request.input.data)
+                and self._tensor_transport == "nccl"
+                and self._dist_group is not None
+            )
+
+            if is_nccl_input:
+                import torch.distributed as dist
+                dtype = _DTYPE_MAP.get(request.input.dtype, torch.float32)
+                shape = list(request.input.shape)
+                tensor = torch.empty(shape, dtype=dtype, device=self.device)
+                dist.recv(tensor, src=self._worker_index - 1, group=self._dist_group)
+                tensor = self._decode_in(batch_id, tensor)
+                with _tracer.span("torchslicer.worker.forward", batch_id=batch_id,
+                                  worker=_HOSTNAME, is_last=True,
+                                  input_shape=str(tuple(tensor.shape))):
+                    t0 = self._clock()
+                    with self._profiler.phase("forward"):
+                        out   = self.layer(tensor)
+                        x_ref = self.layer.x
+                    self._compute_s += self._clock() - t0
+                with self._lock:
+                    self._ensure_generation(generation, "forward_last", batch_id)
+                    label = self._labels.pop(batch_id, None)
+                    if label is None:
+                        self._outputs[batch_id] = (out, x_ref)
+                if label is not None:
+                    self._run_backward_last(batch_id, out, x_ref, label, generation)
+                return
 
             if is_label:
                 with _tracer.span(
@@ -870,7 +1646,7 @@ class WorkerServicer(
                     worker=_HOSTNAME,
                     source="label",
                 ):
-                    label_cpu = deserialize_tensor(request.label)
+                    label_cpu = deserialize_tensor(request.label, self.device)
                 with _tracer.span(
                     "torchslicer.tensor.h2d",
                     batch_id=batch_id,
@@ -879,13 +1655,7 @@ class WorkerServicer(
                     device=str(self.device),
                 ):
                     label = label_cpu.to(self.device)
-                with self._lock:
-                    self._ensure_generation(generation, "forward_last", batch_id)
-                    self._labels[batch_id] = label
-                    cached = self._outputs.pop(batch_id, None)
-                if cached is not None:
-                    out, x_ref = cached
-                    self._run_backward_last(batch_id, out, x_ref, label, generation)
+                self._take_label(batch_id, label, generation)
             else:
                 with _tracer.span(
                     "torchslicer.tensor.deserialize",
@@ -893,7 +1663,7 @@ class WorkerServicer(
                     worker=_HOSTNAME,
                     source="input_last",
                 ):
-                    tensor_cpu = deserialize_tensor(request.input)
+                    tensor_cpu = deserialize_tensor(request.input, self.device)
                 with _tracer.span(
                     "torchslicer.tensor.h2d",
                     batch_id=batch_id,
@@ -901,7 +1671,7 @@ class WorkerServicer(
                     source="input_last",
                     device=str(self.device),
                 ):
-                    tensor = tensor_cpu.to(self.device)
+                    tensor = self._decode_in(batch_id, tensor_cpu)
                 with _tracer.span(
                     "torchslicer.worker.forward",
                     batch_id=batch_id,
@@ -909,9 +1679,11 @@ class WorkerServicer(
                     is_last=True,
                     input_shape=str(tuple(tensor.shape)),
                 ):
+                    t0 = self._clock()
                     with self._profiler.phase("forward"):
                         out   = self.layer(tensor)
                         x_ref = self.layer.x
+                    self._compute_s += self._clock() - t0
 
                 with self._lock:
                     self._ensure_generation(generation, "forward_last", batch_id)
@@ -938,13 +1710,27 @@ class WorkerServicer(
 
             self._profiler.mark_idle_end("bwd")
 
+            # NCCL path: gradient shape/dtype in message, no data → receive via dist.recv.
+            if self._tensor_transport == "nccl" and self._nccl_future is not None:
+                self._wait_nccl()
+            if (self._tensor_transport == "nccl" and self._dist_group is not None
+                    and not request.gradient.data):
+                import torch.distributed as dist
+                dtype = _DTYPE_MAP.get(request.gradient.dtype, torch.float32)
+                shape = list(request.gradient.shape)
+                grad_in = torch.empty(shape, dtype=dtype, device=self.device)
+                dist.recv(grad_in, src=self._worker_index + 1, group=self._dist_group)
+                grad_in = self._decode_grad(batch_id, grad_in)
+                self._run_backward_stage(batch_id, grad_in, is_last_micro, generation)
+                return
+
             with _tracer.span(
                 "torchslicer.tensor.deserialize",
                 batch_id=batch_id,
                 worker=_HOSTNAME,
                 source="gradient",
             ):
-                grad_cpu = deserialize_tensor(request.gradient)
+                grad_cpu = deserialize_tensor(request.gradient, self.device)
             with _tracer.span(
                 "torchslicer.tensor.h2d",
                 batch_id=batch_id,
@@ -952,7 +1738,7 @@ class WorkerServicer(
                 source="gradient",
                 device=str(self.device),
             ):
-                grad_in = grad_cpu.to(self.device)
+                grad_in = self._decode_grad(batch_id, grad_cpu)
             self._run_backward_stage(batch_id, grad_in, is_last_micro, generation)
         except _StaleWorkError as e:
             _LOG.info("%s", e)
@@ -975,7 +1761,7 @@ class WorkerServicer(
                 source="gradient_tcp",
                 device=str(self.device),
             ):
-                grad_in = grad_cpu.to(self.device)
+                grad_in = self._decode_grad(batch_id, grad_cpu)
             self._run_backward_stage(batch_id, grad_in, is_last_micro, generation)
         except _StaleWorkError as e:
             _LOG.info("%s", e)
@@ -994,7 +1780,10 @@ class WorkerServicer(
             return
 
         out, x_ref = cached
+        if grad_in.dtype != out.dtype:
+            grad_in = grad_in.to(out.dtype)
 
+        t0 = self._clock()
         with _tracer.span(
             "torchslicer.worker.backward",
             kind="TOOL",
@@ -1012,7 +1801,8 @@ class WorkerServicer(
                 grad = x_ref.grad if x_ref is not None else None
             if is_last_micro:
                 with self._profiler.phase("optimizer"):
-                    self.layer.optimize()
+                    self._optimize(batch_id)
+        self._compute_s += self._clock() - t0
 
         del out
         self._send_backward(batch_id, grad, is_last_micro, generation)
@@ -1026,6 +1816,7 @@ class WorkerServicer(
             is_last_micro = (n_micro <= 1) or (batch_id % n_micro == n_micro - 1)
             full_batch_id = batch_id // n_micro if n_micro > 1 else batch_id
 
+            t0 = self._clock()
             loss_unscaled = self.loss_fn(out, label)
             loss          = loss_unscaled / n_micro
 
@@ -1065,7 +1856,8 @@ class WorkerServicer(
                     grad = x_ref.grad
                 if is_last_micro:
                     with self._profiler.phase("optimizer"):
-                        self.layer.optimize()
+                        self._optimize(batch_id)
+            self._compute_s += self._clock() - t0
 
             del out, label, loss, loss_unscaled
             self._send_backward(batch_id, grad, is_last_micro, generation)
@@ -1081,15 +1873,38 @@ class WorkerServicer(
         if generation is not None:
             self._ensure_generation(generation, "send_backward", batch_id)
         if self._prev_stub or self._prev_tensor:
+            grad = self._encode_grad(batch_id, grad)
             with self._profiler.phase("send_bwd"):
                 try:
-                    if self._tensor_transport == "tcp" and self._prev_tensor is not None:
+                    # NCCL path: send metadata via gRPC, tensor via dist.isend.
+                    if self._tensor_transport == "nccl" and self._nccl_future is not None:
+                        self._wait_nccl()
+                    if (self._tensor_transport == "nccl" and self._dist_group is not None):
+                        import torch.distributed as dist
                         with _tracer.span(
                             "torchslicer.worker.gradient_send",
                             batch_id=batch_id,
                             worker=_HOSTNAME,
                             peer=self.prev_worker,
-                            transport="tcp",
+                            transport="nccl",
+                        ):
+                            work = dist.isend(grad, dst=self._worker_index - 1, group=self._dist_group)
+                            self._prev_stub.backward(worker_service_pb2.BackwardRequest(
+                                batch_id=batch_id,
+                                gradient=worker_service_pb2.Tensor(
+                                    shape=list(grad.shape),
+                                    dtype=_TORCH_TO_DTYPE.get(grad.dtype, worker_service_pb2.FLOAT32),
+                                ),
+                            ))
+                            work.wait()
+                    elif (self._tensor_transport in {"tcp", "ipc"} and self._prev_tensor is not None
+                            and self.router.is_direct(self.prev_worker)):
+                        with _tracer.span(
+                            "torchslicer.worker.gradient_send",
+                            batch_id=batch_id,
+                            worker=_HOSTNAME,
+                            peer=self.prev_worker,
+                            transport=self._tensor_transport,
                         ):
                             self._prev_tensor.send_tensor(b"B", batch_id, grad)
                     else:
@@ -1191,7 +2006,113 @@ class WorkerServicer(
         ]
 
 
-# ── run_worker ─────────────────────────────────────────────────────────────────
+# ── start_worker / run_worker ──────────────────────────────────────────────────
+
+class WorkerHandle:
+    """A worker started in this process by :func:`start_worker`."""
+
+    def __init__(self, servicer, server, address: str):
+        self.servicer = servicer
+        self.server   = server
+        self.address  = address
+
+    def stop(self, grace: float = 0) -> None:
+        self.servicer.stop_tensor_server()
+        self.server.stop(grace)
+        self.servicer.router.close()
+
+
+class _NoServer:
+    """What a NAT'd worker has instead of a gRPC server: it listens on nothing and is
+    served through its tunnels. ``stop`` ends it like ``grpc.Server.stop``."""
+
+    def __init__(self, router):
+        self._router = router
+        self._stopped = threading.Event()
+
+    def stop(self, grace=None):
+        # like grpc.Server.stop(grace): let in-flight replies (e.g. the Ack of the
+        # shutdown call that stops it) leave over the tunnel before closing it
+        if grace:
+            import time
+            time.sleep(min(float(grace), 1.0))
+        self._stopped.set()
+        self._router.close()
+
+    def wait_for_termination(self, timeout=None):
+        return self._stopped.wait(timeout)
+
+
+def start_worker(port: int = 0, *, host: str = "[::]", address: str | None = None,
+                 run_config: RunConfig | None = None, servicer_class=None,
+                 grpc_workers: int = 10, nat: bool | None = None,
+                 tunnel_to: list | None = None) -> WorkerHandle:
+    """Start a worker's gRPC (and, with ``transport.tensor: tcp``, TCP tensor) server in
+    this process and return without blocking. It registers with no one: a coordinator
+    or P2P driver must know its address (``StaticDiscovery``). ``run_worker`` is the
+    blocking entry point built on it.
+
+    ``port=0`` picks a free port (gRPC only; TCP needs a fixed ``port + offset``).
+    Handy for local simulations, tests and the tutorials::
+
+        followers = [ts.start_worker(host="127.0.0.1") for _ in range(2)]
+        peers = [w.address for w in followers]
+
+    ``nat`` (default ``transport.nat``): the worker is behind NAT. It opens no port;
+    ``address`` is only its name, and it opens a tunnel to each node in ``tunnel_to``
+    (the coordinator or P2P driver that will drive it), or to ``transport.relay``.
+    """
+    cfg = run_config or RunConfig.load()
+    nat = bool(cfg.transport.nat if nat is None else nat)
+    relay = (cfg.transport.relay or "").strip()
+    servicer = (servicer_class or WorkerServicer)()
+    if cfg.network.device and cfg.network.device != "auto":
+        # the servicer resolved DEVICE from the env; an explicit config device wins
+        servicer.device = torch.device(resolve_device(cfg.network.device))
+    servicer._tensor_transport   = cfg.transport.tensor.strip().lower()
+    servicer._tensor_port_offset = int(cfg.transport.tensor_port_offset)
+    servicer._persistent         = bool(cfg.network.worker_persistent)
+    servicer.declared = {
+        "compute_gflops": float(cfg.network.worker_compute_gflops),
+        "max_memory_mb":  int(cfg.network.worker_max_memory_mb),
+        "first_slice":    bool(cfg.network.worker_first_slice),
+        "tags":           list(cfg.network.worker_tags),
+    }
+    servicer.router = router = Router(relay or None, keepalive_s=cfg.transport.tunnel_keepalive_s)
+    servicer.nat = nat
+    if nat:
+        tunnel_to = [a for a in (tunnel_to or []) if a]
+        if not relay and not tunnel_to:
+            router.close()
+            raise ValueError("a worker behind NAT (transport.nat) must know who drives it: "
+                             "network.coordinator_address (the coordinator or P2P driver), "
+                             "or transport.relay")
+        if address is None:
+            address = f"{_HOSTNAME}:{port}" if port else f"{_HOSTNAME}-{os.getpid()}-{id(servicer):x}:0"
+        server = _NoServer(router)
+        servicer.set_server(server)
+        router.serve(address, servicer, worker_service_pb2_grpc.add_WorkerServiceServicer_to_server)
+        if not relay:
+            for target in tunnel_to:
+                router.keep(target)
+        _LOG.info("worker behind NAT address=%s tunnels=%s", address, [relay] if relay else tunnel_to)
+        return WorkerHandle(servicer, server, address)
+    if port == 0 and servicer._tensor_transport == "tcp":
+        raise ValueError("start_worker(port=0) is gRPC-only: the TCP tensor port is port + offset")
+
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=grpc_workers), options=_GRPC_OPTS)
+    worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(servicer, server)
+    router.add_to_server(server)
+    port = server.add_insecure_port(f"{host}:{port}")
+    server.start()
+    servicer.set_server(server)
+    servicer.start_tensor_server(port + servicer._tensor_port_offset)
+    if address is None:
+        address = f"127.0.0.1:{port}" if host in ("127.0.0.1", "localhost") else f"{_HOSTNAME}:{port}"
+    router.serve(address, servicer, worker_service_pb2_grpc.add_WorkerServiceServicer_to_server)
+    return WorkerHandle(servicer, server, address)
+
+
 
 def run_worker(
     port=None,
@@ -1277,48 +2198,48 @@ def run_worker(
     elif cfg.network.device and cfg.network.device != "auto":
         os.environ["DEVICE"] = cfg.network.device
     resolved_device = resolve_device()
-    memory_mb       = get_available_memory_mb(resolved_device)
 
     # ── resolve worker tags ─────────────────────────────────────────────────
     tags = list(cfg.network.worker_tags)
 
     # ── build servicer + gRPC server ────────────────────────────────────────
-    tensor_transport    = cfg.transport.tensor.strip().lower()
-    tensor_port_offset  = int(cfg.transport.tensor_port_offset)
-
-    if servicer_class is None:
-        servicer_class = WorkerServicer
-    servicer = servicer_class()
-    servicer._tensor_transport = tensor_transport
-    servicer._tensor_port_offset = tensor_port_offset
-
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=grpc_workers),
-        options=_GRPC_OPTS,
-    )
-    worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(servicer, server)
-    server.add_insecure_port(f"[::]:{port}")
-    server.start()
-    servicer.set_server(server)
-    servicer.start_tensor_server(port + servicer._tensor_port_offset)
+    # Behind NAT, the worker tunnels to whoever drives it: the coordinator, else the
+    # P2P driver (network.coordinator_address, else the first of discovery.peers).
+    nat = bool(cfg.transport.nat)
+    driver = coordinator_addr or cfg.network.coordinator_address or next(
+        (p for p in cfg.discovery.peers if p != worker_address), None)
+    handle   = start_worker(port, address=worker_address, run_config=cfg,
+                            servicer_class=servicer_class, grpc_workers=grpc_workers,
+                            tunnel_to=[driver] if nat else None)
+    servicer, server = handle.servicer, handle.server
     tag_str = f"  tags=[{', '.join(tags)}]" if tags else ""
     _LOG.info("worker started port=%s hostname=%s device=%s%s", port, _HOSTNAME, resolved_device, tag_str)
 
     # ── announce to coordinator (centralized topology only) ─────────────────
     if coordinator_addr:
         from ..discovery import NodeInfo, announce_to_coordinator
+        # declared + measured capabilities (one short matmul benchmark, cached)
+        caps = servicer.capabilities()
         node_info = NodeInfo(
             node_id=worker_address,  # unique per worker even when several share a host
             address=worker_address,
-            device=resolved_device,
-            memory_mb=memory_mb,
-            tags=tags,
+            **caps,
         )
+        _LOG.info("capabilities %s", caps)
         _LOG.info("registering with coordinator address=%s", coordinator_addr)
+        policy = RetryPolicy(max_attempts=cfg.discovery.registration_max_attempts,
+                             delay_s=cfg.discovery.registration_delay_s,
+                             rpc_timeout_s=cfg.discovery.registration_rpc_timeout_s)
+        channel = servicer.router.channel(coordinator_addr)
+        if nat and not servicer.router.relay:
+            # the coordinator calls this worker (init) as soon as it registers
+            if not servicer.router.keep(coordinator_addr).wait(policy.max_attempts * policy.delay_s):
+                _LOG.warning("no tunnel to the coordinator yet; registering anyway")
         try:
             result = announce_to_coordinator(
                 coordinator_addr,
                 node_info,
+                channel=channel,
                 retry_policy=RetryPolicy(
                     max_attempts=cfg.discovery.registration_max_attempts,
                     delay_s=cfg.discovery.registration_delay_s,
@@ -1327,9 +2248,12 @@ def run_worker(
             )
             _LOG.info("registration complete run_id=%s worker_index=%s", result.run_id, result.worker_index)
         except RuntimeError as e:
-            _LOG.error("registration failed fatally: %s", e)
-            server.stop(0)
-            sys.exit(1)
+            if not servicer._persistent:
+                _LOG.error("registration failed fatally: %s", e)
+                server.stop(0)
+                sys.exit(1)
+            # Persistent workers outlive coordinators: keep retrying via the watchdog.
+            _LOG.warning("registration failed, worker persistent — retrying via watchdog: %s", e)
 
         # ── coordinator watchdog ─────────────────────────────────────────────
         # Re-registers periodically so that:
@@ -1342,7 +2266,7 @@ def run_worker(
             while not _shutdown_watchdog.wait(timeout=watchdog_interval):
                 try:
                     announce_to_coordinator(
-                        coordinator_addr, node_info,
+                        coordinator_addr, node_info, channel=channel,
                         retry_policy=RetryPolicy(max_attempts=1, delay_s=0.0, rpc_timeout_s=5.0),
                     )
                 except RuntimeError:

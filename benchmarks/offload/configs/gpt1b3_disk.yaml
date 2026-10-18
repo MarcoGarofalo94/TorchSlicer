@@ -1,0 +1,12 @@
+# 1.3B params: params + AdamW state (~16 GB) don't fit in host RAM (16 GB cgroup) either,
+# so only the disk tier can train it under the 6 GB GPU cap.
+seed: 0
+model: {vocab: 32000, seq: 512, d_model: 2048, n_heads: 16, d_ff: 8192, n_layers: 24, dropout: 0.0}
+batch: 8
+steps: 4
+warmup: 1
+tf32: true
+gpu_cap_gb: 6
+optimizer: {name: AdamW, params: {lr: 1.0e-4, weight_decay: 0.01, fused: true}}
+offload: {n_slices: 26, slots: 2, n_micro: 1, dir: ""}
+modes: [reference, offload-gpu, offload-disk]

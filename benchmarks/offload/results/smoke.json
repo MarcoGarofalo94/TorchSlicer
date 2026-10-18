@@ -1,0 +1,272 @@
+{
+ "config": {
+  "seed": 0,
+  "model": {
+   "vocab": 1000,
+   "seq": 64,
+   "d_model": 128,
+   "n_heads": 4,
+   "d_ff": 512,
+   "n_layers": 4,
+   "dropout": 0.0
+  },
+  "batch": 4,
+  "steps": 4,
+  "warmup": 1,
+  "tf32": false,
+  "gpu_cap_gb": 0,
+  "optimizer": {
+   "name": "AdamW",
+   "params": {
+    "lr": 0.001,
+    "weight_decay": 0.01,
+    "fused": true
+   }
+  },
+  "offload": {
+   "n_slices": 4,
+   "slots": 2,
+   "n_micro": 1,
+   "dir": ""
+  },
+  "modes": [
+   "reference",
+   "offload-gpu",
+   "offload-cpu",
+   "offload-disk",
+   "fsdp2-offload",
+   "fsdp2-offload-ckpt"
+  ]
+ },
+ "n_params": 1058536,
+ "modes": {
+  "reference": {
+   "mode": "reference",
+   "ok": true,
+   "step_s": 0.006,
+   "step_s_all": [
+    0.196,
+    0.008,
+    0.006,
+    0.006
+   ],
+   "samples_per_s": 655.53,
+   "tokens_per_s": 41953.9,
+   "peak_mb": 39.1,
+   "losses": [
+    7.033951759338379,
+    7.096885681152344,
+    7.067507743835449,
+    7.098422527313232
+   ],
+   "wall_s": 3.3
+  },
+  "offload-gpu": {
+   "mode": "offload-gpu",
+   "ok": true,
+   "step_s": 0.012,
+   "step_s_all": [
+    0.212,
+    0.013,
+    0.012,
+    0.012
+   ],
+   "samples_per_s": 325.52,
+   "tokens_per_s": 20833.5,
+   "peak_mb": 33.5,
+   "offload_h2d_bytes": 12702720,
+   "offload_d2h_bytes": 12702720,
+   "offload_transfer_bound_s": 0.001,
+   "offload_bound_fraction": 0.055,
+   "offload_home_mb": 12.1,
+   "offload_slots_mb": 10.2,
+   "offload_optimizer": "gpu",
+   "offload_h2d_gbps": 26.68,
+   "offload_d2h_gbps": 25.75,
+   "compute_s": 0.009,
+   "bound_fraction_median": 0.055,
+   "placement_info": {},
+   "losses": [
+    7.033952,
+    7.096885,
+    7.067507,
+    7.098423
+   ],
+   "n_slices": 4,
+   "wall_s": 3.7
+  },
+  "offload-cpu": {
+   "mode": "offload-cpu",
+   "ok": true,
+   "step_s": 0.026,
+   "step_s_all": [
+    0.293,
+    0.026,
+    0.017,
+    0.029
+   ],
+   "samples_per_s": 155.4,
+   "tokens_per_s": 9945.9,
+   "peak_mb": 28.4,
+   "offload_h2d_bytes": 6365184,
+   "offload_d2h_bytes": 4234240,
+   "offload_transfer_bound_s": 0.0,
+   "offload_bound_fraction": 0.01,
+   "offload_home_mb": 8.1,
+   "offload_slots_mb": 5.1,
+   "offload_optimizer": "cpu",
+   "offload_h2d_gbps": 26.67,
+   "offload_d2h_gbps": 25.66,
+   "compute_s": 0.011,
+   "bound_fraction_median": 0.011,
+   "placement_info": {},
+   "losses": [
+    7.033952,
+    7.096886,
+    7.067508,
+    7.098423
+   ],
+   "n_slices": 4,
+   "wall_s": 4.1
+  },
+  "offload-disk": {
+   "mode": "offload-disk",
+   "ok": true,
+   "step_s": 0.049,
+   "step_s_all": [
+    0.272,
+    0.045,
+    0.049,
+    0.049
+   ],
+   "samples_per_s": 82.38,
+   "tokens_per_s": 5272.6,
+   "peak_mb": 33.5,
+   "offload_h2d_bytes": 12702720,
+   "offload_d2h_bytes": 12718080,
+   "offload_transfer_bound_s": 0.001,
+   "offload_bound_fraction": 0.016,
+   "offload_home_mb": 12.1,
+   "offload_slots_mb": 10.2,
+   "offload_optimizer": "gpu",
+   "offload_h2d_gbps": 26.35,
+   "offload_d2h_gbps": 25.66,
+   "compute_s": 0.01,
+   "bound_fraction_median": 0.016,
+   "placement_info": {},
+   "losses": [
+    7.033952,
+    7.096885,
+    7.067507,
+    7.098423
+   ],
+   "n_slices": 4,
+   "wall_s": 4.1
+  },
+  "fsdp2-offload": {
+   "mode": "fsdp2-offload",
+   "ok": true,
+   "step_s": 0.1,
+   "step_s_all": [
+    0.4,
+    0.1,
+    0.1,
+    0.1
+   ],
+   "samples_per_s": 39.86,
+   "tokens_per_s": 2551.3,
+   "peak_mb": 27.0,
+   "losses": [
+    7.033951759338379,
+    7.096885681152344,
+    7.067507743835449,
+    7.098422527313232
+   ],
+   "wall_s": 4.1
+  },
+  "fsdp2-offload-ckpt": {
+   "mode": "fsdp2-offload-ckpt",
+   "ok": true,
+   "step_s": 0.093,
+   "step_s_all": [
+    0.493,
+    0.027,
+    0.093,
+    0.099
+   ],
+   "samples_per_s": 43.11,
+   "tokens_per_s": 2759.2,
+   "peak_mb": 23.0,
+   "losses": [
+    7.033951759338379,
+    7.0968852043151855,
+    7.067507743835449,
+    7.098422527313232
+   ],
+   "wall_s": 4.1
+  },
+  "zero3-offload": {
+   "mode": "zero3-offload",
+   "ok": true,
+   "step_s": 0.045,
+   "step_s_all": [
+    0.367,
+    0.067,
+    0.045,
+    0.045
+   ],
+   "samples_per_s": 87.92,
+   "tokens_per_s": 5626.9,
+   "peak_mb": 1939.0,
+   "losses": [
+    7.033951759338379,
+    7.0968852043151855,
+    7.067522048950195,
+    7.098553657531738
+   ],
+   "deepspeed": "0.19.7"
+  },
+  "zero3-offload-ckpt": {
+   "mode": "zero3-offload-ckpt",
+   "ok": true,
+   "step_s": 0.057,
+   "step_s_all": [
+    0.358,
+    0.118,
+    0.057,
+    0.057
+   ],
+   "samples_per_s": 70.1,
+   "tokens_per_s": 4486.3,
+   "peak_mb": 1935.3,
+   "losses": [
+    7.033951759338379,
+    7.0968852043151855,
+    7.067522048950195,
+    7.098553657531738
+   ],
+   "deepspeed": "0.19.7"
+  },
+  "zero2-offload": {
+   "mode": "zero2-offload",
+   "ok": true,
+   "step_s": 0.025,
+   "step_s_all": [
+    0.292,
+    0.025,
+    0.079,
+    0.025
+   ],
+   "samples_per_s": 159.55,
+   "tokens_per_s": 10211.3,
+   "peak_mb": 1937.4,
+   "losses": [
+    7.033951759338379,
+    7.096884727478027,
+    7.067522048950195,
+    7.098553657531738
+   ],
+   "deepspeed": "0.19.7"
+  }
+ }
+}

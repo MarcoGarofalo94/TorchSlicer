@@ -1,0 +1,23 @@
+# M11: next-character prediction on tiny-shakespeare, clients = speaking roles (natural
+# partition, LEAF-style), SplitFed V2. Smoke-test size; drop the subsets for a full run.
+training:
+  epochs: 2
+  optimizer: {name: Adam, params: {lr: 0.002}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+discovery: {n_workers: 2}
+network: {device: auto}
+logging: {enabled: false}
+data:
+  dataset: shakespeare
+  root: data
+  partition: natural
+  batch_size: 32
+  seed: 0
+  train_subset: 4000
+  test_subset: 500
+  eval_every: 1
+sl:
+  setting: vanilla
+  clients: 10
+  client_mode: parallel
+  algorithm: splitfed

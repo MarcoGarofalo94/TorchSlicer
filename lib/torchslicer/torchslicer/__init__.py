@@ -1,16 +1,25 @@
-__version__ = "0.2.0"
+__version__ = "0.11.0"
 __author__ = 'Marco Garofalo'
 
 from .core.slicer import Slicer
 from .core.split_layer import SplitLayer
-from .core.model_graph import ModelGraph, LayerNode, _FlattenWrapper, _AddWrapper
+from .core.model_graph import ModelGraph, LayerNode, TraceError, _FlattenWrapper, _AddWrapper
 from .strategies.base import BaseSplitter, Partition
 from .strategies.uniform import UniformSplitter
-from .strategies.registry import register as register_strategy, get as _get_strategy
+from .strategies.named import NamedCutSplitter
+from .strategies.cost import (
+    CostSplitter, ParamSplitter, FlopsSplitter, ProfiledSplitter, MemorySplitter, balanced_cuts,
+    activation_bytes,
+)
+from .strategies.registry import (
+    register as register_strategy, get as _get_strategy, available as available_strategies,
+)
 from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
 from .executors.distributed import DistributedExecutor, WorkerFailureError
-from .executors.worker import resolve_device, run_worker, WorkerServicer
+from .executors.p2p import P2PExecutor, run_p2p
+from .offload import OffloadExecutor
+from .executors.worker import resolve_device, run_worker, start_worker, WorkerHandle, WorkerServicer
 from .transport.base import BaseTransport
 from .discovery import BaseDiscovery, NodeInfo, AnnounceResult
 from .discovery import CoordinatorDiscovery, announce_to_coordinator, StaticDiscovery
@@ -18,7 +27,7 @@ from .config import (
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
     StartupConfig, TransportConfig,
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
-    NetworkConfig,
+    NetworkConfig, PlanningConfig, DeployConfig, SLConfig, OffloadConfig, DataConfig,
 )
 from .monitor import TrainingCallback, RunLogger
 from .core.stages import (
@@ -30,6 +39,20 @@ from .core.stages import (
     SimpleEmbedStage,
 )
 from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
+from .deploy import run
+from . import sl
+from . import data
+from .sl import (
+    CutHook, CutContext, Float16, BFloat16, Quantize, TopK, GaussianNoise, Recorder, Chain,
+    register_hook, ClientSession, Placement,
+)
+from . import algorithm as _algorithm_module  # noqa: ensure builtin registrations run
+from .algorithm import (
+    Algorithm, BackwardPolicy, AlgorithmContext,
+    register_algorithm, get_algorithm, available_algorithms,
+    DefaultAlgorithm, SplitFedAlgorithm, SplitFedV1Algorithm, LocalLossAlgorithm,
+    fedavg,
+)
 
 
 def peft_unwrap(model) -> "nn.Module":
@@ -69,14 +92,65 @@ def peft_unwrap(model) -> "nn.Module":
     return model
 
 
+def _accepts_nodes(splitter) -> bool:
+    import inspect
+    try:
+        params = inspect.signature(splitter.split).parameters
+    except (TypeError, ValueError):
+        return False
+    return "nodes" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
 class SlicedModel:
     def __init__(self, graph, partitions, executor,
-                 model_name: str = "unknown", strategy_name: str = "unknown"):
+                 model_name: str = "unknown", strategy_name: str = "unknown",
+                 splitter=None, cut_hooks=None):
         self.graph          = graph
         self.partitions     = partitions
         self.executor       = executor
         self._model_name    = model_name
         self._strategy_name = strategy_name
+        self._splitter      = splitter
+        self.cut_hooks      = cut_hooks
+
+    def plan(self, nodes) -> list:
+        """Partitions for these workers (``NodeInfo`` list, in slice order).
+
+        Distributed executors call this after discovery, when the workers' measured
+        capabilities are known, and again in recovery for the survivors. Strategies
+        whose ``split`` takes ``nodes=`` use them (speed, memory caps, links); the
+        others split as usual (``ts.slice`` already did, for the same count).
+        """
+        if self._splitter is None:
+            if len(nodes) != len(self.partitions):
+                raise ValueError("no strategy to re-plan for a different worker count")
+            return self.partitions
+        n = len(nodes)
+        if _accepts_nodes(self._splitter):
+            partitions = self._splitter.split(self.graph, n, nodes=list(nodes))
+        elif n == len(self.partitions):
+            return self.partitions
+        else:
+            partitions = self._splitter.split(self.graph, n)
+        self._splitter.validate(self.graph, partitions)
+        return partitions
+
+    def summary(self) -> str:
+        """Which nodes each partition holds, with its parameter count."""
+        lines = [f"SlicedModel({self._model_name}, strategy={self._strategy_name}, "
+                 f"partitions={len(self.partitions)})"]
+        seen = set()
+        for p in self.partitions:
+            params = 0
+            for i in p.layer_indices:
+                for prm in self.graph.nodes[i].module.parameters():
+                    if id(prm) not in seen:
+                        seen.add(id(prm))
+                        params += prm.numel()
+            names = [self.graph.nodes[i].name or str(i) for i in p.layer_indices]
+            shown = names if len(names) <= 6 else names[:3] + ["..."] + names[-2:]
+            lines.append(f"  {p.index}: {len(names)} nodes, {params:,} params  {shown}")
+        return "\n".join(lines)
 
     def train(
         self,
@@ -91,8 +165,16 @@ class SlicedModel:
         n_micro_batches: int = None,
         callbacks: list = None,
         run_config=None,
+        algorithm=None,
+        eval_data=None,
+        eval_every: int = None,
     ) -> list:
         """Train the sliced model.
+
+        ``data_loader`` yields ``(inputs, labels)``; a ``ts.ClientSession`` trains
+        several clients (data owners) against the shared server slices.
+        ``eval_data``: a test loader, evaluated every ``eval_every`` epochs (default
+        ``data.eval_every``, else 1); ``test_loss``/``test_accuracy`` go into the history.
 
         When ``run_config`` is supplied all training parameters default to the
         values in the config; explicit kwargs override individual fields::
@@ -120,6 +202,24 @@ class SlicedModel:
             raise ValueError("criterion must be provided directly or via run_config.training.criterion")
 
         n_micro = resolved_n_micro if resolved_use_gpipe else 1
+        if cfg is not None and cfg.offload.mode not in ("", "none") and type(self.executor) is LocalExecutor:
+            self.executor = OffloadExecutor()          # offload.* comes from the config
+        import inspect
+        accepted = inspect.signature(self.executor.setup).parameters
+        extra = {"planner": self.plan} if "planner" in accepted else {}
+        if "cut_hooks" in accepted:
+            extra["cut_hooks"] = self.cut_hooks
+        elif self.cut_hooks:
+            raise ValueError(f"{type(self.executor).__name__} does not support cut_hooks")
+        if "algorithm" in accepted:
+            extra["algorithm"] = algorithm
+        if eval_data is not None:
+            if "eval_data" not in accepted:
+                raise ValueError(f"{type(self.executor).__name__} doesn't support evaluation yet "
+                                 "(eval_data / data.eval_every); it runs on the local executor")
+            extra["eval_data"] = eval_data
+            extra["eval_every"] = (eval_every if eval_every is not None
+                                   else (cfg.data.eval_every if cfg else 1))
         self.executor.setup(
             self.graph,
             self.partitions,
@@ -131,7 +231,9 @@ class SlicedModel:
             model_name=self._model_name,
             strategy_name=self._strategy_name,
             run_config=run_config,
+            **extra,
         )
+        self.partitions = getattr(self.executor, "partitions", None) or self.partitions
         history = []
         max_retries = getattr(self.executor, '_max_fault_retries', 0)
         for epoch in range(1, resolved_epochs + 1):
@@ -145,25 +247,56 @@ class SlicedModel:
                         raise
                     print(f"[fault] epoch {epoch} attempt {attempt + 1} failed: {e}")
                     self.executor.recover(epoch - 1)
+                    self.partitions = getattr(self.executor, "partitions", None) or self.partitions
         self.executor.teardown()
         return history
 
 
-def slice(model, strategy="uniform", n=2, executor=None, pack=None) -> SlicedModel:
+def _merge_expand(a, b):
+    if a == "all" or b == "all":
+        return "all"
+    a = [a] if isinstance(a, str) else list(a or [])
+    b = [b] if isinstance(b, str) else list(b or [])
+    return a + [x for x in b if x not in a] or None
+
+
+def trace(model, expand=None, pack=None) -> ModelGraph:
+    """Build the layer graph ``ts.slice`` would split, without splitting it.
+
+    ``print(ts.trace(model).summary())`` lists every node's name (use them in
+    ``cuts=``) and marks where a cut is allowed. ``expand`` and ``pack`` mean the
+    same as in :func:`slice`.
+    """
+    if pack is not None:
+        if expand:
+            raise ValueError("expand= has no effect with pack=: packed stages are not traced")
+        return ModelGraph.from_stages(list(pack(model)))
+    return ModelGraph.from_module(model, expand=expand)
+
+
+def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
+          cuts=None, expand=None, example_input=None, cut_hooks=None) -> SlicedModel:
     """Slice a model into ``n`` partitions for distributed training.
 
     Args:
         model:    Any ``nn.Module``.
-        strategy: Splitting strategy name, class, or instance.
-        n:        Number of partitions.
+        strategy: Splitting strategy name, class, or instance. Built in:
+                  ``"uniform"`` (equal layer count, the default), ``"params"``
+                  (balance parameter count), ``"flops"`` (balance forward FLOPs,
+                  needs ``example_input``), ``"profiled"`` (balance measured
+                  forward+backward time, needs ``example_input``). Custom ones:
+                  subclass ``ts.BaseSplitter`` and optionally
+                  ``ts.register_strategy(name, cls)``.
+        n:        Number of partitions (default 2, or ``len(cuts) + 1``).
         executor: Executor to use. Defaults to ``LocalExecutor``.
         pack:     Optional callable ``(model) -> list[nn.Module]``.
                   When provided, the function is called to produce a flat
                   list of stages; torch.fx tracing is skipped entirely.
                   Use this for models with cross-partition residuals, MoE
                   blocks, or any architecture the default tracer cannot
-                  handle. Packed stages are treated as authoritative units for
-                  splitting and fault-tolerance recovery. Example::
+                  handle (``ts.TraceError`` says so). Packed stages are treated
+                  as authoritative units for splitting and fault-tolerance
+                  recovery. See docs/tutorials/pack.md. Example::
 
                       def pack_qwen(model):
                           return [
@@ -174,6 +307,22 @@ def slice(model, strategy="uniform", n=2, executor=None, pack=None) -> SlicedMod
                           ]
 
                       sliced = ts.slice(model, n=4, pack=pack_qwen)
+        cuts:     Named cuts: cut right after each listed node, e.g.
+                  ``cuts=["layer2", "layer3.1"]``. Overrides ``strategy``.
+                  Node names come from ``ts.trace(model).summary()``; a dotted
+                  module name traces into its parent so you can cut inside it.
+                  With ``pack=``, use stage indices.
+        expand:   Submodules to trace through so their children become nodes
+                  (finer cut granularity), e.g. ``["layer1", "layer2"]``, or
+                  ``"all"``. Not allowed with ``pack=``.
+        example_input: An input batch, for strategies that measure the model
+                  (``"flops"``, ``"profiled"``). They run on a copy, so the
+                  model's weights, buffers and RNG state are not changed.
+        cut_hooks: What crosses the cuts: a ``ts.CutHook`` (every cut), or
+                  ``{cut: hook}`` with cut ``k`` = between slice ``k`` and ``k+1``,
+                  e.g. ``{0: ts.Quantize(bits=8)}``. Built in: ``Float16``,
+                  ``BFloat16``, ``Quantize``, ``TopK``, ``GaussianNoise``,
+                  ``Recorder``, ``Chain``. See docs/tutorials/sl_settings.md.
 
     Serialization constraint
     ------------------------
@@ -183,20 +332,33 @@ def slice(model, strategy="uniform", n=2, executor=None, pack=None) -> SlicedMod
     (``BlockStage``, ``GPT2EmbedStage``, ``CausalLMHeadStage``, etc.) and
     standard PyTorch (``nn.Sequential``) which are always available.
     For custom stage classes, either install them as a package on all
-    workers or expose them via ``PYTHONPATH``.
+    workers or expose them via ``PYTHONPATH``. The same holds for functions
+    the traced ``forward`` calls that ``torch.fx`` records by reference.
     """
-    if pack is not None:
-        stages = pack(model)
-        graph = ModelGraph.from_stages(stages)
+    if cuts is not None:
+        splitter = NamedCutSplitter(cuts)
+        if n is not None and n != len(splitter.cuts) + 1:
+            raise ValueError(f"{len(splitter.cuts)} cuts make {len(splitter.cuts) + 1} partitions, not n={n}")
+        n = len(splitter.cuts) + 1
+        strategy_name = "named"
     else:
-        graph = ModelGraph.from_module(model)
-    splitter = _get_strategy(strategy)
+        splitter = _get_strategy(strategy)
+        strategy_name = strategy if isinstance(strategy, str) else type(splitter).__name__
+    n = 2 if n is None else n
+    if example_input is not None and hasattr(splitter, "example_input"):
+        splitter.example_input = example_input
+
+    if pack is not None:
+        graph = trace(model, expand=expand, pack=pack)
+    else:
+        graph = trace(model, expand=_merge_expand(expand, splitter.expand_for(model)))
     partitions = splitter.split(graph, n)
     splitter.validate(graph, partitions)
-    strategy_name = strategy if isinstance(strategy, str) else type(strategy).__name__
     return SlicedModel(
         graph, partitions,
         executor or LocalExecutor(),
         model_name=type(model).__name__,
         strategy_name=strategy_name,
+        splitter=splitter,
+        cut_hooks=cut_hooks,
     )

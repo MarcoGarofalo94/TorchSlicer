@@ -31,6 +31,9 @@ message NodeInfo {
     string          device    = 3;  // "cpu", "cuda:0", etc.
     uint64          memory_mb = 4;  // available memory in MB
     repeated string tags      = 5;  // user-defined labels, e.g. ["gpu", "high-memory"]
+    double          compute_gflops = 6;  // measured (or declared) matmul GFLOP/s; 0 = unknown
+    uint64          max_memory_mb  = 7;  // declared cap for this worker's slice; 0 = none
+    bool            first_slice    = 8;  // must hold slice 0 (e.g. the data owner)
 }
 
 message RegisterRequest {

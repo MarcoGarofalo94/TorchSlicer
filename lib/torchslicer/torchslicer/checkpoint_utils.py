@@ -17,10 +17,19 @@ from .core.split_layer import SplitLayer
 _CHECKPOINT_RE = re.compile(r"worker_(\d+)_epoch_(\d+)\.pt$")
 
 
-def _build_layers(model, pack: Callable | None = None) -> list:
+def _build_layers(model, pack: Callable | None = None, expand=None) -> list:
     if pack is not None:
         return list(pack(model))
-    return ModelGraph.from_module(model).get_layers()
+    return ModelGraph.from_module(model, expand=expand).get_layers()
+
+
+def _recorded_expand(run_dir: str):
+    """``expand`` used to build the graph of the run, from its manifest (None if absent)."""
+    path = os.path.join(run_dir, "run_manifest.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle).get("model", {}).get("expand") or None
 
 
 def _checkpoint_files(run_dir: str) -> dict[int, set[int]]:
@@ -99,12 +108,15 @@ def restore_model_from_run(
     *,
     epoch: int | None = None,
     pack: Callable | None = None,
+    expand=None,
     strict: bool = True,
 ):
     """Load worker slice checkpoints from ``run_dir`` back into ``model``.
 
     ``model`` must be a fresh instance of the original training architecture.
     When the run used ``pack(model)``, pass the same ``pack`` callable here.
+    ``expand`` defaults to the one recorded in the run manifest (named cuts and
+    ``expand=`` change the layer graph).
     The function restores parameters in place and returns ``model``.
     """
     resolved_epoch = resolve_checkpoint_epoch(run_dir, epoch)
@@ -113,7 +125,9 @@ def restore_model_from_run(
     if layout is None:
         raise ValueError(f"no layer layout metadata found for epoch {resolved_epoch}")
 
-    layers = _build_layers(model, pack=pack)
+    if expand is None and pack is None:
+        expand = _recorded_expand(run_dir)
+    layers = _build_layers(model, pack=pack, expand=expand)
 
     for part in sorted(layout, key=lambda item: int(item["worker_index"])):
         worker_index = int(part["worker_index"])
