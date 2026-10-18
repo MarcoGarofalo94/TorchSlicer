@@ -537,8 +537,15 @@ Last updated 2026-10-18, M11 done (version 0.11.0); next M12. NCCL unvalidated o
     security on a real network. The `weights_only=False` RCE on worker `init` is a known open
     risk; document it and accept it until then.
   - **Next: M12 (privacy: attacks, defences, leakage metrics).** Create with
-    `git switch -c feat/m12-privacy feat/m11-data-scale`. See the M12 entry above. M11 is done
-    (version 0.11.0, see Status).
+    `git switch -c feat/m12-privacy fix/post-m11` (M11 + the post-M11 fixes, issues 30–31).
+    See the M12 entry above. M11 is done (version 0.11.0, see Status).
+  - **`main` is up to date** (2026-10-18): M1–M11 + `fix/post-m11` merged via PRs #3 and #4,
+    without `notes/` (see `notes/README.md` and `notes/merge_to_main.sh`). CI: `tests.yml`
+    (CPU, py3.10–3.12, on PRs and main) and `gpu-tests.yml` (self-hosted runner
+    `torchslicer-a100` in this container: push to main, nightly 03:00 UTC with the CUDA matrix,
+    manual; never PRs; under `.github/ci/memguard.py`). Fork PR workflows need approval
+    (`all_external_contributors`). **After a container restart, the runner is down:**
+    `bash ~/actions-runner/start_gpu_runner.sh` (also `stop`, `remove`). First GPU run: green.
     **This container has 16 GB RAM and may be shut down if it exceeds it:** estimate every
     scaling run first and use the watchdog in `benchmarks/clients/bench_clients.py`.
     Open item from M9: run `MATRIX_NCCL=1 MATRIX_DEVICE=cuda run_matrix.py` and the NCCL
