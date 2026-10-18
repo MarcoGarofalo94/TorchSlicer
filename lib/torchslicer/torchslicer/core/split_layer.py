@@ -7,6 +7,15 @@ import torch.nn as nn
 from typing import Union
 
 
+def _is_inplace(module: nn.Module) -> bool:
+    """``nn.ReLU(inplace=True)`` and friends, or a wrapped in-place op such as ``x.relu_()``."""
+    if getattr(module, "inplace", False) is True:
+        return True
+    target = getattr(module, "target", None) if type(module).__name__ == "_FunctionWrapper" else None
+    name = target if isinstance(target, str) else getattr(target, "__name__", "")
+    return name.endswith("_") and not name.endswith("__")
+
+
 class SplitLayer(nn.Module):
     """
     Wraps a contiguous partition of layers.  Owns forward, backward, and
@@ -22,7 +31,8 @@ class SplitLayer(nn.Module):
     predecessors : list[list[int]] or None
         Intra-partition DAG info.  predecessors[i] is a list of
         partition-local indices of layers whose outputs feed into layers[i].
-        Empty list → layers[i] takes the partition's external input.
+        Empty list → layers[i] takes the partition's external input; in a
+        multi-input list, -1 stands for that external input.
         None (default) → purely sequential (equivalent to [[],[1],[2],...]).
     """
 
@@ -42,11 +52,22 @@ class SplitLayer(nn.Module):
         # bfloat16 does not require a GradScaler — recommended over float16.
         self._mixed_precision = mixed_precision
         self._amp_device = "cuda" if torch.cuda.is_available() else "cpu"
+        # The cut-point input is a leaf that requires grad; an in-place op on it is an
+        # autograd error, so layers reading it in place get a copy instead.
+        if predecessors is None or all(len(p) == 0 for p in predecessors):
+            takes_x = [0] if layers else []        # sequential fast path
+        else:
+            takes_x = [i for i, p in enumerate(predecessors) if not p or -1 in p]
+        self._clone_input = any(_is_inplace(layers[i]) for i in takes_x)
         self.x = None
         self.optimizer = None
+        self._optimizer_set = False
 
-    def set_optimizer(self, optimizer: torch.optim.Optimizer):
+    def set_optimizer(self, optimizer: "torch.optim.Optimizer | None"):
+        """``None`` = this slice has nothing to optimize (no parameters, or only tied
+        parameters owned by another slice)."""
         self.optimizer = optimizer
+        self._optimizer_set = True
 
     # ── forward ───────────────────────────────────────────────────────────────
 
@@ -65,7 +86,7 @@ class SplitLayer(nn.Module):
         # Wrap external input so we can retrieve its gradient at the cut point
         if input.is_floating_point():
             self.x = input.detach().requires_grad_(True)
-            x_in = self.x
+            x_in = self.x.clone() if self._clone_input else self.x
         else:
             # Integer input (e.g. token ids) — grad hooks on input not needed
             self.x = None
@@ -100,8 +121,9 @@ class SplitLayer(nn.Module):
                 elif len(local_preds) == 1:
                     inp = outputs[local_preds[0]]
                 else:
-                    # Multi-input layer (e.g. _AddWrapper for skip connections)
-                    layer_inputs = [outputs[p] for p in local_preds]
+                    # Multi-input layer (e.g. _AddWrapper for skip connections);
+                    # -1 = this partition's external input
+                    layer_inputs = [outputs[p] if p >= 0 else x_in for p in local_preds]
                     outputs[i] = layer(*layer_inputs)
                     continue
                 outputs[i] = layer(inp)
@@ -139,8 +161,9 @@ class SplitLayer(nn.Module):
     # ── optimize ──────────────────────────────────────────────────────────────
 
     def optimize(self, dry_run: bool = False):
-        assert self.optimizer is not None, "Call set_optimizer() before optimize()"
-        if not dry_run:
-            self.optimizer.step()
-        self.optimizer.zero_grad()
+        assert self._optimizer_set, "Call set_optimizer() before optimize()"
+        if self.optimizer is not None:
+            if not dry_run:
+                self.optimizer.step()
+            self.optimizer.zero_grad()
         self.x = None  # release cut-point tensor; prevents CUDA allocator growth

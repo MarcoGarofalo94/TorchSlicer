@@ -1,0 +1,21 @@
+# examples/run_anywhere/train.py as a P2P driver + 2 followers (3 slices).
+# Same training in every run_anywhere_*.yaml, on every target: the losses must match
+# (tests/test_deploy.py). Launch: python -m torchslicer launch <script> -c <this> -t <target>.
+run_id: run_anywhere_p2p
+
+training:
+  epochs: 2
+  optimizer: {name: SGD, params: {lr: 0.05, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+
+discovery:
+  n_workers: 3          # slices (the driver holds slice 0)
+
+logging:
+  enabled: false
+
+deploy:
+  topology: p2p
+
+network:
+  device: cpu          # every node; "auto" = cuda when present

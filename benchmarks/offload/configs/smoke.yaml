@@ -1,0 +1,11 @@
+# Smoke test: tiny model, every mode, a few steps.
+seed: 0
+model: {vocab: 1000, seq: 64, d_model: 128, n_heads: 4, d_ff: 512, n_layers: 4, dropout: 0.0}
+batch: 4
+steps: 4
+warmup: 1
+tf32: false
+gpu_cap_gb: 0
+optimizer: {name: AdamW, params: {lr: 1.0e-3, weight_decay: 0.01, fused: true}}
+offload: {n_slices: 4, slots: 2, n_micro: 1, dir: ""}
+modes: [reference, offload-gpu, offload-cpu, offload-disk, fsdp2-offload, fsdp2-offload-ckpt]

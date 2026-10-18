@@ -1,0 +1,18 @@
+# benchmarks/nat/bench_nat.py: U-shaped P2P, driver + 1 follower, CPU.
+run_id: bench_nat
+training:
+  epochs: 3
+  optimizer: {name: SGD, params: {lr: 0.01, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+discovery:
+  n_workers: 3
+logging:
+  enabled: false
+deploy:
+  topology: p2p
+network:
+  device: cpu
+planning:
+  heterogeneous: false
+sl:
+  setting: u_shaped

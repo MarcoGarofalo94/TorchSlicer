@@ -1,0 +1,223 @@
+{
+ "config": {
+  "seed": 0,
+  "model": {
+   "vocab": 32000,
+   "seq": 512,
+   "d_model": 1536,
+   "n_heads": 16,
+   "d_ff": 6144,
+   "n_layers": 20,
+   "dropout": 0.0
+  },
+  "batch": 8,
+  "steps": 6,
+  "warmup": 2,
+  "tf32": true,
+  "gpu_cap_gb": 6,
+  "optimizer": {
+   "name": "AdamW",
+   "params": {
+    "lr": 0.0001,
+    "weight_decay": 0.01,
+    "fused": true
+   }
+  },
+  "offload": {
+   "n_slices": 22,
+   "slots": 2,
+   "n_micro": 1,
+   "dir": ""
+  },
+  "modes": [
+   "reference",
+   "reference-cap",
+   "offload-gpu",
+   "offload-cpu",
+   "offload-disk",
+   "fsdp2-offload",
+   "fsdp2-offload-ckpt"
+  ]
+ },
+ "n_params": 665755904,
+ "modes": {
+  "reference": {
+   "mode": "reference",
+   "ok": true,
+   "step_s": 0.607,
+   "step_s_all": [
+    0.749,
+    0.608,
+    0.608,
+    0.607,
+    0.607,
+    0.607
+   ],
+   "samples_per_s": 13.17,
+   "tokens_per_s": 6743.0,
+   "peak_mb": 15453.6,
+   "losses": [
+    10.522512435913086,
+    10.547269821166992,
+    10.553954124450684,
+    10.535321235656738,
+    10.54658317565918,
+    10.55677604675293
+   ],
+   "wall_s": 10.3
+  },
+  "reference-cap": {
+   "mode": "reference-cap",
+   "ok": false,
+   "error": "OOM",
+   "detail": "NVML_SUCCESS == r INTERNAL ASSERT FAILED at \"/pytorch/c10/cuda/CUDACachingAllocator.cpp\":1165, please report a bug to PyTorch. ",
+   "wall_s": 6.7
+  },
+  "offload-gpu": {
+   "mode": "offload-gpu",
+   "ok": true,
+   "step_s": 0.84,
+   "step_s_all": [
+    4.934,
+    0.852,
+    0.84,
+    0.84,
+    0.839,
+    0.84
+   ],
+   "samples_per_s": 9.53,
+   "tokens_per_s": 4877.9,
+   "peak_mb": 4045.4,
+   "offload_h2d_bytes": 10028940288,
+   "offload_d2h_bytes": 7989070848,
+   "offload_transfer_bound_s": 0.477,
+   "offload_bound_fraction": 0.568,
+   "offload_home_mb": 7619.0,
+   "offload_slots_mb": 1524.0,
+   "offload_optimizer": "gpu",
+   "offload_h2d_gbps": 26.67,
+   "offload_d2h_gbps": 25.66,
+   "compute_s": 0.766,
+   "bound_fraction_median": 0.568,
+   "placement_info": {},
+   "losses": [
+    10.522511,
+    10.54727,
+    10.553955,
+    10.535317,
+    10.546583,
+    10.556805
+   ],
+   "n_slices": 22,
+   "wall_s": 23.6
+  },
+  "offload-cpu": {
+   "mode": "offload-cpu",
+   "ok": true,
+   "step_s": 2.4,
+   "step_s_all": [
+    1.215,
+    3.999,
+    2.301,
+    2.399,
+    2.4,
+    2.4
+   ],
+   "samples_per_s": 3.33,
+   "tokens_per_s": 1707.0,
+   "peak_mb": 3285.3,
+   "offload_h2d_bytes": 5015972864,
+   "offload_d2h_bytes": 2663023616,
+   "offload_transfer_bound_s": 0.203,
+   "offload_bound_fraction": 0.085,
+   "offload_home_mb": 5079.3,
+   "offload_slots_mb": 762.0,
+   "offload_optimizer": "cpu",
+   "offload_h2d_gbps": 26.68,
+   "offload_d2h_gbps": 25.68,
+   "compute_s": 0.741,
+   "bound_fraction_median": 0.085,
+   "placement_info": {},
+   "losses": [
+    10.522512,
+    10.547264,
+    10.553978,
+    10.535293,
+    10.546562,
+    10.556789
+   ],
+   "n_slices": 22,
+   "wall_s": 33.1
+  },
+  "offload-disk": {
+   "mode": "offload-disk",
+   "ok": true,
+   "step_s": 3.918,
+   "step_s_all": [
+    5.136,
+    3.732,
+    3.895,
+    3.941,
+    3.938,
+    3.898
+   ],
+   "samples_per_s": 2.04,
+   "tokens_per_s": 1045.4,
+   "peak_mb": 4045.4,
+   "offload_h2d_bytes": 10028940288,
+   "offload_d2h_bytes": 7989116928,
+   "offload_transfer_bound_s": 0.476,
+   "offload_bound_fraction": 0.122,
+   "offload_home_mb": 7619.0,
+   "offload_slots_mb": 1524.0,
+   "offload_optimizer": "gpu",
+   "offload_h2d_gbps": 26.68,
+   "offload_d2h_gbps": 25.66,
+   "compute_s": 0.759,
+   "bound_fraction_median": 0.121,
+   "placement_info": {},
+   "losses": [
+    10.522512,
+    10.547269,
+    10.553946,
+    10.535295,
+    10.546566,
+    10.556818
+   ],
+   "n_slices": 22,
+   "wall_s": 38.2
+  },
+  "fsdp2-offload": {
+   "mode": "fsdp2-offload",
+   "ok": false,
+   "error": "OOM",
+   "detail": "NVML_SUCCESS == r INTERNAL ASSERT FAILED at \"/pytorch/c10/cuda/CUDACachingAllocator.cpp\":1165, please report a bug to PyTorch. ",
+   "wall_s": 17.8
+  },
+  "fsdp2-offload-ckpt": {
+   "mode": "fsdp2-offload-ckpt",
+   "ok": true,
+   "step_s": 5.097,
+   "step_s_all": [
+    9.785,
+    4.41,
+    5.998,
+    3.695,
+    4.196,
+    6.109
+   ],
+   "samples_per_s": 1.57,
+   "tokens_per_s": 803.6,
+   "peak_mb": 2048.1,
+   "losses": [
+    10.522512435913086,
+    10.547269821166992,
+    10.553961753845215,
+    10.535320281982422,
+    10.546551704406738,
+    10.55677604675293
+   ],
+   "wall_s": 53.6
+  }
+ }
+}

@@ -116,12 +116,17 @@ class RunLogger:
             },
         }
 
-    def record_model(self, model_name: str, layer_names: List[str]) -> None:
+    def record_model(self, model_name: str, layer_names: List[str],
+                     node_names: List[str] | None = None, expand=None) -> None:
         self._manifest["model"] = {
             "class":        model_name,
             "total_layers": len(layer_names),
             "layer_types":  layer_names,
         }
+        if node_names is not None:
+            self._manifest["model"]["node_names"] = list(node_names)
+        if expand:
+            self._manifest["model"]["expand"] = expand
 
     def record_split(self, partitions, layer_names: List[str],
                      strategy_name: str = "unknown") -> None:
@@ -151,6 +156,10 @@ class RunLogger:
                 "address":        nd.address,
                 "device":         nd.device,
                 "memory_mb_free": nd.memory_mb,
+                **{k: getattr(nd, k) for k in (
+                    "compute_gflops", "max_memory_mb", "first_slice", "rtt_ms",
+                    "bandwidth_mbps", "link_rtt_ms", "link_bandwidth_mbps")
+                   if getattr(nd, k, None)},
             }
             for i, nd in enumerate(nodes)
         ]

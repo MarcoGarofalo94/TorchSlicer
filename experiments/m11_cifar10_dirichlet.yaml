@@ -1,0 +1,24 @@
+# M11: CIFAR-10, 10 clients with Dirichlet(0.5) label skew, SplitFed V2 (parallel clients,
+# FedAvg of the client slices every round). Smoke-test size; drop the subsets for a full run.
+training:
+  epochs: 2
+  optimizer: {name: SGD, params: {lr: 0.05, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+discovery: {n_workers: 2}
+network: {device: auto}
+logging: {enabled: true}
+data:
+  dataset: cifar10
+  root: data
+  partition: dirichlet
+  partition_params: {alpha: 0.5}
+  batch_size: 32
+  seed: 0
+  train_subset: 5000
+  test_subset: 1000
+  eval_every: 1
+sl:
+  setting: vanilla
+  clients: 10
+  client_mode: parallel
+  algorithm: splitfed

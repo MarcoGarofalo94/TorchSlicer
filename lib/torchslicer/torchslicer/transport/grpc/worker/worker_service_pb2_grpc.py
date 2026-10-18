@@ -69,6 +69,31 @@ class WorkerServiceStub(object):
                 request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.SerializeToString,
                 response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
                 _registered_method=True)
+        self.tied_grad = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/tied_grad',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+                _registered_method=True)
+        self.tied_update = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/tied_update',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+                _registered_method=True)
+        self.describe = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/describe',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.DescribeRequest.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.NodeDescription.FromString,
+                _registered_method=True)
+        self.echo = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/echo',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.EchoRequest.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.EchoReply.FromString,
+                _registered_method=True)
+        self.probe_link = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/probe_link',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.LinkProbeRequest.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.LinkProbeReply.FromString,
+                _registered_method=True)
 
 
 class WorkerServiceServicer(object):
@@ -111,6 +136,41 @@ class WorkerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def tied_grad(self, request, context):
+        """replica → owner: gradient of a tied parameter
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def tied_update(self, request, context):
+        """owner → replica: value after the optimizer step
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def describe(self, request, context):
+        """capabilities, for planning
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def echo(self, request, context):
+        """network probe target
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def probe_link(self, request, context):
+        """measure this worker → target
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -143,6 +203,31 @@ def add_WorkerServiceServicer_to_server(servicer, server):
                     servicer.save_checkpoint,
                     request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.FromString,
                     response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
+            ),
+            'tied_grad': grpc.unary_unary_rpc_method_handler(
+                    servicer.tied_grad,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
+            ),
+            'tied_update': grpc.unary_unary_rpc_method_handler(
+                    servicer.tied_update,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
+            ),
+            'describe': grpc.unary_unary_rpc_method_handler(
+                    servicer.describe,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.DescribeRequest.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.NodeDescription.SerializeToString,
+            ),
+            'echo': grpc.unary_unary_rpc_method_handler(
+                    servicer.echo,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.EchoRequest.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.EchoReply.SerializeToString,
+            ),
+            'probe_link': grpc.unary_unary_rpc_method_handler(
+                    servicer.probe_link,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.LinkProbeRequest.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.LinkProbeReply.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -307,6 +392,225 @@ class WorkerService(object):
             '/torchslicer.worker.WorkerService/save_checkpoint',
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ShutdownRequest.SerializeToString,
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def tied_grad(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/tied_grad',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def tied_update(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/tied_update',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TiedTensor.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def describe(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/describe',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.DescribeRequest.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.NodeDescription.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def echo(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/echo',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.EchoRequest.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.EchoReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def probe_link(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/probe_link',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.LinkProbeRequest.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.LinkProbeReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+class TunnelServiceStub(object):
+    """NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
+    opens this stream to a node that does (a peer or a relay); afterwards the callee
+    sends its calls to the NAT'd node down the stream instead of dialing it. Every
+    TorchSlicer gRPC server (worker, coordinator, tail slice, relay) serves it.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.open = channel.stream_stream(
+                '/torchslicer.worker.TunnelService/open',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.FromString,
+                _registered_method=True)
+
+
+class TunnelServiceServicer(object):
+    """NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
+    opens this stream to a node that does (a peer or a relay); afterwards the callee
+    sends its calls to the NAT'd node down the stream instead of dialing it. Every
+    TorchSlicer gRPC server (worker, coordinator, tail slice, relay) serves it.
+    """
+
+    def open(self, request_iterator, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_TunnelServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'open': grpc.stream_stream_rpc_method_handler(
+                    servicer.open,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'torchslicer.worker.TunnelService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('torchslicer.worker.TunnelService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class TunnelService(object):
+    """NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
+    opens this stream to a node that does (a peer or a relay); afterwards the callee
+    sends its calls to the NAT'd node down the stream instead of dialing it. Every
+    TorchSlicer gRPC server (worker, coordinator, tail slice, relay) serves it.
+    """
+
+    @staticmethod
+    def open(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_stream(
+            request_iterator,
+            target,
+            '/torchslicer.worker.TunnelService/open',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.TunnelFrame.FromString,
             options,
             channel_credentials,
             insecure,

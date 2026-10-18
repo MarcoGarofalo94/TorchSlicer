@@ -1,0 +1,32 @@
+# U-shaped split learning with the data owner behind NAT (M6, docs/tutorials/nat.md).
+# The driver hosts the client front (slice 0) and tail (the last slice) and opens no
+# port: it dials the follower, and the gradient for slice 0, the activation for the
+# tail and the losses come back over that connection.
+# Run: EXPERIMENT_CONFIG=experiments/nat_u_shaped_p2p.yaml python examples/run_anywhere/train.py
+#      python -m torchslicer launch examples/run_anywhere/train.py -c experiments/nat_u_shaped_p2p.yaml -t processes
+# Everything through a relay (every node behind NAT): add TRANSPORT_RELAY=auto.
+run_id: nat_u_shaped_p2p
+
+training:
+  epochs: 2
+  optimizer: {name: SGD, params: {lr: 0.05, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+
+discovery:
+  n_workers: 3          # slices: the driver hosts 2 of them (u_shaped), 1 follower
+
+logging:
+  enabled: false
+
+deploy:
+  topology: p2p
+
+network:
+  device: cpu
+
+sl:
+  setting: u_shaped
+
+transport:
+  nat: true             # the driver (data owner) is behind NAT
+  # relay: auto         # every node behind NAT: the launcher adds a relay node

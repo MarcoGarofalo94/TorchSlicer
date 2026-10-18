@@ -3,16 +3,30 @@ from .base import BaseSplitter, Partition
 
 
 class UniformSplitter(BaseSplitter):
+    """Equal layer *count* per partition (``ceil(len / n)`` each), ignoring layer cost.
+
+    When ``ceil`` sizes would run out of layers before ``n`` partitions (4 layers, n=3:
+    2 + 2), the remainder is spread instead (2 + 1 + 1), so asking for ``n`` gives ``n``.
+    """
+
     def split(self, model_graph, n_partitions: int) -> list:
         n_layers = len(model_graph)
+        if n_partitions > n_layers:
+            raise ValueError(f"can't make {n_partitions} partitions from {n_layers} layers")
         size = math.ceil(n_layers / n_partitions)
+        if (n_layers - 1) // size + 1 < n_partitions:
+            k, r = divmod(n_layers, n_partitions)
+            sizes = [k + (1 if i < r else 0) for i in range(n_partitions)]
+        else:
+            sizes = [size] * n_partitions
         partitions = []
+        start = 0
         for i in range(n_partitions):
-            start = i * size
             if start >= n_layers:
                 break
-            end = min(start + size, n_layers)
+            end = min(start + sizes[i], n_layers)
             layer_indices = list(range(start, end))
+            start = end
             predecessors = self._intra_predecessors(model_graph, layer_indices)
             partitions.append(Partition(
                 index=i,
@@ -20,34 +34,3 @@ class UniformSplitter(BaseSplitter):
                 predecessors=predecessors,
             ))
         return partitions
-
-    @staticmethod
-    def _intra_predecessors(model_graph, layer_indices: list) -> list:
-        """
-        For each layer in the partition, compute which other layers *within the
-        same partition* feed into it.
-
-        Returns list[list[int]] where result[i] is a list of partition-local
-        indices of predecessors.  Empty list = takes the partition's external
-        input (from data loader or the previous partition's output).
-        """
-        if not model_graph.nodes:
-            return [[] for _ in layer_indices]
-
-        index_set = set(layer_indices)
-        global_to_local = {g: l for l, g in enumerate(layer_indices)}
-        result = []
-
-        for global_idx in layer_indices:
-            if global_idx >= len(model_graph.nodes):
-                result.append([])
-                continue
-            node = model_graph.nodes[global_idx]
-            local_preds = [
-                global_to_local[p]
-                for p in node.predecessors
-                if p in index_set
-            ]
-            result.append(local_preds)
-
-        return result

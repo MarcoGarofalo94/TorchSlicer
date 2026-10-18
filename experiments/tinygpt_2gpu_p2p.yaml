@@ -1,6 +1,8 @@
 # TinyGPT / byte-level LM — 2-worker P2P GPU run
-# Usage:
-#   make run-lm-gpu CONFIG=experiments/tinygpt_2gpu_p2p.yaml
+# Usage (Docker, one service per node; see docs/deploy/compose.md):
+#   python -m torchslicer launch examples/train/lm/worker/main.py \
+#       -c experiments/tinygpt_2gpu_p2p.yaml --target compose
+#   docker compose -f runs/deploy/tinygpt-compose/docker-compose.yml up --exit-code-from driver
 
 run_id: tinygpt_2gpu_p2p
 
@@ -40,3 +42,9 @@ checkpoint:
   dir: ./checkpoints
   save_every: epoch
   resume: null
+
+deploy:
+  topology: p2p
+  name: tinygpt
+  image: torchslicer:gpu
+  gpus: 1

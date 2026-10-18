@@ -1,0 +1,27 @@
+# Four clients sharing one server, SplitFed-style, simulated in one process: each client
+# has its own copy of the client front (conv1) and trains in turn, batch by batch; at the
+# end of every round the clients' fronts are averaged (examples/sl/train.py: fedavg).
+# Run: EXPERIMENT_CONFIG=experiments/sl_splitfed_local.yaml python examples/sl/train.py
+run_id: sl_splitfed_local
+
+training:
+  epochs: 2
+  optimizer: {name: SGD, params: {lr: 0.05, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+
+discovery:
+  n_workers: 3
+
+logging:
+  enabled: false
+
+deploy:
+  topology: local
+
+network:
+  device: cpu
+
+sl:
+  setting: vanilla
+  clients: 4
+  client_mode: parallel       # sequential = SplitNN with client-to-client weight handoff
