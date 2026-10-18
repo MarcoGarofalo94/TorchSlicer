@@ -188,12 +188,12 @@ def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwar
     from ..executors.worker import start_worker
 
     cfg = copy.deepcopy(cfg)
-    tcp = cfg.transport.tensor.strip().lower() == "tcp"
-    offset = int(cfg.transport.tensor_port_offset)
+    serves = cfg.transport.listen_offsets()               # a worker (and the tail slice)
+    drives = cfg.transport.listen_offsets(drives=True)    # the coordinator / driver
     n_workers = n - hosted_slices(cfg, topology, n)
     if (cfg.sl.setting or "").strip().lower().replace("-", "_") in ("u_shaped", "ushaped") \
             and not cfg.sl.tail_port:
-        cfg.sl.tail_port = free_port(offset if tcp else 0)   # the data owner's last slice
+        cfg.sl.tail_port = free_port(serves)   # the data owner's last slice
     workers, relay = [], None
     # transport.nat stands for the data owner (the client) here: the workers stay
     # reachable. Any transport.relay is replaced by one on loopback.
@@ -205,16 +205,16 @@ def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwar
             relay = start_relay(host="127.0.0.1")
             cfg.transport.relay = worker_cfg.transport.relay = relay.address
         for _ in range(n_workers):
-            port = free_port(offset if tcp else 0)
+            port = free_port(serves)
             workers.append(start_worker(port, host="127.0.0.1", run_config=worker_cfg))
         peers = [w.address for w in workers]
         cfg.discovery.backend = "static"
         if topology == "centralized":
             cfg.discovery.peers = peers
-            cfg.network.coordinator_bind_address = f"127.0.0.1:{free_port()}"
+            cfg.network.coordinator_bind_address = f"127.0.0.1:{free_port(drives)}"
             cfg.network.coordinator_address = cfg.network.coordinator_bind_address
             return _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs)
-        port = free_port(offset if tcp else 0)
+        port = free_port(drives)
         cfg.network.worker_port = port
         cfg.network.worker_address = f"127.0.0.1:{port}"
         cfg.discovery.peers = [cfg.network.worker_address, *peers]
@@ -226,19 +226,24 @@ def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwar
             relay.stop()
 
 
-def free_port(offset: int = 0, host: str = "127.0.0.1") -> int:
-    """A free TCP port; with ``offset`` > 0, ``port + offset`` is free too (the TCP
-    tensor listener of a worker on ``port``)."""
-    for _ in range(100):
-        with socket.socket() as s:
-            s.bind((host, 0))
-            port = s.getsockname()[1]
-        if offset <= 0:
-            return port
+_PORT_RANGE = (20000, 32000)    # below Linux's ephemeral range (32768-60999)
+
+
+def free_port(offsets=(0,), host: str = "127.0.0.1") -> int:
+    """A port ``p`` with ``p + o`` free for every ``o`` in ``offsets`` (a node's gRPC port,
+    its tensor listener, the NCCL store: ``TransportConfig.listen_offsets``; an int ``k``
+    means ``(0, k)``). Drawn below the ephemeral range, so the outgoing connections the
+    OS opens meanwhile can't take it between this check and the bind."""
+    import random
+    offsets = (0, offsets) if isinstance(offsets, int) else tuple(offsets)
+    rng = random.SystemRandom()
+    for _ in range(200):
+        port = rng.randrange(_PORT_RANGE[0], _PORT_RANGE[1] - max(offsets))
         try:
-            with socket.socket() as s:
-                s.bind((host, port + offset))
+            for o in offsets:
+                with socket.socket() as s:
+                    s.bind((host, port + o))
             return port
         except OSError:
             continue
-    raise RuntimeError("no free port pair found")
+    raise RuntimeError(f"no free port with offsets {offsets} in {_PORT_RANGE}")

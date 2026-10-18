@@ -23,7 +23,7 @@ from ..monitor.process_logger import get_logger, configure as configure_process_
 from ..monitor.run_logger import RunLogger
 from ..monitor.callback import TrainingCallback
 from ..discovery.base import BaseDiscovery, NodeInfo
-from ..config import RunConfig, CheckpointConfig
+from ..config import NCCL_STORE_PORT_OFFSET, RunConfig, CheckpointConfig
 from ..retry import RetryPolicy
 from ..strategies.base import Partition
 from ..strategies.uniform import UniformSplitter
@@ -1198,7 +1198,7 @@ class DistributedExecutor(BaseExecutor):
             # TCPStore host_name must be a resolvable hostname, NOT a bind wildcard.
             # Use the advertised coordinator address so workers can reach it.
             coord_host = self.coordinator_addr.rsplit(":", 1)[0]
-            nccl_port = self._bind_port() + 10  # _NCCL_STORE_PORT_OFFSET
+            nccl_port = self._bind_port() + NCCL_STORE_PORT_OFFSET
             self._nccl_store = dist.TCPStore(
                 host_name=coord_host,
                 port=nccl_port,
@@ -1211,7 +1211,7 @@ class DistributedExecutor(BaseExecutor):
                       coord_host, nccl_port, world_size)
         except Exception as exc:
             raise RuntimeError(f"transport.tensor=nccl: the rendezvous store could not start "
-                               f"on port {self._bind_port() + 10}: {exc}") from exc
+                               f"on port {self._bind_port() + NCCL_STORE_PORT_OFFSET}: {exc}") from exc
 
     def _wait_nccl_ready(self, init_token: str, n: int, timeout_s: float = 120.0) -> None:
         """Wait until every slice reports its NCCL rendezvous (``WorkerServicer._init_nccl_group``);

@@ -211,6 +211,7 @@ class _Slot:
         self.staging = None           # disk mode: pinned, page-aligned, the size of the slot
         self.lane = None              # disk mode: I/O thread, FIFO per slot
         self.last = 0                 # use counter, for LRU eviction
+        self.fresh = False            # allocated, not yet copied into
 
 
 def _resolve(ev):
@@ -355,6 +356,7 @@ class SlicePager:
             if self.disk:
                 s.staging = self._host_aligned(nbytes + 2 * _PAGE)
             s.ready = s.free = s.out = None
+            s.fresh = True
 
     def _victim(self) -> _Slot:
         idle = [s for s in self.slots if not s.busy]
@@ -481,7 +483,11 @@ class SlicePager:
             pg.home_ready.result()             # its CPU step or disk write
             pg.home_ready = None
         todo = self._regions_in(pg, regions)
-        waits = (s.free, s.out, pg.home_ev)
+        # ``free``/``out`` order the copy after the slot's last users. A newly allocated
+        # slot has none, and its first copy raced with compute already queued (NaN losses
+        # under GPU load, every time), so that one copy also waits for the compute stream.
+        waits = (s.free, s.out, pg.home_ev, self._event() if s.fresh else None)
+        s.fresh = False
         if self.disk:
             s.ready = self._disk_read(pg, s, todo, waits)
         elif not self.cuda:
