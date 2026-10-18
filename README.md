@@ -119,7 +119,7 @@ python -m torchslicer launch train.py -c run.yaml --target k8s            # or c
 | **Algorithms** | `ts.Algorithm` (Flower-Strategy-style): vanilla SplitNN, SplitFed V1/V2, local loss, FedAvg, client sampling | [algorithm](docs/tutorials/algorithm.md) |
 | **Multiple clients** | `ts.ClientSession`: sequential or parallel clients against shared server slices | [sl_settings](docs/tutorials/sl_settings.md) |
 | **Data** | MNIST, Fashion-MNIST, CIFAR-10/100, synthetic, `.npz`; iid / Dirichlet / shards / quantity splits; test-set evaluation | [data](docs/tutorials/data.md) |
-| **Privacy** | label inference from gradients (norm / direction), learning-based input inversion, distance correlation; NoPeek and noise defences; `leak_*` metrics per epoch | [privacy](docs/tutorials/privacy.md) |
+| **Privacy** | label inference from gradients (norm / direction), learning-based input inversion, a malicious server (FSHA), architecture-only inversion (UnSplit), LLM hidden-state inversion, distance correlation; NoPeek, noise and clipped-noise defences with a DP accountant; `leak_*` metrics per epoch | [privacy](docs/tutorials/privacy.md) |
 | **Transport** | gRPC, raw TCP (pinned memory), CUDA IPC, NCCL | [transport](docs/tutorials/transport.md) |
 | **NAT traversal** | clients that only dial out, tunnels, optional relay | [nat](docs/tutorials/nat.md) |
 | **Fault tolerance** | heartbeats, worker error reports, re-planning for the survivors from the last checkpoint | below |
@@ -317,8 +317,10 @@ only. Example: [`examples/data/train.py`](examples/data/train.py) with
 
 `ts.privacy` attacks observe a cut from the side that receives it (after the cut hooks), and
 score themselves against the batch's true labels or inputs; defences add a term to the
-client's loss (NoPeek), or are cut hooks (noise, quantization, top-k). Observing never
-changes training: the losses are bit-identical with or without attacks.
+client's loss (NoPeek), or are cut hooks (noise, quantization, top-k, per-sample clipped
+noise). Observing never changes training: the losses are bit-identical with or without
+passive attacks. The one active attack, FSHA, is a malicious server that replaces the
+returned gradient on purpose.
 
 ```yaml
 privacy:
@@ -326,8 +328,13 @@ privacy:
     - {name: label_norm, cut: 0}         # leak_label_norm_auc (Li et al., ICLR 2022)
     - {name: inversion, cut: 0}          # leak_inversion_psnr / _ssim, aux = the test set
     - {name: dcor, cut: 0}               # distance correlation, inputs vs activations
+    - {name: unsplit, cut: 0}            # architecture-only inversion + model stealing
+    - {name: dp, cut: 0}                 # (epsilon, delta) of the clip_noise hook below
   defences:
     - {name: nopeek, cut: 0, params: {alpha: 1.0}}
+sl:
+  cut_hooks:
+    - {cut: 0, name: clip_noise, params: {clip: 0.01, noise_multiplier: 2.0, forward: false, grad: true}}
 ```
 
 The same from Python: `sliced.train(..., privacy=[ts.privacy.NormLabelAttack(), ts.privacy.NoPeek(alpha=1.0)])`.

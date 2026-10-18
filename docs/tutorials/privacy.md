@@ -16,9 +16,9 @@ the numbers land in every epoch's history next to `loss` and `test_accuracy`.
   leave the slices exactly as they were, so the losses are bit-identical with or without
   them.
 
-Privacy runs in the simulator: the local executor, and offload except for query-based
-attacks. The distributed executors refuse it, because a real remote observer has no
-ground truth to score against.
+Privacy runs in the simulator: the local executor, and offload except for attacks that
+query or copy the client slices. The distributed executors refuse it, because a real
+remote observer has no ground truth to score against.
 
 ## Built in
 
@@ -28,7 +28,21 @@ ground truth to score against.
 | `label_direction` | `DirectionLabelAttack(cut, positive=1)` | gradient | `auc`, `auc_q95`, `batches` |
 | `inversion` | `InversionAttack(cut, aux=, n_aux=512, steps=2, ...)` | activation | `psnr`, `ssim` |
 | `dcor` | `DistanceCorrelation(cut)` | activation | `value` |
+| `fsha` | `FSHA(cut, aux=, forge=True, ...)` | activation, forges the gradient | `mse`, `psnr`, `ssim` |
+| `unsplit` | `UnSplit(cut, n_invert=8, rounds=20, ...)` | activation | `mse`, `psnr`, `ssim`, `clone_mse` |
+| `embedding_recovery` | `EmbeddingRecovery(cut, steps=500, ...)` | hidden states (LLMs) | `token_acc`, `token_f1` |
+| `dp` | `DPAccountant(cut, delta=1e-5, direction=)` | the `ClipNoise` hook | `epsilon`, `mu`, `releases` |
 | `nopeek` (defence) | `NoPeek(cut, alpha)` | client loss | none (add `dcor` to measure it) |
+
+What each attack may use is part of its threat model, and the executor grants exactly that:
+
+| access | attacks | what the executor gives it |
+|---|---|---|
+| what crosses the cut | label attacks, `dcor`, `inversion`, `unsplit`, `embedding_recovery`, `fsha` | `observe(obs)`, `obs.tensor` |
+| black-box queries | `inversion` | `query(x)`: what the receiver would get for inputs `x` |
+| the client's architecture | `unsplit` | `client(fresh=True)`: a re-initialized copy of the client slices |
+| the client's weights (white-box) | `embedding_recovery` | `client()`: a frozen copy, gradients reach its input |
+| control of the returned gradient | `fsha` | `forge(obs)`: the gradient sent back instead |
 
 - **Label inference** follows Li et al., ICLR 2022 (https://arxiv.org/abs/2102.08504). The
   client scores each sample by its cut gradient's norm, or by its cosine with one
@@ -40,6 +54,19 @@ ground truth to score against.
   slices with them, trains a decoder from activations back to inputs while training runs,
   and decodes every activation it receives. PSNR and SSIM use the true batch's max - min
   as the data range.
+- **FSHA** (Pasquini et al., CCS 2021, https://arxiv.org/abs/2012.02670) is a *malicious*
+  server. With public data from the clients' domain it trains a pilot encoder and its
+  inverse, plus a critic between the pilot's feature space and the client's. It sends the
+  client the critic's gradient instead of the task's, which steers the client into the
+  pilot's feature space, and then decodes. This changes training on purpose; `forge=False`
+  runs the same networks honestly, as a control.
+- **UnSplit** (Erdogan et al., WPES 2022, https://arxiv.org/abs/2108.09033) knows only the
+  client's architecture. It alternates gradient steps on a guessed input (MSE to the
+  activation + total variation) and on a clone of the client, which it keeps (model
+  stealing, `clone_mse`).
+- **Embedding Recovery** (Dong et al., USENIX Security 2025, https://arxiv.org/abs/2507.16372)
+  inverts an LLM's hidden states with white-box client weights. It optimizes dummy input
+  embeddings to reproduce them, then takes each position's nearest vocabulary embedding.
 - **NoPeek** (https://arxiv.org/abs/2008.09161) trains the client slices on
   `task loss + alpha * dcor(x, z)`, the distance correlation between the raw inputs and
   the cut activation. The client adds that term's gradient to the one the server returns.
@@ -86,6 +113,54 @@ The reported `loss` is the task loss in both runs, so the two losses show the de
 accuracy cost. Distance correlation depends on the batch size, so compare runs with equal
 batch sizes. Under GPipe it is computed per micro-batch.
 
+## A malicious server, and attacks that know the client
+
+```python
+g = torch.Generator().manual_seed(0)
+low = torch.randn(256, 1, 4, 4, generator=g)
+imgs = nn.functional.interpolate(low, size=(8, 8), mode="bilinear", align_corners=False)
+images = [(imgs[i:i + 32], (low[i:i + 32].mean((1, 2, 3)) > 0).long()) for i in range(0, 256, 32)]
+public = nn.functional.interpolate(torch.randn(128, 1, 4, 4, generator=g), size=(8, 8), mode="bilinear")
+
+def train_cnn(privacy):
+    torch.manual_seed(0)
+    cnn = nn.Sequential(nn.Conv2d(1, 4, 3, padding=1), nn.ReLU(), nn.Flatten(), nn.Linear(4 * 64, 2))
+    return ts.slice(cnn, cuts=["1"]).train(images, {"name": "SGD", "params": {"lr": 0.1}},
+                                           {"name": "CrossEntropyLoss", "params": {}}, epochs=1,
+                                           privacy=privacy)
+
+h = train_cnn([ts.privacy.FSHA(aux=public), ts.privacy.UnSplit(every=4, rounds=5)])
+print(h[-1]["leak_fsha_psnr"], h[-1]["leak_unsplit_psnr"], h[-1]["leak_unsplit_clone_mse"])
+```
+
+`EmbeddingRecovery` needs token-id inputs `(N, T)` and hidden states `(N, T, H)` at the
+cut, e.g. a GPT-2 sliced with `pack=` (see the pack tutorial). It replaces the output of the
+client's token embedding (by default its largest `nn.Embedding`, or `embedding=` by name) with
+the embeddings it optimizes.
+
+## Differential privacy of what crosses a cut
+
+`ts.ClipNoise(clip=C, noise_multiplier=z)` clips each sample's row of the cut tensor to L2
+norm `C` and adds `N(0, (zC)^2)` noise, on the activation (`forward`) and/or the gradient
+(`grad`). That is the Gaussian mechanism per sample, and `DPAccountant` reports its
+`(epsilon, delta)` after each epoch. It uses Gaussian DP (Dong, Roth, Su,
+https://arxiv.org/abs/1905.02383), which is exact for this mechanism: `mu = 2/z` per release
+(replacing a sample moves its clipped row by at most `2C`), `mu * sqrt(k)` after `k` epochs.
+
+```python
+dp = train(hooks={0: ts.ClipNoise(clip=0.01, noise_multiplier=2.0, forward=False, grad=True)},
+           privacy=[ts.privacy.DPAccountant(delta=1e-5)])
+print([e["leak_dp_epsilon"] for e in dp], dp[-1]["leak_label_norm_auc"])
+assert abs(dp[-1]["leak_dp_epsilon"] - ts.privacy.gaussian_epsilon(2.0, 2, 1e-5)) < 1e-5   # 2 epochs
+```
+
+What the number covers: what each sample's *own* row tells the receiver (its label, through
+the returned gradient; its input, through the activation), assuming a sample appears at
+most once per epoch. What it doesn't cover: the sample's influence on other rows, through
+weights trained on it or through cross-sample layers (BatchNorm in training mode) on the
+sender's side. So it is not an end-to-end DP guarantee for the model. `GaussianNoise` adds
+absolute noise and has no such bound.
+
 ## From a config
 
 ```yaml
@@ -100,6 +175,10 @@ sl:
     - {cut: 0, name: gaussian_noise, params: {std: 0.1}}          # activation noise
 ```
 
+The step-4 attacks take the same form: `{name: fsha, cut: 0, params: {forge: true}}`,
+`{name: unsplit, ...}`, `{name: embedding_recovery, ...}`, and `{name: dp, cut: 0}` with a
+`clip_noise` cut hook.
+
 Two attacks with the same name on different cuts report as `leak_<name>_cut<k>_*`, and
 `key=` sets the name yourself.
 
@@ -109,6 +188,9 @@ Subclass `ts.privacy.Attack`, set `name` and `direction`, and implement `observe
 `metrics`. `ts.privacy.register_attack(name, cls)` makes it available to config files. An
 attack that needs to query the client sets `needs_query = True` and gets
 `self.query(x)`: black-box access to what the receiver would get for inputs `x`.
+`needs_client = True` gives `self.client(fresh=False)`, a frozen copy of the client slices
+(`fresh=True`: re-initialized). `forges = True` makes the executor call `forge(obs)` before
+each gradient at the cut is sent back, so the attack can return its own.
 
 ```python
 class MeanActivation(ts.privacy.Attack):

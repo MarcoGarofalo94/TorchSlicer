@@ -12,7 +12,7 @@ gradient that side backpropagates (NoPeek's distance-correlation loss). Defences
 change what crosses the cut are cut hooks (``GaussianNoise``, ``Quantize``, ``TopK``).
 
 Both are simulator features: they run on the local executor (and offload, except
-query-based attacks); the distributed executors refuse them.
+attacks that query or copy the client slices); the distributed executors refuse them.
 """
 
 from dataclasses import dataclass
@@ -35,13 +35,26 @@ class Attack:
 
     ``metrics()`` returns the epoch's numbers; the executor prefixes them with
     ``leak_<key>_`` (``key`` defaults to ``name``) and calls ``reset()`` at each epoch start.
-    An attack with ``needs_query = True`` gets ``bind(query)``: ``query(x)`` runs the client
-    slices up to the cut on attacker-chosen inputs (eval mode, no gradients, the hooks
-    applied) and returns what the receiver would get, i.e. black-box query access.
+    The executor grants more access on request:
+
+    - ``needs_query = True``: ``bind(query)``; ``query(x)`` runs the client slices up to
+      the cut on attacker-chosen inputs (eval mode, no gradients, the hooks applied) and
+      returns what the receiver would get, i.e. black-box query access.
+    - ``needs_client = True``: ``bind_client(client)``; ``client(fresh=False)`` returns a
+      copy of the client slices up to the cut as one module (eval mode, parameters frozen,
+      gradients flow to its input; cut hooks *not* applied). ``fresh=True`` re-initializes
+      its parameters: the architecture only (UnSplit). The copy never touches training.
+    - ``forges = True`` (a malicious server, FSHA): before the gradient at the cut is sent
+      back, ``forge(obs)`` may return the gradient to send instead (``obs.tensor`` = the
+      honest one; return the gradient of a per-(micro-)batch mean loss, the executor
+      applies the micro-batch scale) or ``None`` to send the honest one. Unlike the
+      others, this changes training, on purpose.
     """
     name = "attack"
     direction = "forward"
     needs_query = False
+    needs_client = False
+    forges = False
 
     def __init__(self, cut: int = 0, key: str | None = None):
         self.cut = int(cut)
@@ -49,6 +62,12 @@ class Attack:
 
     def bind(self, query) -> None:
         self.query = query
+
+    def bind_client(self, client) -> None:
+        self.client = client
+
+    def forge(self, obs: "Observation") -> "torch.Tensor | None":
+        return None
 
     def reset(self) -> None:
         pass

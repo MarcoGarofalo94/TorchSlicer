@@ -223,3 +223,200 @@ def test_offload_refuses_query_attacks_and_runs_label_attacks():
     off = ts.slice(_cnn(), cuts=["1"], executor=ts.OffloadExecutor(device="cpu")).train(
         data, SGD, CE, epochs=1, privacy=[NormLabelAttack()])
     assert off[0]["leak_label_norm_auc"] == pytest.approx(local[0]["leak_label_norm_auc"], abs=1e-6)
+
+
+# ── step 4: client copies, a malicious server, LLM inversion, DP accounting ─────
+
+class _Pool(nn.Module):
+    def forward(self, h):
+        return h.mean(1)
+
+
+def _tokens(n=128, vocab=50, length=8, batch=32, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    ids = torch.randint(vocab, (n, length), generator=g)
+    return [(ids[i:i + batch], (ids[i:i + batch, 0] % 2).long()) for i in range(0, n, batch)]
+
+
+def _tiny_lm(vocab=50):
+    torch.manual_seed(0)
+    return nn.Sequential(nn.Embedding(vocab, 16), nn.Linear(16, 16), nn.Tanh(), _Pool(), nn.Linear(16, 2))
+
+
+def test_client_copy_attacks_do_not_change_training():
+    from torchslicer.privacy import EmbeddingRecovery, UnSplit
+    data = _images()
+    base = ts.slice(_cnn(), cuts=["1"]).train(data, SGD, CE, epochs=2)
+    h = ts.slice(_cnn(), cuts=["1"]).train(data, SGD, CE, epochs=2,
+                                           privacy=[UnSplit(every=4, rounds=3, input_steps=5, model_steps=5)])
+    assert [e["loss"] for e in base] == [e["loss"] for e in h]
+    assert {"leak_unsplit_mse", "leak_unsplit_psnr", "leak_unsplit_clone_mse"} <= set(h[-1])
+    lm = _tokens()
+    base = ts.slice(_tiny_lm(), cuts=["1"]).train(lm, SGD, CE, epochs=1)
+    h = ts.slice(_tiny_lm(), cuts=["1"]).train(lm, SGD, CE, epochs=1,
+                                               privacy=[EmbeddingRecovery(steps=20, every=2)])
+    assert [e["loss"] for e in base] == [e["loss"] for e in h]
+
+
+def test_client_copy_is_frozen_and_fresh_reinitializes():
+    from torchslicer.privacy import Attack
+    copies = {}
+
+    class Grab(Attack):
+        name, needs_client = "grab", True
+
+        def observe(self, obs):
+            if not copies:
+                copies["live"], copies["fresh"] = self.client(), self.client(fresh=True)
+
+    sliced = ts.slice(_cnn(), cuts=["1"])
+    sliced.train(_images(), SGD, CE, epochs=1, privacy=[Grab()])
+    live, fresh = copies["live"], copies["fresh"]
+    assert not any(p.requires_grad for p in live.parameters()) and not live.training
+    x = torch.randn(2, 1, 8, 8, requires_grad=True)
+    live(x).sum().backward()                  # gradients reach the input through the copy
+    assert x.grad is not None
+    w_live = next(live.parameters())
+    assert not torch.equal(w_live, next(fresh.parameters()))
+
+
+def test_unsplit_reconstructs_better_than_its_start():
+    """Erdogan et al. 2022: coordinate descent on (x~, clone) reconstructs smooth images
+    from a shallow cut without data or queries (x~ starts at 0, so MSE < E[x^2])."""
+    from torchslicer.privacy import UnSplit
+    data = _images()
+    h = ts.slice(_cnn(), cuts=["1"]).train(data, SGD, CE, epochs=1,
+                                           privacy=[UnSplit(every=2, rounds=20, input_steps=10, model_steps=10,
+                                                            lr=0.01, tv=0.01)])
+    energy = torch.cat([x for x, _ in data]).pow(2).mean().item()
+    assert h[-1]["leak_unsplit_mse"] < 0.7 * energy
+
+
+def test_embedding_recovery_inverts_a_shallow_cut():
+    """Dong et al. 2025 (ER): white-box optimization of dummy embeddings recovers the tokens."""
+    from torchslicer.privacy import EmbeddingRecovery, token_f1
+    h = ts.slice(_tiny_lm(), cuts=["2"]).train(_tokens(), SGD, CE, epochs=1,
+                                               privacy=[EmbeddingRecovery(steps=300, lr=0.05, every=1)])
+    assert h[-1]["leak_embedding_recovery_token_acc"] > 0.95
+    assert token_f1(torch.tensor([[1, 2, 2]]), torch.tensor([[2, 1, 3]])) == pytest.approx(2 / 3)
+    with pytest.raises(ValueError, match="token ids"):
+        ts.slice(_cnn(), cuts=["1"]).train(_images(), SGD, CE, epochs=1, privacy=[EmbeddingRecovery()])
+
+
+@pytest.mark.parametrize("gpipe", [False, True])
+def test_forged_gradient_replaces_the_honest_one(gpipe):
+    """A forging attack's gradient is what the client backpropagates: zeros freeze the
+    client slice (plain SGD), the server still trains."""
+    from torchslicer.privacy import Attack
+
+    class Zero(Attack):
+        name, forges = "zero", True
+
+        def observe(self, obs):
+            pass
+
+        def forge(self, obs):
+            return torch.zeros_like(obs.tensor)
+
+    kw = {"use_gpipe": True, "n_micro_batches": 2} if gpipe else {}
+    model = _mlp()
+    before = [p.detach().clone() for p in model.parameters()]
+    sliced = ts.slice(model, cuts=["1"])
+    sliced.train(_binary_data(), SGD, CE, epochs=1, privacy=[Zero()], **kw)
+    after = [p.detach() for p in model.parameters()]     # the slices share the model's parameters
+    assert torch.equal(before[0], after[0]) and torch.equal(before[1], after[1])     # client: Linear(20, 32)
+    assert not torch.equal(before[-1], after[-1])                                     # server
+
+
+def test_fsha_hijacks_and_its_control_does_not():
+    from torchslicer.privacy import FSHA
+    data, aux = _images(), torch.cat([x for x, _ in _images(seed=1)])
+    base = ts.slice(_cnn(), cuts=["1"]).train(data, SGD, CE, epochs=1)
+    honest = ts.slice(_cnn(), cuts=["1"]).train(data, SGD, CE, epochs=1, privacy=[FSHA(aux=aux, forge=False)])
+    hijack = ts.slice(_cnn(), cuts=["1"]).train(data, SGD, CE, epochs=1, privacy=[FSHA(aux=aux)])
+    assert [e["loss"] for e in base] == [e["loss"] for e in honest]
+    assert [e["loss"] for e in base] != [e["loss"] for e in hijack]
+    assert {"leak_fsha_mse", "leak_fsha_psnr", "leak_fsha_ssim"} <= set(hijack[-1])
+
+
+def test_gdp_accountant_matches_numerical_integration():
+    """delta(eps) of mu-GDP = the hockey-stick divergence between N(mu, 1) and N(0, 1)."""
+    from torchslicer.privacy import gaussian_epsilon, gdp_delta, gdp_epsilon
+    x = torch.linspace(-30, 30, 600_001, dtype=torch.float64)
+    dx = (x[1] - x[0]).item()
+    pdf = lambda m: torch.exp(-(x - m) ** 2 / 2) / (2 * torch.pi) ** 0.5
+    for mu, eps in [(0.5, 0.1), (1.0, 1.0), (2.0, 3.0), (4.0, 8.0)]:
+        direct = ((pdf(mu) - torch.exp(torch.tensor(eps, dtype=torch.float64)) * pdf(0.0)).clamp_min(0).sum() * dx).item()
+        assert gdp_delta(mu, eps) == pytest.approx(direct, rel=1e-6, abs=1e-12)
+    eps = gdp_epsilon(1.0, 1e-5)
+    assert gdp_delta(1.0, eps) == pytest.approx(1e-5, rel=1e-6)
+    assert eps < (2 * torch.log(torch.tensor(1.25 / 1e-5))).sqrt().item()   # tighter than the classical bound
+    assert gaussian_epsilon(2.0, 4, 1e-5) == pytest.approx(gdp_epsilon(2.0, 1e-5))  # mu = 2/2 * sqrt(4)
+    assert gaussian_epsilon(1.0, 2, 1e-5) > gaussian_epsilon(1.0, 1, 1e-5) > gaussian_epsilon(2.0, 1, 1e-5)
+    assert gaussian_epsilon(0.0, 1, 1e-5) == float("inf")
+
+
+def test_clip_noise_clips_each_row():
+    from torchslicer.sl.hooks import CutContext
+    hook = ts.ClipNoise(clip=1.0, noise_multiplier=0.0, grad=True)
+    t = torch.stack([torch.full((2, 3), 0.1), torch.full((2, 3), 5.0)])
+    out = hook.encode(t, CutContext(0, "forward", 0, 2))
+    assert torch.equal(out[0], t[0])
+    assert out[1].norm().item() == pytest.approx(1.0)
+    noisy = ts.ClipNoise(clip=1.0, noise_multiplier=2.0, forward=False, grad=True)
+    assert torch.equal(noisy.encode(t, CutContext(0, "forward", 0, 2)), t)
+    g = noisy.encode_grad(t, CutContext(0, "backward", 0, 2))
+    assert (g - out).std().item() == pytest.approx(2.0, rel=0.5)
+
+
+def test_dp_accountant_in_training_and_its_checks():
+    from torchslicer.privacy import DPAccountant, gaussian_epsilon
+    hook = {0: ts.ClipNoise(clip=0.05, noise_multiplier=1.5, forward=False, grad=True)}
+    h = _train(privacy=[DPAccountant(delta=1e-5), NormLabelAttack()], hooks=hook, epochs=3)
+    assert [e["leak_dp_releases"] for e in h] == [1, 2, 3]
+    assert h[-1]["leak_dp_epsilon"] == pytest.approx(gaussian_epsilon(1.5, 3, 1e-5), rel=1e-5)
+    for hooks, match in [(None, "ClipNoise"), ({0: ts.GaussianNoise(std=1.0, grad=True)}, "ClipNoise"),
+                         ({0: ts.ClipNoise(clip=1.0, noise_multiplier=1.0)}, "grad=True")]:
+        with pytest.raises(ValueError, match=match):
+            _train(privacy=[DPAccountant()], hooks=hooks, epochs=1)
+    h = _train(privacy=[DPAccountant(direction="forward")], epochs=1,
+               hooks={0: [ts.ClipNoise(clip=1.0, noise_multiplier=1.0), ts.Quantize(bits=8)]})
+    assert h[0]["leak_dp_releases"] == 1
+
+
+def test_step4_config_names_and_offload_refusal():
+    from torchslicer.privacy import UnSplit
+    cfg = ts.RunConfig()
+    cfg.logging.enabled = False
+    cfg.sl.cut_hooks = [{"cut": 0, "name": "clip_noise",
+                         "params": {"clip": 0.05, "noise_multiplier": 1.0, "forward": False, "grad": True}}]
+    cfg.privacy.attacks = [{"name": "dp", "cut": 0}, {"name": "fsha", "cut": 0, "params": {"forge": False}},
+                           {"name": "unsplit", "cut": 0, "params": {"every": 100, "rounds": 1}}]
+    data = _images()
+    h = ts.slice(_cnn(), cuts=["1"]).train(data, SGD, CE, epochs=1, run_config=cfg, eval_data=_images(seed=3))
+    assert {"leak_dp_epsilon", "leak_fsha_psnr", "leak_unsplit_mse"} <= set(h[0])
+    with pytest.raises(ValueError, match="paged out"):
+        ts.slice(_cnn(), cuts=["1"], executor=ts.OffloadExecutor(device="cpu")).train(
+            data, SGD, CE, epochs=1, privacy=[UnSplit()])
+
+
+def test_forged_gradient_scale_under_gpipe():
+    """forge returns the gradient of a per-(micro-)batch mean loss; with the 1/M scale the
+    client gets the same update with and without micro-batches."""
+    from torchslicer.privacy import Attack
+
+    class MeanSum(Attack):
+        name, forges = "mean_sum", True
+
+        def observe(self, obs):
+            pass
+
+        def forge(self, obs):                    # d/dz mean_i sum_j z_ij
+            return torch.full_like(obs.tensor, 1.0 / obs.tensor.shape[0])
+
+    weights = []
+    for kw in ({}, {"use_gpipe": True, "n_micro_batches": 4}):
+        model = _mlp()
+        ts.slice(model, cuts=["1"]).train(_binary_data(), SGD, CE, epochs=1, privacy=[MeanSum()], **kw)
+        weights.append(model[0].weight.detach().clone())
+    assert torch.allclose(weights[0], weights[1], atol=1e-6)

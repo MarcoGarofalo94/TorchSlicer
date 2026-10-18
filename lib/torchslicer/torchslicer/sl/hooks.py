@@ -334,6 +334,32 @@ class GaussianNoise(CutHook):
         return self._noise(g, ctx) if self.grad else g
 
 
+class ClipNoise(GaussianNoise):
+    """The Gaussian mechanism per sample: clip each sample's row (dim 0) to L2 norm
+    ``clip``, then add N(0, (noise_multiplier * clip)^2) noise, on the activation
+    (``forward``) and/or the gradient (``grad``). Unlike :class:`GaussianNoise`, the noise
+    is relative to a bound on what one sample sends, which is what
+    ``ts.privacy.DPAccountant`` accounts for. Same seeding as :class:`GaussianNoise`."""
+
+    def __init__(self, clip: float, noise_multiplier: float, forward: bool = True,
+                 grad: bool = False, seed: int = 0):
+        if clip <= 0 or noise_multiplier < 0:
+            raise ValueError("ClipNoise needs clip > 0 and noise_multiplier >= 0")
+        super().__init__(std=noise_multiplier * clip, grad=grad, seed=seed)
+        self.clip, self.noise_multiplier, self.forward = float(clip), float(noise_multiplier), forward
+
+    def _noise(self, t, ctx):
+        if not t.is_floating_point():
+            return t
+        rows = t.reshape(t.shape[0], -1)
+        scale = (self.clip / rows.norm(dim=1).clamp_min(1e-12)).clamp(max=1.0)
+        t = (rows * scale.unsqueeze(1).to(rows.dtype)).reshape(t.shape)
+        return super()._noise(t, ctx)
+
+    def encode(self, x, ctx):
+        return self._noise(x, ctx) if self.forward else x
+
+
 class Recorder(CutHook):
     """Observe a cut without changing it, e.g. as the input of a reconstruction or
     label-inference attack.
@@ -418,6 +444,7 @@ _REGISTRY = {
     "quantize": Quantize,
     "topk": TopK,
     "gaussian_noise": GaussianNoise,
+    "clip_noise": ClipNoise,
     "recorder": Recorder,
 }
 

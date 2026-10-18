@@ -177,8 +177,8 @@ class OffloadExecutor(LocalExecutor):
                       mixed_precision=mixed_precision, n_micro_batches=n_micro_batches,
                       run_config=run_config, **kwargs)
         for a in self._attacks:
-            if a.needs_query:
-                raise ValueError(f"{type(a).__name__} queries the client slices, which offload keeps "
+            if a.needs_query or a.needs_client:
+                raise ValueError(f"{type(a).__name__} runs the client slices, which offload keeps "
                                  "paged out of the device; use the local executor")
         shared = _shared_trainable(self.split_layers)
         self._bw = measure_bandwidth(self.device)

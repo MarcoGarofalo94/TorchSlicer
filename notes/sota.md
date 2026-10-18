@@ -32,11 +32,26 @@ Format: title — year, venue — link — idea — setting — numbers. `[abstr
 - **ReCycle** — 2024, SOSP — https://doi.org/10.1145/3694715.3695960 `[title only]`.
 
 ## Privacy of intermediate representations
-- **Depth Gives a False Sense of Privacy: LLM Internal States Inversion** (Dong et al.) — 2025, USENIX Security — https://arxiv.org/abs/2507.16372 — inverts middle-layer states; 4,112-token prompt recovered at 86.88 token F1 from middle layer of Llama-3; 4 defenses insufficient.
+- **Depth Gives a False Sense of Privacy: LLM Internal States Inversion** (Dong et al.) — 2025, USENIX Security — https://arxiv.org/abs/2507.16372 — inverts middle-layer states; 4,112-token prompt recovered at 86.88 token F1 from middle layer of Llama-3; 4 defenses insufficient. Full text read (2026-10-18, §4.2, §5.2): white-box
+  ER (Embedding Recovery) optimizes dummy input embeddings w^ (init 0) so the first l layers reproduce h_l, keeps the
+  min-loss iterate, and maps each position to the vocab embedding of highest cosine; TBS (Token Basis Selection) is the
+  deep-layer variant (optimizes coefficients on an SVD basis of the embedding matrix). Defaults: AdamW, MSE, lr 5e-4,
+  penalty λ = 0, E = 5e4 steps; also black-box (transfer to derived models) and generation-based (inversion model).
+  Implemented as ts.privacy.EmbeddingRecovery (ER only, 2026-10-18).
 - **Privacy Failure in Split-LLM Training: The Returned Gradient Nullifies the Decoys** (Politis, Pappas) — 2026, arXiv — https://arxiv.org/abs/2609.04382 — decoy rows get zero gradient → 4096/4096 real rows identified; forward-only privacy checks miss gradient channel. Vanilla 2-node.
 - **UnSplit** — 2022, WPES — https://eprint.iacr.org/2021/1074 `[abstract-only]` — honest-but-curious server recovers inputs + client model knowing only architecture.
 - **Model Inversion Attacks Against Collaborative Inference** (He, Zhang, Lee) — 2019, ACSAC — https://doi.org/10.1145/3359789.3359824 (program: https://acsac.org/2019/program/final/s167.html; code: https://github.com/zechenghe/Inverse_Collaborative_Inference) `[abstract-level + repo README; full text not read]` — a malicious participant of a split network recovers inputs: white-box rMLE, black-box *inverse network* (a decoder from cut features to inputs), and a query-free attack (shadow model); CIFAR-10, worst when the client keeps few layers. The inverse network's training data (attacker queries with same-distribution samples) is `[unverified]`. Basis of M12's `InversionAttack`.
 - **NoPeek: Information leakage reduction to share activations in distributed deep learning** (Vepakomma, Singh, Gupta, Raskar) — 2020, arXiv (venue not stated) — https://arxiv.org/abs/2008.09161 `[abstract-only]` — adds a loss term minimizing the distance correlation between raw inputs and the shared cut activations, against reconstruction attacks, while keeping accuracy. No numbers in the abstract.
+
+## Differential-privacy accounting (retrieved 2026-10-18, for M12 step 4)
+- **Gaussian Differential Privacy** (Dong, Roth, Su) — 2019, arXiv (journal version not checked `[unverified: venue]`) —
+  https://arxiv.org/abs/1905.02383 — μ-GDP via hypothesis testing. Thm 2.7: the Gaussian mechanism with std
+  sens/μ is μ-GDP; Cor. 3.3: n-fold composition of μi-GDP is sqrt(Σμi²)-GDP; Cor. 2.13: μ-GDP ⇔ (ε, δ(ε))-DP with
+  δ(ε) = Φ(−ε/μ + μ/2) − e^ε Φ(−ε/μ − μ/2). Used by ts.privacy.DPAccountant.
+- **Improving the Gaussian Mechanism for Differential Privacy: Analytical Calibration and Optimal Denoising** (Balle,
+  Wang) — 2018, ICML (stated on the arXiv PDF) — https://arxiv.org/abs/1805.06530 — Thm 8: the Gaussian
+  mechanism with L2 sensitivity Δ and std σ is (ε, δ)-DP iff Φ(Δ/2σ − εσ/Δ) − e^ε Φ(−Δ/2σ − εσ/Δ) ≤ δ (the same
+  curve as GDP Cor. 2.13 with μ = Δ/σ); the classical σ = Δ sqrt(2 ln(1.25/δ))/ε is loose.
 
 ## Leakage from weight updates (copied from the research branches, 2026-10-18)
 - **Deep Leakage from Gradients** (Zhu, Liu, Han) — 2019, NeurIPS `[unverified: venue]` — https://arxiv.org/abs/1906.08935 — pixel-/token-accurate reconstruction from shared gradients.
@@ -47,7 +62,13 @@ Format: title — year, venue — link — idea — setting — numbers. `[abstr
 - **Practical Secure Aggregation for Privacy-Preserving ML** (Bonawitz et al.) — 2017, CCS `[unverified: venue, not on the pages read]` — https://eprint.iacr.org/2017/281 `[full-text §4.0.2–4.0.3]` — **closest precedent for fake failures.** Two quotes. A slow user is assumed dropped, the others reveal shares of its key, then its late message arrives and the server "learn[s] x_u in the clear". And "an adversarial server in the active model can similarly learn x_u simply by lying about whether user u has dropped out." Fix: double masking plus a signed ConsistencyCheck round. Lesson for us: make the protocol safe *even if* the failure claim is false; don't only harden detection. FL/SecAgg, a single server, no chain.
 - **Eluding Secure Aggregation in FL via Model Inconsistency** (Pasquini, Francati, Ateniese) — 2022, CCS — https://arxiv.org/abs/2111.07380 — a malicious server sends different models to different users and bypasses SecAgg. Protocol-level manipulation beats the cryptographic protection.
 - **DROPFL: Client Dropout Attacks Against FL Under Communication Constraints** (Qian et al.) — 2024, IEEE (ICASSP?) `[abstract-only via search snippet; unverified: venue]` — https://ieeexplore.ieee.org/document/10446609/ — controlled clients drop out deliberately: up to −10.2% accuracy, up to 4.1× training time. The goal is **availability/accuracy, not privacy.**
-- **Unleashing the Tiger: Inference Attacks on Split Learning (FSHA)** (Pasquini, Ateniese, Bernaschi) — 2021, CCS `[venue via search snippet]` — https://arxiv.org/abs/2012.02670 `[abstract-level]` — a malicious server uses its control of the gradients to steer the client's feature space into a known invertible one, then reconstructs inputs; also shows malicious clients can attack honest ones. **Relevance:** during an outage the downstream party supplies all gradients that train a *freshly initialised* stand-in, the easiest possible target for hijacking.
+- **Unleashing the Tiger: Inference Attacks on Split Learning (FSHA)** (Pasquini, Ateniese, Bernaschi) — 2021, CCS `[venue via search snippet]` — https://arxiv.org/abs/2012.02670 `[full text read 2026-10-18; venue still unverified, not in the arXiv PDF]` — a malicious server uses its control of the gradients to steer the client's feature space into a known invertible one, then reconstructs inputs; also shows malicious clients can attack honest ones. **Relevance:** during an outage the downstream party supplies all gradients that train a *freshly initialised* stand-in, the easiest possible target for hijacking. Full text read (2026-10-18, §3.1–3.3, App. B): the server
+  trains a pilot f~ and inverse f~^-1 as an auto-encoder on X_pub (Eq. 1, MSE), a critic D between f~(X_pub) and
+  f(X_priv) (Eq. 2; implementation: Wasserstein loss + gradient penalty, weight 500), and sends the client the gradient
+  of log(1 − D(f(X_priv))) (Eq. 3) instead of the task's. Client f: ResNet funnel, splits 1–4; pilot = shallow linear
+  convs; D deeper residual. Adam lr 1e-5 (f, f~, f~^-1), 1e-4 (D). MNIST/F-MNIST reconstruct within ~1e3 setup
+  iterations (MSE in [−1, 1] ≈ 0.01–0.02 at 1e4, Fig. 4); depth affects only convergence speed. NoPeek with small α is
+  evaded; data is 32×32×3. Implemented as ts.privacy.FSHA (2026-10-18).
 - **Label Leakage and Protection in Two-party Split Learning** (Li, Sun, Yang, Gao, Zhang, Xie, Smith, Wang) — 2022, ICLR — https://arxiv.org/abs/2102.08504 — norm and direction attacks recover labels from the returned gradients; defense: Marvell noise. The attack heuristics target the binary/imbalanced case. Full text read (2026-10-18, §3.3, §5): norm score r_n(g)=‖g‖₂; cosine score r_d(g)=cos(g, g+) with g+ "a positive class clean gradient" chosen at random per batch (oracle); leak AUC computed per batch; a run is summarized by the 95 % quantile over batches. ISIC (6 conv, cut after conv 4, g ∈ R^1600), Criteo, Avazu: no_noise leak AUC ≈ 1 throughout training (norm > 0.9 in Fig. 2c); Marvell s = 4 → ≈ 0.5; isotropic Gaussian ("iso") is the baseline.
 - Not found: any SL/pipeline paper where a party fakes or induces a failure to gain weights or a shallower view. Searches: "split learning adversarial party exploits recovery re-partition", "fault tolerance mechanism exploited privacy attack", "client dropout manipulation attack". The dropout-attack literature targets SecAgg (privacy) or FL accuracy (DROPFL). `[negative search result, not proof of absence]`
 
@@ -56,6 +77,10 @@ Format: title — year, venue — link — idea — setting — numbers. `[abstr
   `[abstract-only]` eprint entry above. An honest-but-curious server that knows only the client architecture recovers
   inputs and "a functionally similar model to the client model, without being detected" (coordinate descent on a
   randomly initialised copy). It also infers labels perfectly when only the output layer is hidden.
+  Full text read (2026-10-18, §3.2, §4.1, Table 2): x~ = argmin MSE(f1~(x~), z) + λ TV(x~) alternated with the clone
+  θ1~ = argmin MSE (coordinate descent); Adam lr 1e-3; λ 0.1 (splits 1–3), 1 (deeper); TV summed over pixels; 5 sets of
+  10 images. MNIST MSE after training: 0.048 (depth 1), 0.076 (2), 0.065 (3), 0.124 (4), clone accuracy 97.45 % → 63 %
+  with depth (reference 98 %). Pixel scale not stated `[unverified: probably [0, 1]]`. Implemented as ts.privacy.UnSplit.
 - **PCAT: Functionality and Data Stealing from SL by Pseudo-Client Attack** (Gao, Zhang) — 2023, USENIX Security —
   https://www.usenix.org/conference/usenixsecurity23/presentation/gao `[abstract-level via search snippet + slides title]`
   — a semi-honest server with a tiny aux set (0.1–5% of the training set) trains a pseudo-client that steals the

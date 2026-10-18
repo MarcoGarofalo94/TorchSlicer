@@ -25,6 +25,29 @@ from ..privacy.base import Observation, resolve_privacy
 
 _LOG = get_logger("torchslicer.local")
 
+
+class _ClientCopy(nn.Module):
+    """A frozen copy of client slices for white-box attacks, chained with
+    :meth:`SplitLayer.run` so gradients reach its input. ``fresh``: re-initialized
+    parameters (the architecture only)."""
+
+    def __init__(self, slices, fresh: bool = False):
+        super().__init__()
+        self.slices = nn.ModuleList(
+            SplitLayer(copy.deepcopy(list(sl.layers)), predecessors=sl._predecessors,
+                       mixed_precision=sl._mixed_precision) for sl in slices)
+        if fresh:
+            for m in self.modules():
+                if m is not self and hasattr(m, "reset_parameters"):
+                    m.reset_parameters()
+        self.requires_grad_(False)
+        self.eval()
+
+    def forward(self, x):
+        for sl in self.slices:
+            x = sl.run(x)
+        return x
+
 def _detach_payload(payload):
     if isinstance(payload, torch.Tensor):
         return payload.detach()
@@ -192,11 +215,16 @@ class LocalExecutor(BaseExecutor):
         self._attacks, self._defences = resolve_privacy(privacy, cfg.privacy if cfg else None, n)
         self._rng_devices = [device] if device is not None and device.type == "cuda" else []
         for a in self._attacks:
-            if a.needs_query:
+            if a.needs_query or a.needs_client:
                 self._check_query(a)
+            if a.needs_query:
                 a.bind(lambda x, cut=a.cut: self._query(cut, x))
-                if hasattr(a, "set_aux"):
-                    a.set_aux(eval_data)
+            if a.needs_client:
+                a.bind_client(lambda fresh=False, cut=a.cut: _ClientCopy(self.split_layers[:cut + 1], fresh))
+            if hasattr(a, "set_aux"):
+                a.set_aux(eval_data)
+            if hasattr(a, "bind_hook"):
+                a.bind_hook(self._hooks.get(a.cut))
 
         # Notify callbacks
         for cb in self._callbacks:
@@ -505,6 +533,8 @@ class LocalExecutor(BaseExecutor):
         slice ``cut + 1``."""
         if g is None:
             return None
+        if self._attacks:
+            g = self._forge(cut, g, batch_id)
         raw = tensor_nbytes(g)
         hook = self._hooks.get(cut)
         if hook is None:
@@ -544,6 +574,19 @@ class LocalExecutor(BaseExecutor):
             for a in attacks:
                 a.observe(obs)
 
+    def _forge(self, cut: int, g, batch_id: int):
+        """A malicious server's gradient replaces the honest one before it is sent."""
+        for a in self._attacks:
+            if a.forges and a.cut == cut:
+                with torch.random.fork_rng(devices=self._rng_devices):
+                    forged = a.forge(self._obs(cut, "backward", g, batch_id))
+                if forged is not None:
+                    if forged.shape != g.shape:
+                        raise ValueError(f"{type(a).__name__}.forge returned shape {tuple(forged.shape)} "
+                                         f"for a cut gradient of shape {tuple(g.shape)}")
+                    g = (self._privacy_scale * forged).to(device=g.device, dtype=g.dtype)
+        return g
+
     def _defend(self, cut: int, g, out, batch_id: int):
         obs = None
         for d in self._defences:
@@ -558,7 +601,7 @@ class LocalExecutor(BaseExecutor):
     def _check_query(self, attack) -> None:
         for sl in self.split_layers[:attack.cut + 1]:
             if any(hasattr(layer, "pop_aux_loss") for layer in sl.layers):
-                raise ValueError(f"{type(attack).__name__} queries the client slices, which hold MoE "
+                raise ValueError(f"{type(attack).__name__} runs the client slices, which hold MoE "
                                  "blocks (their auxiliary losses would mix with training's)")
 
     def _query(self, cut: int, x):

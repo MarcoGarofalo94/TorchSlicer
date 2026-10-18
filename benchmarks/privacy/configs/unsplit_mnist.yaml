@@ -1,0 +1,24 @@
+# UnSplit (Erdogan et al., WPES 2022): an honest-but-curious server with the client's
+# architecture only (no data, no queries) inverts the smashed data by coordinate descent on
+# (x~, clone). Cut depth swept (cnn layer index: conv0 relu1 pool2 conv3 relu4 pool5).
+# Budget per inverted batch of 8: 30 rounds x (20 input + 20 clone) Adam steps, lr 1e-2
+# (the paper: lr 1e-3, budget not stated, 1-5 min per input on a CPU); TV 0.1 (paper value for
+# shallow splits; here a per-pixel mean). The clone persists across batches (model stealing).
+dataset: mnist
+train_subset: 15000
+test_subset: 2000
+batch_size: 64
+epochs: 2
+model: cnn
+cut: 1
+device: cuda
+seeds: [0, 1, 2]
+attacks:
+  - {name: unsplit, cut: 0, params: {n_invert: 8, rounds: 30, input_steps: 20, model_steps: 20, lr: 0.01, tv: 0.1, every: 50}}
+runs:
+  - {label: cut0_conv, cut: 0}
+  - {label: cut1_relu, cut: 1}
+  - {label: cut2_pool, cut: 2}
+  - {label: cut4_conv2, cut: 4}
+  - {label: cut5_pool2, cut: 5}
+  - {label: cut1_act_noise0.5, cut: 1, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 0.5}}]}

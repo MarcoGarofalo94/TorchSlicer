@@ -91,7 +91,12 @@ class SplitLayer(nn.Module):
             # Integer input (e.g. token ids) — grad hooks on input not needed
             self.x = None
             x_in = input
+        return self.run(x_in, **aux)
 
+    def run(self, x_in: torch.Tensor, **aux) -> torch.Tensor:
+        """The partition's computation on ``x_in`` without the cut bookkeeping of
+        :meth:`forward` (no detached ``self.x``): gradients flow back into ``x_in``. Used by
+        white-box privacy attacks on copies of the client slices."""
         ctx = (
             torch.autocast(device_type=self._amp_device, dtype=torch.bfloat16)
             if self._mixed_precision

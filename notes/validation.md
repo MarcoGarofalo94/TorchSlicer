@@ -1319,3 +1319,43 @@ identical.
   per-slice clocks).
 - Bugs found in existing code: none.
 - Matrix after M12 (CPU): 115/117, the 2 known GPipe + BatchNorm cells; losses unchanged.
+
+### M12 step 4 (2026-10-18, same branch)
+- Added: `FSHA` (malicious server), `UnSplit` (architecture only), `EmbeddingRecovery` (white-box
+  LLM hidden states, Dong et al. ER), `DPAccountant` + the `ClipNoise` cut hook (per-sample clip,
+  then Gaussian noise; GDP accounting). Access flags on `Attack`: `needs_client` →
+  `client(fresh=False)` (a frozen `_ClientCopy` of slices 0..cut), `forges` → `forge(obs)`
+  replaces the gradient at the start of `_cut_backward` (before the cut hook encodes it, so its
+  bytes are counted and gradient noise still applies), scaled by the micro-batch scale.
+- Core change: `SplitLayer.forward` split into the cut bookkeeping and `SplitLayer.run(x)`, the
+  computation alone (no detached `self.x`), so a client copy passes gradients to its input
+  across several slices. `forward` behaviour unchanged (tests + matrix).
+- Tests (+12, `tests/test_privacy.py`): client-copy attacks leave losses bit-identical; the copy
+  is frozen, in eval mode, passes input gradients, `fresh` re-initializes; a zero forged gradient
+  freezes the client slice (SGD) and the server still trains, standard and GPipe; a forged
+  per-micro-batch-mean gradient gives the same client weights with and without GPipe (M=4,
+  1e-6); FSHA forge=False is bit-identical, forge=True changes training; UnSplit reconstructs
+  smooth 8×8 images below 0.7× the zero-image MSE; ER recovers > 95 % of tokens on a tiny LM;
+  GDP δ(ε) equals the hockey-stick divergence of N(μ,1) vs N(0,1) by numerical integration
+  (rel 1e-6) and ε is below the classical σ-bound; `ClipNoise` clips rows to C and noises
+  with std zC; the accountant reports `gaussian_epsilon(z, epochs, δ)` and refuses a missing,
+  unclipped or wrong-direction hook; config names; offload refuses `needs_client`.
+- Design decisions:
+  - **FSHA default pilot ends in a ReLU when the smashed data are non-negative.** The paper's
+    pilot is linear, but its client ends in a residual block; ours ends in ReLU+pool, so a linear
+    target space cannot be matched. The server sees the smashed data, so this is within its
+    knowledge. Measured: MNIST cut2, 1 seed, 2.8k iterations, SSIM 0.49 → 0.82.
+  - **DP accounting scope**: per-sample, the sample's own row, ≤ 1 release per epoch,
+    replace-one sensitivity 2C. Not end-to-end (weights trained on the sample influence later
+    rows; BatchNorm on the sender mixes rows). Stated in the docstring and the tutorial.
+  - **UnSplit TV is a per-pixel mean** (the paper sums); λ is then size-independent.
+  - ER implements the paper's λ = 0 default (no distribution-matching penalty) and not TBS.
+- Benchmark runner: `--seed k` / `--merge` (parallel seeds), per-run `attacks`, `dataset_params`
+  (local npz), GPT-2 + Shakespeare.
+- Observation: on the A100, passive-attack runs differ from the no-attack run at ~1e-4 in loss
+  (cuDNN nondeterminism, the same between two plain runs); bit-exactness is asserted on CPU.
+- Note: `load_dataset("cifar10")` downloads through torchvision even when `data/cifar10_*.npz`
+  exist (the download ran at ~50 KB/s here); used `dataset: npz` instead. Not a bug, but a
+  usability gap: worth a fallback to the local npz files.
+- Bugs found in existing code: none.
+- Matrix after M12 step 4 (CPU): 115/117, the same 2 GPipe + BatchNorm cells; losses unchanged.

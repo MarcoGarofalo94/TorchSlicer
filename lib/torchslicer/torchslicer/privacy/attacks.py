@@ -114,6 +114,24 @@ class DistanceCorrelation(Attack):
         return {"value": round(sum(self.values) / len(self.values), 6)} if self.values else {}
 
 
+def aux_inputs(aux, n: int, device, who: str = "this attack") -> torch.Tensor:
+    """The first ``n`` inputs of ``aux`` (a tensor, or a loader of ``(x, y)`` / ``x``
+    batches) as one tensor on ``device``."""
+    if not isinstance(aux, torch.Tensor):
+        if aux is None:
+            raise ValueError(f"{who} needs auxiliary inputs: pass aux= or give the run an "
+                             "evaluation set (eval_data / data.dataset)")
+        xs, k = [], 0
+        for batch in aux:
+            x = batch[0] if isinstance(batch, (list, tuple)) else batch
+            xs.append(x)
+            k += x.shape[0]
+            if k >= n:
+                break
+        aux = torch.cat(xs)
+    return aux[:n].to(device)
+
+
 def default_decoder(z_shape, x_shape) -> nn.Module:
     """A small decoder from one activation (``z_shape``, no batch dim) to one input:
     convolutional when both are images (C, H, W), else a 2-layer MLP."""
@@ -160,19 +178,7 @@ class InversionAttack(Attack):
             self.aux = aux
 
     def _aux_tensor(self, device) -> torch.Tensor:
-        if not isinstance(self.aux, torch.Tensor):
-            if self.aux is None:
-                raise ValueError("InversionAttack needs auxiliary inputs: pass aux= or give the run "
-                                 "an evaluation set (eval_data / data.dataset)")
-            xs, n = [], 0
-            for batch in self.aux:
-                x = batch[0] if isinstance(batch, (list, tuple)) else batch
-                xs.append(x)
-                n += x.shape[0]
-                if n >= self.n_aux:
-                    break
-            self.aux = torch.cat(xs)
-        self.aux = self.aux[:self.n_aux].to(device)
+        self.aux = aux_inputs(self.aux, self.n_aux, device, type(self).__name__)
         return self.aux
 
     def reset(self):

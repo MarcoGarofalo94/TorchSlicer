@@ -231,3 +231,46 @@ NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
   not a privacy/utility trade-off curve, a harder task is needed for that (negative result
   for the trade-off). NoPeek needs a deeper client (one conv layer can barely decorrelate)
   and has a sharp collapse between α = 10 and 100.
+
+## 2026-10-18 — M12 step 4: malicious server, architecture-only and LLM inversion, label DP
+
+- Hypotheses: (1) FSHA (Pasquini et al. 2021): a malicious server forging the returned
+  gradient makes a non-queryable client invertible, beyond an honest server with the same
+  networks. (2) UnSplit (Erdogan et al. 2022): architecture-only coordinate descent recovers
+  inputs at shallow cuts. (3) ER (Dong et al. 2025): white-box inversion of GPT-2 hidden states
+  recovers most tokens, less with depth. (4) Clipped Gaussian gradient noise (ClipNoise) gives
+  a privacy/utility curve with an ε, on a task whose gradients do not vanish.
+- Configs: `benchmarks/privacy/configs/{fsha_mnist,unsplit_mnist,llm_gpt2,dp_label_cifar}.yaml`,
+  seeds 0–2, A100; `run_privacy.py <config> [--smoke | --seed k | --merge]` (smoke first; seeds
+  as parallel processes). Memory < 10 GB.
+- FSHA, MNIST CNN, 30k train, 3 epochs (1.4k setup iterations; paper ~1e3–1e4), last-epoch SSIM
+  of the reconstruction / test acc: cut2: black-box inversion (queries) 0.981 ± 0.001 /
+  0.985; honest server, same networks 0.157 ± 0.049 / 0.985; **FSHA 0.552 ± 0.269** / 0.974
+  (seeds 0.73, 0.69, 0.24). cut5: inversion 0.893; honest 0.036; FSHA 0.150 ± 0.039, acc
+  0.884 ± 0.038; FSHA + NoPeek α=10: 0.063, acc 0.62 ± 0.44 (one seed collapses).
+- UnSplit, MNIST CNN, 2 epochs, 9 inverted batches of 8 per run, 30×(20+20) Adam steps:
+  MSE ≈ the zero image's at every cut (0.97–1.03; zero image ≈ 1.0 on normalized MNIST),
+  clone MSE 53 → 329 with depth. A 10k-step probe (cut1, lr 1e-3 and 1e-2): MSE 0.91 / 0.93.
+- ER, GPT-2 (124M) fine-tuned on Shakespeare (800 × 32 tokens, AdamW 5e-5), 3 inverted
+  batches of 4 sequences, 1000 AdamW steps lr 1e-2, token accuracy (F1 the same ±0.005):
+  cut1 0.926 ± 0.014, cut3 0.836 ± 0.016, cut6 0.684 ± 0.024, cut9 0.579 ± 0.033. cut1 +
+  activation noise std 0.1: 0.924 (test loss unchanged 3.886); std 1: 0.596 ± 0.016 (test loss
+  3.945, +0.06).
+- Label DP, CIFAR-10 "airplane?" (10 % positives), 20k train, 3 epochs, cut2, clip C = 1e-2
+  (≈ p90 of the noise-free gradient row norms), δ = 1e-5. Norm AUC / direction AUC / test acc /
+  ε: none 0.80 / 0.94 / 0.931; clip only 0.84 / 0.96 / 0.918; z 0.03: 0.85 / 0.89 / 0.913 /
+  7159; z 0.1: 0.67 / 0.60 / 0.915 / 748; z 0.3: 0.52 / 0.51 / 0.923 / 115; z 1: 0.50 / 0.50 /
+  0.925 / 20.1; z 3: 0.50 / 0.50 / 0.924 / 5.2. Unclipped std 1e-3 (= z 0.1's std): 0.80 /
+  0.73 / 0.922.
+- Conclusions: (1) partly reproduced: FSHA hijacks at the shallow cut (SSIM 0.55 vs 0.16 for
+  the honest control, 2 of 3 seeds ≈ 0.7) but at our budget it is far below a black-box
+  inverse network (0.98) and fails at the deeper cut, where it costs 10 points of accuracy
+  (the paper's 1e4 iterations would be > 30 min here; not run). (2) **Negative**: UnSplit does
+  not beat the zero image on this CNN and normalization at any cut or budget we tried; the
+  paper's own MNIST figure (0.048 MSE, pixel scale not stated) is about half a zero image's
+  error in [0, 1]. (3) Reproduced: ER recovers 93 % of tokens after one block and degrades
+  with depth (58 % after 9 of 12), the paper's motivation for TBS on deep layers. (4) A
+  real curve now: the attacks fall to chance at z ≥ 0.3 for ~1 point of accuracy (mostly the
+  clipping), long before ε is meaningful (ε = 5.2 at z = 3): the heuristic attacks need far
+  less noise than the worst-case bound. Clipping alone does not protect, and clipping makes
+  the noise effective (z 0.1 vs unclipped noise of the same std: direction AUC 0.60 vs 0.73).

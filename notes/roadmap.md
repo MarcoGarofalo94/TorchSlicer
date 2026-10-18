@@ -176,7 +176,7 @@ shown in a Flower-based SplitFed baseline.
   - Open: offload CUDA tests fail under GPU load (race, M5); IPC test intermittent in full runs.
   - Details: validation.md "M11" (issues 27–29). Tutorial `docs/tutorials/data.md`. Version 0.11.0.
 
-- M12 (branch `feat/m12-privacy`, forked from `fix/post-m11`): **steps 1–3 done** (2026-10-18) =
+- M12 (branch `feat/m12-privacy`, forked from `fix/post-m11`): **done** (steps 1–4, 2026-10-18) =
   `ts.privacy`: attacks observe a cut on the receiving side (after the hooks) and are scored
   against the true batch (simulator only): label inference from gradients (norm / direction,
   Li et al. leak AUC, mean + q95), black-box input inversion (decoder trained online on aux
@@ -186,8 +186,13 @@ shown in a Flower-based SplitFed baseline.
   on; NoPeek equals a reference loop. MNIST (3 seeds): direction AUC 1.0 → 0.50 with gradient
   noise; PSNR 42.6 / 26.4 / 15.4 dB at cuts 1/4/8; NoPeek α=10 at cut 4: 26.4 → 18.6 dB for
   −4.5 pts accuracy. Tutorial `docs/tutorials/privacy.md`; benchmark `benchmarks/privacy/`.
-  Version 0.12.0. **Step 4 open** (FSHA, UnSplit, LLM inversion, DP accountant; see
-  `notes/privacy.md`).
+  Version 0.12.0. **Step 4** (same day): `FSHA` (a malicious server: `forge(obs)` replaces the
+  returned gradient), `UnSplit` (architecture-only: re-initialized client copy),
+  `EmbeddingRecovery` (Dong et al. ER on LLM hidden states, white-box client copy),
+  `ClipNoise` hook + `DPAccountant` (GDP, per-sample rows, scope stated). 359 tests. Results:
+  FSHA partly reproduced at our budget (cut2 SSIM 0.55 vs 0.16 honest), UnSplit negative,
+  GPT-2 ER 93 → 58 % tokens from cut 1 to 9, label DP on CIFAR-10 binary: attacks at chance from
+  z = 0.3 for ~1 pt accuracy, ε = 5.2 at z = 3. Open items in `notes/privacy.md`.
 
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
@@ -537,7 +542,7 @@ shown in a Flower-based SplitFed baseline.
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-18, M12 steps 1–3 done (version 0.12.0, branch `feat/m12-privacy`); open: M12 step 4 (owner: now or after M13), then M13. NCCL unvalidated on this hardware. M7 deferred.
+Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). NCCL unvalidated on this hardware. M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
     M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),
@@ -549,11 +554,10 @@ Last updated 2026-10-18, M12 steps 1–3 done (version 0.12.0, branch `feat/m12-
     just before M14 (real environment + testbed), which is the first milestone that requires
     security on a real network. The `weights_only=False` RCE on worker `init` is a known open
     risk; document it and accept it until then.
-  - **M12 (privacy)**, branch `feat/m12-privacy`: steps 1–3 done (see Status, `notes/privacy.md`,
-    validation.md "M12"). Next: M12 step 4 (FSHA, UnSplit, LLM internal-state inversion, DP
-    accountant; heavier) **or** M13 baselines, owner's call. M13's "one attack + defence pair"
-    can already use label leakage + gradient noise, or inversion + NoPeek. Papers are in
-    `notes/sota.md` (don't re-search them).
+  - **M12 (privacy)**, branch `feat/m12-privacy`: done, steps 1–4 (see Status, `notes/privacy.md`,
+    validation.md "M12"). Next: **M13 baselines**, branch `feat/m13-baselines` forked from
+    `feat/m12-privacy`. M13's "one attack + defence pair" can use label leakage + ClipNoise (DP
+    curve) or inversion + NoPeek. Papers are in `notes/sota.md` (don't re-search them).
   - **`main` is up to date** (2026-10-18): M1–M11 + `fix/post-m11` merged via PRs #3 and #4,
     without `notes/` (see `notes/README.md` and `notes/merge_to_main.sh`). CI: `tests.yml`
     (CPU, py3.10–3.12, on PRs and main) and `gpu-tests.yml` (self-hosted runner
@@ -597,7 +601,7 @@ Last updated 2026-10-18, M12 steps 1–3 done (version 0.12.0, branch `feat/m12-
   - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not
     for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (347 tests at M12, about 5 min with `OMP_NUM_THREADS=4`;
+  - `.venv/bin/python -m pytest tests/` green (359 tests at M12, about 5 min with `OMP_NUM_THREADS=4`;
     `test_sl.py::test_distributed_hooks_match_local[hook0]` flaked once under load, and
     `test_offload.py::test_cuda_matches_local` flakes on a busy GPU, see open items);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about

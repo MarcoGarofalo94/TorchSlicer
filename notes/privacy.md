@@ -1,4 +1,4 @@
-# M12 privacy suite: plan (2026-10-18), steps 1–3 done (2026-10-18)
+# M12 privacy suite: plan (2026-10-18), steps 1–4 done (2026-10-18)
 
 Goal for adoption: an SL paper's privacy section (attack, defence, leakage metric, accuracy
 cost) runs in TorchSlicer from a config, in every setting, with numbers per epoch.
@@ -33,3 +33,10 @@ Algorithm. Open for step 4 and later: FSHA, UnSplit, LLM internal-state inversio
 accountant for GaussianNoise, Marvell; noise relative to the gradient scale (the absolute std
 made the MNIST trade-off flat); attacks in distributed runs (observer-side files, scored offline);
 a harder label task for a real privacy/utility curve (e.g. CIFAR-10 binary, or Criteo-like tabular).
+
+Status (2026-10-18, later): step 4 implemented: FSHA (`forges`), UnSplit (`needs_client`, fresh),
+EmbeddingRecovery (ER, white-box), DPAccountant + ClipNoise (GDP, per-sample rows; not end-to-end).
+Results in experiments.md ("M12 step 4"): FSHA partly reproduced at our budget, UnSplit negative,
+ER reproduced (depth trend), label DP curve on CIFAR-10 binary. Still open: TBS (deep-layer LLM
+inversion), Marvell, FSHA at 1e4 iterations, attacks in distributed runs (observer-side files),
+UnSplit's label-inference variant, a fallback from load_dataset("cifar10") to local npz files.
