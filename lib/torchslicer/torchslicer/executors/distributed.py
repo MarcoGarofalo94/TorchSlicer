@@ -417,6 +417,9 @@ class DistributedExecutor(BaseExecutor):
         the discovered nodes, in slice order, once their capabilities are known; it is
         also used by ``recover()``. Without it, ``partitions`` are used as given.
         ``cut_hooks``: ``ts.slice(cut_hooks=)``, added to the config's ``sl.cut_hooks``."""
+        if self._run_config.privacy.attacks or self._run_config.privacy.defences:
+            raise ValueError("privacy attacks and defences (privacy.*) run on the local executor for "
+                             "now: a distributed observer has no ground truth to score against")
         layers = model_graph.get_layers()
         n = len(partitions)
         self._planner = planner

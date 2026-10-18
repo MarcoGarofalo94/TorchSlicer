@@ -1,4 +1,4 @@
-# M12 privacy suite: plan (2026-10-18)
+# M12 privacy suite: plan (2026-10-18), steps 1–3 done (2026-10-18)
 
 Goal for adoption: an SL paper's privacy section (attack, defence, leakage metric, accuracy
 cost) runs in TorchSlicer from a config, in every setting, with numbers per epoch.
@@ -25,3 +25,11 @@ recorded):
    and label-gradient noise. Report the accuracy cost next to the leakage.
 4. Later (heavier): FSHA (malicious server, CCS 2021), UnSplit model inversion,
    LLM internal-state inversion (Dong et al.), DP accountant.
+
+Status (2026-10-18): steps 1–3 implemented (`torchslicer/privacy/`, tutorial
+docs/tutorials/privacy.md, benchmark benchmarks/privacy/, results in experiments.md and
+validation.md "M12"). Deviation: NoPeek is a `Defence` (composes with any Algorithm), not an
+Algorithm. Open for step 4 and later: FSHA, UnSplit, LLM internal-state inversion, a DP
+accountant for GaussianNoise, Marvell; noise relative to the gradient scale (the absolute std
+made the MNIST trade-off flat); attacks in distributed runs (observer-side files, scored offline);
+a harder label task for a real privacy/utility curve (e.g. CIFAR-10 binary, or Criteo-like tabular).

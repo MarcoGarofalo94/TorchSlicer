@@ -397,6 +397,27 @@ class DataConfig:
 
 
 @dataclass
+class PrivacyConfig:
+    """Privacy attacks and defences (``torchslicer/privacy/``, M12; local executor only).
+
+    Fields:
+        attacks:  ``[{name, cut, params}]``: observers that score what crosses a cut;
+                  their metrics go into every epoch's history as ``leak_<name>_<metric>``
+                  (built-in names: label_norm, label_direction, dcor, inversion;
+                  ``ts.privacy.register_attack`` adds more)
+        defences: ``[{name, cut, params}]``: training-time defences on the client side of a
+                  cut (built-in: nopeek). Noise, quantization and top-k are cut hooks
+                  (``sl.cut_hooks``).
+    """
+    attacks:  list = field(default_factory=list)
+    defences: list = field(default_factory=list)
+
+    def __post_init__(self):
+        self.attacks = self.attacks or []
+        self.defences = self.defences or []
+
+
+@dataclass
 class RunConfig:
     run_id:          str                  = field(default_factory=_default_run_id)
     training:        TrainingConfig       = field(default_factory=TrainingConfig)
@@ -414,6 +435,7 @@ class RunConfig:
     sl:              SLConfig             = field(default_factory=SLConfig)
     offload:         OffloadConfig        = field(default_factory=OffloadConfig)
     data:            DataConfig           = field(default_factory=DataConfig)
+    privacy:         PrivacyConfig        = field(default_factory=PrivacyConfig)
 
     # ── factory: flat Python API ──────────────────────────────────────────────
 

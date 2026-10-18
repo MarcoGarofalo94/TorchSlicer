@@ -176,6 +176,19 @@ shown in a Flower-based SplitFed baseline.
   - Open: offload CUDA tests fail under GPU load (race, M5); IPC test intermittent in full runs.
   - Details: validation.md "M11" (issues 27–29). Tutorial `docs/tutorials/data.md`. Version 0.11.0.
 
+- M12 (branch `feat/m12-privacy`, forked from `fix/post-m11`): **steps 1–3 done** (2026-10-18) =
+  `ts.privacy`: attacks observe a cut on the receiving side (after the hooks) and are scored
+  against the true batch (simulator only): label inference from gradients (norm / direction,
+  Li et al. leak AUC, mean + q95), black-box input inversion (decoder trained online on aux
+  queries; PSNR/SSIM), distance correlation; defence `NoPeek` (a `Defence`, composes with any
+  `Algorithm`) plus the existing noise/quantize/top-k hooks. `leak_*` in every epoch entry;
+  config `privacy.*` or `train(privacy=)`; distributed refuses. Bit-exact losses with attacks
+  on; NoPeek equals a reference loop. MNIST (3 seeds): direction AUC 1.0 → 0.50 with gradient
+  noise; PSNR 42.6 / 26.4 / 15.4 dB at cuts 1/4/8; NoPeek α=10 at cut 4: 26.4 → 18.6 dB for
+  −4.5 pts accuracy. Tutorial `docs/tutorials/privacy.md`; benchmark `benchmarks/privacy/`.
+  Version 0.12.0. **Step 4 open** (FSHA, UnSplit, LLM inversion, DP accountant; see
+  `notes/privacy.md`).
+
 ## Branching: incremental, one branch per milestone
 - Each milestone gets one branch, `feat/m<k>-<slug>`, forked from the **tip of the previous milestone's branch**, not
   from `main`. The chain is `main` → `feat/m0-foundations` → `feat/m1-split-anything` → `feat/m2-...` and so on.
@@ -524,7 +537,7 @@ shown in a Flower-based SplitFed baseline.
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-18, M11 done (version 0.11.0); next M12 (plan in notes/privacy.md). NCCL unvalidated on this hardware. M7 deferred.
+Last updated 2026-10-18, M12 steps 1–3 done (version 0.12.0, branch `feat/m12-privacy`); open: M12 step 4 (owner: now or after M13), then M13. NCCL unvalidated on this hardware. M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
     M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),
@@ -536,11 +549,11 @@ Last updated 2026-10-18, M11 done (version 0.11.0); next M12 (plan in notes/priv
     just before M14 (real environment + testbed), which is the first milestone that requires
     security on a real network. The `weights_only=False` RCE on worker `init` is a known open
     risk; document it and accept it until then.
-  - **Next: M12 (privacy: attacks, defences, leakage metrics)**, on branch `feat/m12-privacy`
-    (already created from `fix/post-m11`, pushed; nothing implemented yet). **Start with
-    `notes/privacy.md`** (design + 4 steps); the papers are in `notes/sota.md` ("Privacy of
-    intermediate representations", "Leakage from weight updates", label leakage, FSHA, NoPeek;
-    don't re-search them). M11 is done (version 0.11.0, see Status).
+  - **M12 (privacy)**, branch `feat/m12-privacy`: steps 1–3 done (see Status, `notes/privacy.md`,
+    validation.md "M12"). Next: M12 step 4 (FSHA, UnSplit, LLM internal-state inversion, DP
+    accountant; heavier) **or** M13 baselines, owner's call. M13's "one attack + defence pair"
+    can already use label leakage + gradient noise, or inversion + NoPeek. Papers are in
+    `notes/sota.md` (don't re-search them).
   - **`main` is up to date** (2026-10-18): M1–M11 + `fix/post-m11` merged via PRs #3 and #4,
     without `notes/` (see `notes/README.md` and `notes/merge_to_main.sh`). CI: `tests.yml`
     (CPU, py3.10–3.12, on PRs and main) and `gpu-tests.yml` (self-hosted runner
@@ -584,7 +597,7 @@ Last updated 2026-10-18, M11 done (version 0.11.0); next M12 (plan in notes/priv
   - `notes/sota.md` and `notes/gaps.md` are for the *research* lines (`research/*` branches), not
     for framework milestones.
 - **Every change must keep:**
-  - `.venv/bin/python -m pytest tests/` green (325 tests at the end of M11, about 6 min;
+  - `.venv/bin/python -m pytest tests/` green (347 tests at M12, about 5 min with `OMP_NUM_THREADS=4`;
     `test_sl.py::test_distributed_hooks_match_local[hook0]` flaked once under load, and
     `test_offload.py::test_cuda_matches_local` flakes on a busy GPU, see open items);
   - the equivalence matrix green: `.venv/bin/python benchmarks/equivalence/run_matrix.py` (about

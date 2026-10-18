@@ -1281,3 +1281,41 @@ Tests: `test_listen_offsets_per_transport`, `test_free_port_avoids_the_ephemeral
 Verification (issues 30–31 + GPU CI files): tests 330/330 with CUDA visible (offload, IPC
 and the CUDA tests all passing); CPU matrix 115/117 (known GPipe + BatchNorm), all losses
 identical.
+
+## M12 privacy suite (2026-10-18, branch `feat/m12-privacy`, version 0.12.0)
+
+### Added and how it is checked
+- `torchslicer/privacy/`: `Attack` (observes one cut on the receiving side, after the cut
+  hooks; scored against the batch's true inputs/labels, which the executor passes for scoring
+  only), `Defence` (adds a client-side gradient term at a cut), metrics (AUC, distance
+  correlation, PSNR, SSIM), registry + config `privacy.{attacks,defences}`, `train(privacy=)`.
+  Built-ins: `NormLabelAttack`, `DirectionLabelAttack` (Li et al. 2022), `InversionAttack`
+  (black-box inverse network trained online on aux queries), `DistanceCorrelation`, `NoPeek`.
+- Hook point: `LocalExecutor._cut_forward/_cut_backward`, so standard, GPipe, local-loss,
+  sessions and offload all get it. Tests `tests/test_privacy.py` (16):
+  - observing never changes training: losses bit-identical with all attacks (standard and
+    GPipe) and with the inversion attack (its decoder, sampling and seeding run in
+    `torch.random.fork_rng`; `_query` restores each slice's mode and saved cut input `sl.x`);
+  - `NoPeek(alpha=0)` bit-exact; `NoPeek(0.7)` equals a hand-written loop training the client
+    on CE + α·dcor(x, z) (all parameters within 1e-6);
+  - AUC equals its pairwise definition with ties; dcor = 1 on itself and on an orthogonal
+    affine map, < 0.3 on independent data, finite gradient; SSIM matches its closed form on
+    uniform images + noise;
+  - qualitative: label AUC > 0.95 without defence, < 0.7 with gradient noise; NoPeek lowers dcor;
+  - offload gives the same label AUC as local; refusals (distributed, offload + query attack,
+    unknown names, bad cuts, duplicate keys, non-class labels).
+- Tutorial `docs/tutorials/privacy.md` (executed by `test_docs.py`); benchmark
+  `benchmarks/privacy/` (results in experiments.md, 2026-10-18).
+
+### Design decisions and deviations from notes/privacy.md
+- **NoPeek is a `Defence`, not an `Algorithm`** (the plan said Algorithm). As an Algorithm it
+  could not be combined with SplitFed or local loss (one algorithm per run). Since
+  d(α·dcor)/dz depends only on x and z, the client adds it to the returned gradient, which is
+  exact (checked against the reference loop) and needs no graph change. Under GPipe it is
+  per micro-batch, scaled 1/M like the task loss.
+- **Distributed executors refuse privacy** (as planned): a remote observer has no ground truth.
+  The check is the first thing in `DistributedExecutor.setup` (no discovery wait).
+- Attack wall time is included in `duration_s`, not in `compute_s` (it runs outside the
+  per-slice clocks).
+- Bugs found in existing code: none.
+- Matrix after M12 (CPU): 115/117, the 2 known GPipe + BatchNorm cells; losses unchanged.

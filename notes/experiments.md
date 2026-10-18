@@ -203,3 +203,31 @@ NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
 - GPU (idle A100, grpc/tcp/ipc): median error 12 %, cuts ≥ 3 MB 1–12 %, worst 51 % (small, tcp).
 - Conclusion: confirmed when compute or cut size dominates; optimistic for few-ms batches
   (fixed per-batch overheads are not modelled).
+
+## 2026-10-18 — M12 privacy suite: label leakage and input inversion (MNIST)
+
+- Hypotheses: (1) Li et al. 2022: on an imbalanced binary task the returned cut gradients leak
+  labels (leak AUC ≈ 1); isotropic gradient noise brings it to ≈ 0.5. (2) He et al. 2019: a
+  black-box inverse network reconstructs inputs well at a shallow cut and worse deeper;
+  activation noise and NoPeek lower it at an accuracy cost.
+- Configs: `benchmarks/privacy/configs/{label,inversion}_mnist.yaml` (10k train / 2k test, CNN,
+  Adam 1e-3, batch 64, 3 epochs, seeds 0–2, A100). Command:
+  `.venv/bin/python benchmarks/privacy/run_privacy.py <config>` (smoke with `--smoke` first).
+  Results: `benchmarks/privacy/results/*.json`. Total 2.3 min.
+- Label ("is it a 0?", ~10 % positives, cut after conv1+pool), last epoch, mean ± std:
+  no noise: norm AUC 0.86 ± 0.02 (q95 0.98), direction AUC 1.00 (q95 1.00), test acc 0.997.
+  Grad noise std 1e-4: norm 0.55 ± 0.02, direction 0.52; 3e-3: 0.51 / 0.50; test acc unchanged
+  (0.9965–0.9968). The q95 stays ~0.71–0.79 even with noise: per-batch AUC on ~6 positives is
+  that noisy at chance, so q95 is a weak summary at this batch size.
+- Inversion (PSNR dB / SSIM / dcor / test acc): cut1 (16×28×28) 42.6 / 0.996 / 0.999 / 0.974;
+  cut4 (32×14×14) 26.4 / 0.946 / 0.985 / 0.975; cut8 (128) 15.4 / 0.459 / 0.846 / 0.974.
+  cut1 + act noise 0.5: 30.5 / 0.976, acc 0.965; noise 2: 24.9 / 0.928, acc 0.927.
+  NoPeek cut1 α=1: no change; α=10: 36.2 ± 4.8 dB, dcor 0.96, acc 0.968. cut4 α=10: 18.6 dB,
+  dcor 0.64, acc 0.930; α=100: training collapses (acc 0.116, chance), dcor 0.004.
+- Conclusion: both qualitative results reproduced. Direction attack exact as in the paper;
+  the norm attack weakens once the model is confident (mean 0.86, q95 0.98). On this easy task
+  gradient noise removes the leakage with no measurable accuracy cost, because the noise
+  std is absolute and swamps tiny gradients, and the server slices alone reach 99.7 %:
+  not a privacy/utility trade-off curve, a harder task is needed for that (negative result
+  for the trade-off). NoPeek needs a deeper client (one conv layer can barely decorrelate)
+  and has a sharp collapse between α = 10 and 100.

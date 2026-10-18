@@ -119,6 +119,7 @@ python -m torchslicer launch train.py -c run.yaml --target k8s            # or c
 | **Algorithms** | `ts.Algorithm` (Flower-Strategy-style): vanilla SplitNN, SplitFed V1/V2, local loss, FedAvg, client sampling | [algorithm](docs/tutorials/algorithm.md) |
 | **Multiple clients** | `ts.ClientSession`: sequential or parallel clients against shared server slices | [sl_settings](docs/tutorials/sl_settings.md) |
 | **Data** | MNIST, Fashion-MNIST, CIFAR-10/100, synthetic, `.npz`; iid / Dirichlet / shards / quantity splits; test-set evaluation | [data](docs/tutorials/data.md) |
+| **Privacy** | label inference from gradients (norm / direction), learning-based input inversion, distance correlation; NoPeek and noise defences; `leak_*` metrics per epoch | [privacy](docs/tutorials/privacy.md) |
 | **Transport** | gRPC, raw TCP (pinned memory), CUDA IPC, NCCL | [transport](docs/tutorials/transport.md) |
 | **NAT traversal** | clients that only dial out, tunnels, optional relay | [nat](docs/tutorials/nat.md) |
 | **Fault tolerance** | heartbeats, worker error reports, re-planning for the survivors from the last checkpoint | below |
@@ -311,6 +312,27 @@ training untouched (the RNG is restored). For now it is supported on the local e
 only. Example: [`examples/data/train.py`](examples/data/train.py) with
 [`experiments/m11_cifar10_dirichlet.yaml`](experiments/m11_cifar10_dirichlet.yaml);
 [tutorial](docs/tutorials/data.md).
+
+## Privacy: attacks, defences, leakage metrics
+
+`ts.privacy` attacks observe a cut from the side that receives it (after the cut hooks), and
+score themselves against the batch's true labels or inputs; defences add a term to the
+client's loss (NoPeek), or are cut hooks (noise, quantization, top-k). Observing never
+changes training: the losses are bit-identical with or without attacks.
+
+```yaml
+privacy:
+  attacks:
+    - {name: label_norm, cut: 0}         # leak_label_norm_auc (Li et al., ICLR 2022)
+    - {name: inversion, cut: 0}          # leak_inversion_psnr / _ssim, aux = the test set
+    - {name: dcor, cut: 0}               # distance correlation, inputs vs activations
+  defences:
+    - {name: nopeek, cut: 0, params: {alpha: 1.0}}
+```
+
+The same from Python: `sliced.train(..., privacy=[ts.privacy.NormLabelAttack(), ts.privacy.NoPeek(alpha=1.0)])`.
+It runs on the local executor (the simulator). Benchmark: [`benchmarks/privacy/`](benchmarks/privacy/);
+[tutorial](docs/tutorials/privacy.md).
 
 ## Transport, NAT and fault tolerance
 

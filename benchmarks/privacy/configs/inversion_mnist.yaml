@@ -1,0 +1,25 @@
+# Input reconstruction from cut activations: a black-box inverse-network attack (He et al.,
+# ACSAC 2019 style) with 512 auxiliary test images, at a shallow and a deep cut, and with
+# activation noise or NoPeek (distance-correlation loss) at the shallow cut.
+dataset: mnist
+train_subset: 10000
+test_subset: 2000
+batch_size: 64
+epochs: 3
+model: cnn
+cut: 1                       # after conv1 + relu: 16x28x28
+device: cuda
+seeds: [0, 1, 2]
+attacks:
+  - {name: inversion, cut: 0, params: {n_aux: 512, steps: 2}}
+  - {name: dcor, cut: 0}
+runs:
+  - {label: cut1}
+  - {label: cut4, cut: 4}    # after conv2 + relu: 32x14x14
+  - {label: cut8, cut: 8}    # after fc1 + relu: 128
+  - {label: cut1_act_noise_0.5, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 0.5}}]}
+  - {label: cut1_act_noise_2, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 2.0}}]}
+  - {label: cut1_nopeek_1, defences: [{name: nopeek, cut: 0, params: {alpha: 1.0}}]}
+  - {label: cut1_nopeek_10, defences: [{name: nopeek, cut: 0, params: {alpha: 10.0}}]}
+  - {label: cut4_nopeek_10, cut: 4, defences: [{name: nopeek, cut: 0, params: {alpha: 10.0}}]}
+  - {label: cut4_nopeek_100, cut: 4, defences: [{name: nopeek, cut: 0, params: {alpha: 100.0}}]}
