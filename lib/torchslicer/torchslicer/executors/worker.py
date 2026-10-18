@@ -20,7 +20,7 @@ from multiprocessing.reduction import ForkingPickler
 import torch
 from torch import nn, optim
 
-from ..config import RunConfig
+from ..config import NCCL_STORE_PORT_OFFSET as _NCCL_STORE_PORT_OFFSET, RunConfig
 from ..core.split_layer import SplitLayer
 from ..core.tied import optimizer_parameters, retie
 from ..sl.hooks import CutContext, pack_payload, unpack_payload, tensor_nbytes
@@ -72,9 +72,6 @@ _IPC_FRAME_HEADER = struct.Struct("!cIIH")
 # Rest-of-frame structs read after the 1-byte kind (used by _handle_tensor_conn dispatch):
 _TCP_REST_HEADER = struct.Struct("!IBHH")   # batch_id(4I) dtype(1B) ndim(2H) ctx_len(2H)
 _IPC_REST_HEADER = struct.Struct("!IIH")    # batch_id(4I) handle_len(4I) ctx_len(2H)
-
-# Port offset added to the coordinator's port for the NCCL TCPStore rendezvous.
-_NCCL_STORE_PORT_OFFSET = 10
 
 # Set TCP_NO_PINNED=1 to disable pinned-memory async D2H (falls back to the old
 # synchronous .cpu().contiguous() path — useful for benchmarking the improvement).
@@ -2097,8 +2094,9 @@ def start_worker(port: int = 0, *, host: str = "[::]", address: str | None = Non
                 router.keep(target)
         _LOG.info("worker behind NAT address=%s tunnels=%s", address, [relay] if relay else tunnel_to)
         return WorkerHandle(servicer, server, address)
-    if port == 0 and servicer._tensor_transport == "tcp":
-        raise ValueError("start_worker(port=0) is gRPC-only: the TCP tensor port is port + offset")
+    if port == 0 and servicer._tensor_transport in ("tcp", "ipc"):
+        raise ValueError("start_worker(port=0) needs transport.tensor grpc or nccl: the tcp/ipc "
+                         "tensor port is port + offset")
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=grpc_workers), options=_GRPC_OPTS)
     worker_service_pb2_grpc.add_WorkerServiceServicer_to_server(servicer, server)

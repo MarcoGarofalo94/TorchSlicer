@@ -147,6 +147,21 @@ class TransportConfig:
     relay:              str   = ""
     tunnel_keepalive_s: float = 20.0
 
+    def listen_offsets(self, drives: bool = False) -> list:
+        """The ports a node listens on, as offsets from its gRPC port: the gRPC port, the
+        tensor listener for tcp and ipc (ipc falls back to TCP across machines), and on
+        the driving node (coordinator / driver) the NCCL rendezvous store."""
+        t = self.tensor.strip().lower()
+        offsets = [0]
+        if t in ("tcp", "ipc"):
+            offsets.append(int(self.tensor_port_offset))
+        if t == "nccl" and drives:
+            offsets.append(NCCL_STORE_PORT_OFFSET)
+        return offsets
+
+
+NCCL_STORE_PORT_OFFSET = 10    # the NCCL rendezvous store: the driving node's gRPC port + this
+
 
 @dataclass
 class FaultToleranceConfig:

@@ -1,0 +1,51 @@
+name: GPU tests
+
+# Runs on a self-hosted GPU runner (labels: self-hosted, linux, gpu). Never on pull requests:
+# on a public repo, PR code from forks must not run on that machine. Only pushes to main,
+# the nightly schedule and manual runs (which use main's or a branch's own workflow).
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * *"          # nightly: tests + the equivalence matrix on CUDA
+  workflow_dispatch:
+    inputs:
+      matrix:
+        description: "Also run the CUDA equivalence matrix"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-runner
+  cancel-in-progress: false
+
+jobs:
+  gpu:
+    if: github.repository == 'MarcoGarofalo94/TorchSlicer'
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 90
+    env:
+      # A Python with a CUDA build of PyTorch, grpcio, pyyaml, pytest (set on the runner;
+      # the checked-out source is put first on PYTHONPATH, so it is what gets tested).
+      PY: ${{ vars.TS_GPU_PYTHON || '/home/fcr/work/TorchSlicer/.venv/bin/python' }}
+      PYTHONPATH: ${{ github.workspace }}/lib/torchslicer
+      MEMGUARD_GB: ${{ vars.TS_MEMGUARD_GB || '11' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Environment
+        run: |
+          "$PY" -c "import torch, torchslicer; print(torch.__version__, torch.cuda.is_available(), torchslicer.__file__)"
+          nvidia-smi --query-gpu=name,utilization.gpu,memory.used --format=csv,noheader
+
+      - name: Tests (CUDA visible)
+        run: |
+          "$PY" .github/ci/memguard.py --limit-gb "$MEMGUARD_GB" -- "$PY" -m pytest tests/ -q -p no:cacheprovider
+
+      - name: Equivalence matrix (CUDA)
+        if: github.event_name == 'schedule' || inputs.matrix
+        run: |
+          MATRIX_DEVICE=cuda "$PY" .github/ci/memguard.py --limit-gb "$MEMGUARD_GB" -- "$PY" benchmarks/equivalence/run_matrix.py
