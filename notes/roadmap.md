@@ -480,9 +480,11 @@ shown in a Flower-based SplitFed baseline.
     (authors' SLFrame doesn't reproduce its own Table 2 either; on SLFrame's exact split TorchSlicer = SLFrame:
     vanilla 0.959 both, SplitFed 0.89 vs 0.88–0.93); SplitFed FMNIST (SL, V1, V2) reproduced ±0.01; label
     leakage + ClipNoise reproduced; Flower strategies as SplitFed aggregation (`ts.interop.flower`), FedAvg =
-    weighted SplitFed within 1e-6; FedAvg now sample-weighted (validation #33). **Left:** local-loss/async
-    (needs owner decision: ResNet-110 is hours), compression paper (search), split-LLM/LoRA (read SplitLoRA),
-    TorchSlicer client inside Flower's engine, version 0.13.0.
+    weighted SplitFed within 1e-6; FedAvg now sample-weighted (validation #33). Part 2 (6a8c25d, db27ad3):
+    SplitLoRA GPT2-S E2E **not reproduced** (BLEU 0.566 vs 0.694, 1 seed; split = centralized), plus
+    `training.scheduler`, `ts.data.register_dataset`, frozen ties allowed in sessions. Owner 2026-10-19: stop
+    spending time on it. **Left:** TorchSlicer client inside Flower's engine, compression paper (search),
+    local-loss/async (owner decision: ResNet-110 is hours), version 0.13.0.
 - **M14, real environment and testbed** (was M13; deferred from M3 on 2026-10-15, owner decision).
   - **Containers.** This container has no Docker or kubectl, so this runs in a fresh clone on a machine that
     has them:
