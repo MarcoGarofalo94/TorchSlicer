@@ -8,7 +8,7 @@ https://github.com/Rainysponge/Split-learning-Attacks.
 0.011–0.017 of the paper. The non-IID runs differ a lot, and the ranking is reversed (the
 paper: SplitFed > vanilla; ours: vanilla > SplitFed). Running the authors' code (SLFrame) does
 not give the published vanilla number either, and its U-shaped variant is a different
-algorithm (see below).
+algorithm (see below). On SLFrame's own split, TorchSlicer matches SLFrame.
 
 ## Setting
 
@@ -57,10 +57,12 @@ client's accuracy; for U-shaped it is the mean of the three clients' own models.
   0.71–0.73 after 2 epochs, which is the published value.
 - U-shaped Dir(0.1): SLFrame's U-shaped is a different algorithm (below), and that algorithm
   gives roughly the published 0.70.
-- **Still open:** SplitFed Dir(0.1), 0.93 in SLFrame against 0.80 here. The splits differ (SLFrame
-  always uses its seed-0 draw), and at α = 0.1 with 3 clients the split varies a lot between
-  seeds (ours: 0.78–0.82). Training TorchSlicer on SLFrame's exact split would separate the
-  split from the implementation; that has not been done yet.
+- **Same split, same result.** At α = 0.1 with 3 clients the result depends heavily on the split,
+  and SLFrame always uses its seed-0 draw. TorchSlicer trained on SLFrame's exact split
+  (3 seeds, model init only): vanilla 0.959 ± 0.004, the same as SLFrame with its optimizer
+  bug fixed (0.959). SplitFed 0.890 ± 0.018 (best epoch 0.925); SLFrame's SplitFed swings
+  between epochs (last five: 0.92, 0.79, 0.87, 0.87, 0.93, mean 0.876). So TorchSlicer agrees
+  with the authors' code; the gap is between Table 2 and that code.
 
 How SLFrame was run: an MPICH venv, and a driver that adds compatibility shims for current
 torch/NumPy, stubs two unused imports, caps SLFrame's message-polling sleeps (speed only: a
@@ -90,10 +92,6 @@ at 30 rounds.
 - **Evaluation.** Each SLFrame client evaluates on the full MNIST test set after its own
   turn. Our evaluation after the last client of each epoch is the same protocol for the last
   client.
-- **Not explained.** SplitFed under Dir(0.1): 0.80 here, 0.93 in SLFrame, 0.98 in the paper.
-  We found no algorithmic difference in the code we read (FedAvg every epoch over the client
-  models, one server model, Adam on both sides). See "Still open" above.
-
 ```bash
 .venv/bin/python baselines/run.py slperf_mnist --seed 0 --runs vanilla_iid   # one run, one seed
 .venv/bin/python baselines/run.py slperf_mnist --merge && .venv/bin/python baselines/run.py slperf_mnist --check

@@ -477,8 +477,8 @@ shown in a Flower-based SplitFed baseline.
   - **A contributor guide** for adding a baseline (cf. Flower Baselines).
   - **Status (2026-10-19, branch `feat/m13-baselines`, part 1 committed):** template + runner + CI smoke
     (`baselines/`, `docs/baselines.md`); SLPerf MNIST (vanilla, U-shaped, SplitFed V2) **not reproduced**
-    (authors' SLFrame doesn't reproduce its own Table 2 either; SplitFed α0.1 0.80 vs SLFrame 0.93 open:
-    next = TorchSlicer on SLFrame's exact split); SplitFed FMNIST (SL, V1, V2) reproduced ±0.01; label
+    (authors' SLFrame doesn't reproduce its own Table 2 either; on SLFrame's exact split TorchSlicer = SLFrame:
+    vanilla 0.959 both, SplitFed 0.89 vs 0.88–0.93); SplitFed FMNIST (SL, V1, V2) reproduced ±0.01; label
     leakage + ClipNoise reproduced; Flower strategies as SplitFed aggregation (`ts.interop.flower`), FedAvg =
     weighted SplitFed within 1e-6; FedAvg now sample-weighted (validation #33). **Left:** local-loss/async
     (needs owner decision: ResNet-110 is hours), compression paper (search), split-LLM/LoRA (read SplitLoRA),

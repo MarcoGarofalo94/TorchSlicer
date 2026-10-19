@@ -304,3 +304,7 @@ NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
   clients); U α0.1 0.738 (0.649/0.767/0.799); SplitFed IID 0.980; SplitFed α0.1 0.932 (0.60–0.94 across
   epochs). SLFrame ≈ TorchSlicer everywhere except SplitFed α0.1 (0.93 vs our 0.80 ± 0.02): open; next test =
   train TorchSlicer on SLFrame's exact seed-0 split. Batch C took 74 min (3 runs on 4 CPUs), not the 25 estimated.
+- 2026-10-19 exact split: TorchSlicer on SLFrame's seed-0 α0.1 split (dumped from SLFrame, label order
+  checked), 3 seeds: vanilla 0.959 ± 0.004 (= SLFrame with optimizer fix 0.959); SplitFed last 0.890 ± 0.018,
+  best 0.925 (SLFrame 0.932 last, last-5 mean 0.876). Conclusion: the 0.80 vs 0.93 gap was the split;
+  TorchSlicer = SLFrame; SLPerf Table 2 ≠ its own code. Script: scratchpad slperf_driver/ts_exact.py.
