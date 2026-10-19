@@ -45,7 +45,7 @@ from . import data
 from . import privacy
 from .sl import (
     CutHook, CutContext, Float16, BFloat16, Quantize, TopK, CircularConv, GaussianNoise, ClipNoise, Recorder, Chain,
-    register_hook, ClientSession, Placement,
+    register_hook, ClientSession, Placement, SplitServer, SplitClient,
 )
 from . import algorithm as _algorithm_module  # noqa: ensure builtin registrations run
 from .algorithm import (

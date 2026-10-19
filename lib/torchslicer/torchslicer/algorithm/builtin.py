@@ -31,8 +31,8 @@ def fedavg(states: list, weights: "list | None" = None) -> "dict | None":
     if not states:
         return None
     n = len(states)
-    if n == 1:
-        return copy.deepcopy(states[0])
+    if n == 1:      # same semantics as n > 1: the weights, no optimizer state
+        return {idx: {"model": copy.deepcopy(st["model"]), "optimizer": None} for idx, st in states[0].items()}
     if weights is not None and len(set(weights)) > 1:
         total = float(sum(weights))
         w = torch.tensor([x / total for x in weights], dtype=torch.float64)

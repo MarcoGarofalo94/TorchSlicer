@@ -88,3 +88,65 @@ class FlowerAggregation(Algorithm):
             out.setdefault(i, {"model": {}, "optimizer": None})["model"][k] = (
                 torch.from_numpy(a.copy()).to(device=ref.device, dtype=ref.dtype))
         return out
+
+
+# ── TorchSlicer clients run by Flower's engine ──────────────────────────────────
+
+def initial_client_arrays(model_fn, cuts: list):
+    """The client slice of ``model_fn()`` as a Flower ``ArrayRecord``: the
+    ``initial_arrays`` of a strategy that aggregates :func:`split_client_app` clients."""
+    from flwr.app import ArrayRecord
+    from ..sl.remote import _slices
+    return ArrayRecord(_slices(model_fn(), cuts)[0].state_dict())
+
+
+def split_client_app(model_fn, data_fn, server_address: str, cuts: list, optimizer: dict,
+                     local_epochs: int = 1, cut_hook_fn=None, device: str = "cpu"):
+    """A Flower ``ClientApp`` whose node trains the client slice of ``model_fn()`` against a
+    :class:`torchslicer.SplitServer` at ``server_address`` (which holds the other slices).
+
+    ``data_fn(partition_id, num_partitions) -> (train_loader, eval_loader)`` gives the node
+    its data (the ids come from the node config, as in Flower's simulation engine).
+    ``train`` loads the strategy's arrays into the client slice, trains ``local-epochs``
+    (train config, default ``local_epochs``) with a fresh optimizer and returns the slice with
+    ``num-examples``; ``evaluate`` returns ``eval_loss``/``eval_acc``. With ``FedAvg`` on the
+    server side this is SplitFed V2: one server copy, the client slices averaged each round.
+    ``cut_hook_fn()`` builds this node's cut hook.
+    """
+    from flwr.app import ArrayRecord, Message, MetricRecord, RecordDict
+    from flwr.clientapp import ClientApp
+    from ..sl.remote import SplitClient
+
+    app, cache = ClientApp(), {}
+
+    def _client(context):
+        if "client" not in cache:
+            cache["client"] = SplitClient(model_fn(), cuts, server_address, optimizer, device=device,
+                                          cut_hook=cut_hook_fn() if cut_hook_fn else None)
+        pid = int(context.node_config.get("partition-id", 0))
+        n = int(context.node_config.get("num-partitions", 1))
+        if cache.get("pid") != pid:
+            cache["pid"], cache["data"] = pid, data_fn(pid, n)
+        return cache["client"], cache["data"]
+
+    @app.train()
+    def train(msg, context):
+        client, (train_loader, _) = _client(context)
+        client.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+        cfg = msg.content["config"] if "config" in msg.content else {}
+        out = client.fit(train_loader, epochs=int(cfg.get("local-epochs", local_epochs)))
+        content = RecordDict({"arrays": ArrayRecord(client.state_dict()),
+                              "metrics": MetricRecord({"train_loss": out["loss"],
+                                                       "num-examples": out["num_examples"]})})
+        return Message(content=content, reply_to=msg)
+
+    @app.evaluate()
+    def evaluate(msg, context):
+        client, (_, eval_loader) = _client(context)
+        client.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+        out = client.evaluate(eval_loader)
+        content = RecordDict({"metrics": MetricRecord({"eval_loss": out["loss"], "eval_acc": out["accuracy"],
+                                                       "num-examples": out["num_examples"]})})
+        return Message(content=content, reply_to=msg)
+
+    return app

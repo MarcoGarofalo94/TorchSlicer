@@ -1407,3 +1407,16 @@ identical.
   compresses the backward by R too. Matches the authors' conv2d-based utils within 2e-5
   (fp32 vs our fp64 FFT); test `test_circular_conv_compresses_both_ways_and_gives_the_exact_gradient`.
   CIFAR-10 torchvision download ran at ~50 KB/s here: the baseline reads the local npz instead.
+
+- **37. `fedavg` of one client kept its optimizer state** (`algorithm/builtin.py`): `n == 1`
+  returned a deep copy of the state, optimizer included, while `n > 1` drops the optimizer
+  ("re-warms on the next batch"). A one-client SplitFed run kept momentum across rounds,
+  unlike every other client count. Found because Flower's engine (fresh optimizer per round)
+  disagreed with `ts.SplitFedAlgorithm` on one client with momentum SGD. Fixed: `n == 1` drops it
+  too; `test_fedavg_single` checks it.
+- **M13 Flower engine:** `ts.SplitServer`/`ts.SplitClient` (`sl/remote.py`): the server slices
+  over gRPC (generic handler, packed tensors, no proto, no pickle), one shared copy stepped per
+  batch under a lock; `interop.flower.split_client_app` + `initial_client_arrays`. One remote
+  client = local vanilla SL (Adam, 3 slices, with and without `CircularConv`); Flower
+  `run_simulation`, 1 node = `ts.SplitFedAlgorithm` (momentum SGD), 3 nodes train. These tests run
+  only where `flwr[simulation]` is installed (scratch venv here; skipped in the repo venv).

@@ -34,7 +34,56 @@ sliced.train(session, run_config=cfg, algorithm=FlowerAggregation(FedAvg(), serv
 - Weights cross as one NumPy array per state-dict entry, ordered by slice and then key.
   Integer buffers are cast back after aggregation.
 
-What this is not (yet): TorchSlicer clients run by Flower's own engine (`flwr run`, the
-simulation engine, or a SuperLink deployment). There, each Flower client is its own
-process, so the server slices would have to be reachable over the network, as
-TorchSlicer's distributed workers are. That integration is planned.
+## TorchSlicer clients in Flower's engine
+
+Flower can also run the clients itself: `flwr run`, the simulation engine, or a
+SuperLink deployment. Each Flower node holds the client slice and its own data. The
+server slices live in one `ts.SplitServer` that every node reaches over gRPC. A Flower
+strategy aggregates the client slices, so with `FedAvg` this is SplitFed V2: one server
+copy, the client slices averaged every round.
+
+```python
+import torchslicer as ts
+from flwr.app import ConfigRecord, Context
+from flwr.serverapp import Grid, ServerApp
+from flwr.serverapp.strategy import FedAvg
+from torchslicer.interop.flower import initial_client_arrays, split_client_app
+
+OPT = {"name": "SGD", "params": {"lr": 0.1, "momentum": 0.9}}
+CUTS = ["2"]
+
+# the server slices, one process (here, or on another machine)
+server = ts.SplitServer(build_model(), CUTS, OPT, {"name": "CrossEntropyLoss", "params": {}},
+                        port=50070).start()
+
+# Flower nodes: data_fn(partition_id, num_partitions) -> (train_loader, eval_loader)
+client_app = split_client_app(build_model, data_fn, "server-host:50070", CUTS, OPT)
+
+server_app = ServerApp()
+
+@server_app.main()
+def main(grid: Grid, context: Context):
+    FedAvg().start(grid=grid, initial_arrays=initial_client_arrays(build_model, CUTS),
+                   num_rounds=10, train_config=ConfigRecord({"local-epochs": 1}))
+```
+
+Run the two apps with `flwr run` or `flwr.simulation.run_simulation(server_app=...,
+client_app=..., num_supernodes=N)`, which needs `pip install "flwr[simulation]"`.
+
+- **Per batch:** each node sends the cut activation and the labels to the server, and
+  gets back the gradient of the activation. The server steps its own optimizer under a
+  lock, so concurrent nodes are served one batch at a time.
+- **Per round:** `train` loads the strategy's arrays into the client slice and trains
+  `local-epochs` with a fresh optimizer. It returns the slice and `num-examples`.
+  `evaluate` returns `eval_loss` and `eval_acc`.
+- **Cut hooks:** `split_client_app(cut_hook_fn=...)` gives each node its own hook, and
+  `ts.SplitServer(cut_hook=...)` gives the server its own. Compression hooks such as
+  `ts.CircularConv` or `ts.Quantize` then work over the network.
+- **Wire format:** tensors cross as packed buffers, never pickled. Build both sides'
+  model with the same code.
+- **Equivalence:** `tests/test_flower.py` runs Flower's simulation engine. With one node,
+  the weights equal `ts.SplitFedAlgorithm` on one client. `tests/test_split_server.py`
+  checks one client through `SplitServer` against local vanilla SL.
+
+`ts.SplitServer` and `ts.SplitClient` don't depend on Flower. Any other framework, or a
+plain script, can drive a client: `SplitClient(...).fit(loader)`.

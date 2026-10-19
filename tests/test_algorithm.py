@@ -216,9 +216,10 @@ def test_local_loss_no_server_forward():
 # ── fedavg helper ─────────────────────────────────────────────────────────────
 
 def test_fedavg_single():
-    state = {0: {"model": {"w": torch.tensor([1.0, 2.0])}, "optimizer": None}}
+    state = {0: {"model": {"w": torch.tensor([1.0, 2.0])}, "optimizer": {"state": {0: {}}}}}
     avg   = fedavg([state])
     assert torch.allclose(avg[0]["model"]["w"], state[0]["model"]["w"])
+    assert avg[0]["optimizer"] is None          # dropped, as with several clients
 
 
 def test_fedavg_equal_weights():
