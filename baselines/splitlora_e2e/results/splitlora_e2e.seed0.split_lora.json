@@ -1,0 +1,27 @@
+{
+ "seed": 0,
+ "runs": {
+  "split_lora": {
+   "seed": 0,
+   "value": 0.5665,
+   "last": 0.5665,
+   "best": 0.5665,
+   "curve": [
+    0.5665
+   ],
+   "bytes_fwd": [
+    14988521472
+   ],
+   "time_s": 8082.81,
+   "train_s": 8045.54,
+   "scores": {
+    "bleu": 0.5665,
+    "nist": 7.8689,
+    "meteor": 0.4168,
+    "rouge_l": 0.6311,
+    "cider": 1.4254,
+    "generated": 630
+   }
+  }
+ }
+}

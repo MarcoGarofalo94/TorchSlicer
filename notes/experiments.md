@@ -317,3 +317,11 @@ NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
 - Both ~13 BLEU below the paper; split ≈ centralized, as in the paper (gap there 0.6). Not reproduced.
 - Found after the run: HF GPT-2 trains with attn/resid/embd dropout 0.1; the LoRA recipe's GPT-2 (examples/NLG/src/model.py) has none (only lora_dropout). A recipe-fidelity bug in the baseline, fixed (`gpt2_lora(pdrop=0.0)`). Predictions were not saved; now `E2E_PREDS` writes them.
 - Conclusion: SL vs centralized parity holds; absolute BLEU gap open, rerun with dropout fixed pending the owner's OK.
+
+## 2026-10-19 — SplitLoRA rerun, GPT-2 dropout 0 (LoRA recipe), seed 0
+- Same command, `gpt2_lora(pdrop=0.0)`, predictions saved (E2E_PREDS).
+- cen_lora: BLEU 0.5658, NIST 7.826, METEOR 0.402, ROUGE-L 0.628, CIDEr 1.462.
+- split_lora: BLEU 0.5665, NIST 7.869, METEOR 0.417, ROUGE-L 0.631, CIDEr 1.425.
+- Dropout was not the cause (+0.5 BLEU). Outputs are fluent and cover the slots; mean length 29.0 words vs refs 27.2. Name copies are often off (`Crown Plaza` for `Crowne`, which train refs also have 189 times; `The sorrento`).
+- Eval path checked against microsoft/LoRA gpt2_decode.py (grouping by context, cut at <|endoftext|> / "\n\n", no lowercasing/tokenizing for E2E): same.
+- Conclusion: not reproduced, ~12.5 BLEU below SplitLoRA Table I in both settings; SL vs centralized parity holds (0.567 vs 0.566). Next: run microsoft/LoRA's own code with gpt2.sm to see whether the recipe reaches ~69 at GPT2-S.
