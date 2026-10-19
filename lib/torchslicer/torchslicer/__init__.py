@@ -44,7 +44,7 @@ from . import sl
 from . import data
 from . import privacy
 from .sl import (
-    CutHook, CutContext, Float16, BFloat16, Quantize, TopK, GaussianNoise, ClipNoise, Recorder, Chain,
+    CutHook, CutContext, Float16, BFloat16, Quantize, TopK, CircularConv, GaussianNoise, ClipNoise, Recorder, Chain,
     register_hook, ClientSession, Placement,
 )
 from . import algorithm as _algorithm_module  # noqa: ensure builtin registrations run
@@ -330,8 +330,8 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
         cut_hooks: What crosses the cuts: a ``ts.CutHook`` (every cut), or
                   ``{cut: hook}`` with cut ``k`` = between slice ``k`` and ``k+1``,
                   e.g. ``{0: ts.Quantize(bits=8)}``. Built in: ``Float16``,
-                  ``BFloat16``, ``Quantize``, ``TopK``, ``GaussianNoise``, ``ClipNoise``,
-                  ``Recorder``, ``Chain``. See docs/tutorials/sl_settings.md.
+                  ``BFloat16``, ``Quantize``, ``TopK``, ``CircularConv``, ``GaussianNoise``,
+                  ``ClipNoise``, ``Recorder``, ``Chain``. See docs/tutorials/sl_settings.md.
 
     Serialization constraint
     ------------------------

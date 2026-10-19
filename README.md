@@ -244,8 +244,8 @@ rec = ts.Recorder(what="backward", max_batches=4)            # what an attacker 
 ts.run(build_model, get_data, cuts=["1", "3"], cut_hooks={0: rec})
 ```
 
-Built-ins: `Float16`, `BFloat16`, `Quantize` (1–8 bits), `TopK`, `GaussianNoise`,
-`Recorder`, `Chain`. Write your own by subclassing `ts.CutHook` (`encode`/`decode`,
+Built-ins: `Float16`, `BFloat16`, `Quantize` (1–8 bits), `TopK`, `CircularConv` (C3-SL),
+`GaussianNoise`, `Recorder`, `Chain`. Write your own by subclassing `ts.CutHook` (`encode`/`decode`,
 `encode_grad`/`decode_grad`), or name built-ins in the config:
 
 ```yaml

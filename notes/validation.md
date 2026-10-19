@@ -1400,3 +1400,10 @@ identical.
 - Baseline runner: `extras.py` may define `evaluate(model, cfg, run, smoke)` (here beam search + the official E2E
   scorer) and register model builders; CI `synthetic` may override data/model/cuts.
 - Overhead measured: GPT-2 S + LoRA, batch 8, A100: plain PyTorch 0.136 s/step, TorchSlicer (1 cut) 0.138.
+
+- **M13 (C3-SL baseline):** new built-in hook `ts.CircularConv(ratio, seed)` (C3-SL batch-wise
+  compression). Encode/decode are linear and mutual adjoints, so `encode_grad = bind`,
+  `decode_grad = unbind` gives slice k exactly the autograd gradient of `decode(encode(z))` and
+  compresses the backward by R too. Matches the authors' conv2d-based utils within 2e-5
+  (fp32 vs our fp64 FFT); test `test_circular_conv_compresses_both_ways_and_gives_the_exact_gradient`.
+  CIFAR-10 torchvision download ran at ~50 KB/s here: the baseline reads the local npz instead.

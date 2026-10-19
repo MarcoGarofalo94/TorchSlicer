@@ -1,0 +1,51 @@
+# C3-SL (Hsieh et al., MLSP 2022), Table 1, VGG-16 on CIFAR-10: vanilla SL and C3-SL's
+# batch-wise circular-convolution compression at R = 2, 4, 8, 16 (ts.CircularConv). As in the
+# paper and the authors' code (github.com/WesleyHsieh0806/C3-SL): ImageNet-pretrained VGG-16
+# split at the 4th max-pooling layer, Adam lr 1e-4, batch 64, 100 epochs, random horizontal
+# flip, the test set evaluated through the same compression. See README.md.
+training:
+  epochs: 100
+  optimizer: {name: Adam, params: {lr: 1.0e-4}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+network: {device: auto}
+data:
+  dataset: cifar10_c3sl
+  root: data
+  batch_size: 64
+  eval_every: 1
+sl:
+  setting: vanilla
+baseline:
+  paper:
+    title: "C3-SL: Circular Convolution-Based Batch-Wise Compression for Communication-Efficient Split Learning"
+    url: https://arxiv.org/abs/2207.12397
+    table: "Table 1, VGG-16 on CIFAR-10 (vanilla SL 89.9 %)"
+  model: {name: vgg16_split, params: {n_classes: 10}}
+  metric: test_accuracy
+  report: best
+  seeds: [0, 1, 2]
+  smoke: {training: {epochs: 1}, data: {train_subset: 2048, test_subset: 512}}
+  synthetic:     # CI: a small CNN on random images, no download
+    data: {dataset: synthetic, params: {shape: [3, 32, 32], classes: 10}}
+    model: {name: cnn, params: {}}
+    cuts: [2]
+  runs:
+    - label: vanilla
+      cuts: [23]
+      expected: {value: 0.899, tol: 0.01}
+    - label: c3sl_r2
+      cuts: [23]
+      config: {sl: {cut_hooks: [{cut: 0, name: circular_conv, params: {ratio: 2}}]}}
+      expected: {value: 0.903, tol: 0.01}
+    - label: c3sl_r4
+      cuts: [23]
+      config: {sl: {cut_hooks: [{cut: 0, name: circular_conv, params: {ratio: 4}}]}}
+      expected: {value: 0.900, tol: 0.01}
+    - label: c3sl_r8
+      cuts: [23]
+      config: {sl: {cut_hooks: [{cut: 0, name: circular_conv, params: {ratio: 8}}]}}
+      expected: {value: 0.899, tol: 0.01}
+    - label: c3sl_r16
+      cuts: [23]
+      config: {sl: {cut_hooks: [{cut: 0, name: circular_conv, params: {ratio: 16}}]}}
+      expected: {value: 0.896, tol: 0.01}

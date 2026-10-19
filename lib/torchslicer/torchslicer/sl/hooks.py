@@ -25,7 +25,7 @@ workers, like a custom layer). Hook state (an error-feedback residual, a recorde
 records) is per side. In ``LocalExecutor`` both sides use the object you passed.
 
 Built in: :class:`Float16`, :class:`BFloat16`, :class:`Quantize`, :class:`TopK`,
-:class:`GaussianNoise`, :class:`Recorder`, :class:`Chain`. Config files name them
+:class:`GaussianNoise`, :class:`CircularConv`, :class:`Recorder`, :class:`Chain`. Config files name them
 (``sl.cut_hooks``, see :func:`hooks_from_config`); ``register_hook`` adds your own.
 """
 
@@ -360,6 +360,67 @@ class ClipNoise(GaussianNoise):
         return self._noise(x, ctx) if self.forward else x
 
 
+class CircularConv(CutHook):
+    """Batch-wise compression of C3-SL (Hsieh et al., MLSP 2022): every group of ``ratio``
+    consecutive samples is sent as one vector, ``V = sum_i K_i * z_i`` (``*`` = circular
+    convolution over the flattened sample), and decoded as ``z_i ~ K_i (x) V`` (circular
+    correlation). The keys are ``ratio`` random unit vectors drawn from ``seed``, so both
+    sides of the cut make the same ones without sending them.
+
+    Both maps are linear and each is the other's adjoint, so the gradient goes back
+    compressed by the same factor and slice ``k`` gets exactly the gradient of training
+    through ``decode(encode(z))``. A batch whose size is not a multiple of ``ratio`` is
+    padded with zero samples, which add nothing to the sums.
+    """
+
+    def __init__(self, ratio: int = 4, seed: int = 0):
+        if ratio < 1:
+            raise ValueError("CircularConv(ratio=) must be >= 1")
+        self.ratio, self.seed = int(ratio), seed
+        self._keys = {}                      # (dim, device) -> fft of the keys [ratio, dim // 2 + 1]
+
+    def _fkeys(self, d, device):
+        k = (d, str(device))
+        if k not in self._keys:
+            g = torch.Generator().manual_seed(self.seed)
+            keys = torch.randn(self.ratio, d, generator=g, dtype=torch.float64) / d ** 0.5
+            keys = keys / keys.norm(dim=1, keepdim=True)
+            self._keys[k] = torch.fft.rfft(keys, dim=1).to(device)
+        return self._keys[k]
+
+    def _bind(self, t):
+        """[B, ...] -> [[ceil(B / ratio), dim] superposed vectors, shape]."""
+        shape = torch.tensor(list(t.shape), dtype=torch.int64, device=t.device)
+        z = t.reshape(t.shape[0], -1)
+        b, d = z.shape
+        pad = -b % self.ratio
+        if pad:
+            z = torch.cat([z, z.new_zeros(pad, d)])
+        fz = torch.fft.rfft(z.double(), dim=1).reshape(-1, self.ratio, d // 2 + 1)
+        v = torch.fft.irfft((fz * self._fkeys(d, t.device)).sum(1), n=d, dim=1)
+        return [v.to(t.dtype), shape]
+
+    def _unbind(self, payload):
+        v, shape = payload
+        shape = [int(x) for x in shape.tolist()]
+        d = v.shape[1]
+        fv = torch.fft.rfft(v.double(), dim=1).unsqueeze(1)
+        z = torch.fft.irfft(fv * self._fkeys(d, v.device).conj(), n=d, dim=2)
+        return z.reshape(-1, d)[:shape[0]].reshape(shape).to(v.dtype)
+
+    def encode(self, x, ctx):
+        return self._bind(x) if x.is_floating_point() and x.dim() > 0 else x
+
+    def decode(self, payload, ctx):
+        return payload if isinstance(payload, torch.Tensor) else self._unbind(payload)
+
+    def encode_grad(self, g, ctx):            # adjoint of decode
+        return self._bind(g) if g.is_floating_point() and g.dim() > 0 else g
+
+    def decode_grad(self, payload, ctx):      # adjoint of encode
+        return payload if isinstance(payload, torch.Tensor) else self._unbind(payload)
+
+
 class Recorder(CutHook):
     """Observe a cut without changing it, e.g. as the input of a reconstruction or
     label-inference attack.
@@ -443,6 +504,7 @@ _REGISTRY = {
     "bfloat16": BFloat16,
     "quantize": Quantize,
     "topk": TopK,
+    "circular_conv": CircularConv,
     "gaussian_noise": GaussianNoise,
     "clip_noise": ClipNoise,
     "recorder": Recorder,
