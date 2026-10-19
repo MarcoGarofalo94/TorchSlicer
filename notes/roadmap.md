@@ -483,8 +483,11 @@ shown in a Flower-based SplitFed baseline.
     weighted SplitFed within 1e-6; FedAvg now sample-weighted (validation #33). Part 2 (6a8c25d, db27ad3):
     SplitLoRA GPT2-S E2E **not reproduced** (BLEU 0.566 vs 0.694, 1 seed; split = centralized), plus
     `training.scheduler`, `ts.data.register_dataset`, frozen ties allowed in sessions. Owner 2026-10-19: stop
-    spending time on it. **Left:** TorchSlicer client inside Flower's engine, compression paper (search),
-    local-loss/async (owner decision: ResNet-110 is hours), version 0.13.0.
+    spending time on it. Part 3 (7add05e, dc9d48d, 2026-10-19): `ts.CircularConv` (C3-SL hook) + C3-SL
+    VGG-16/CIFAR-10 baseline (runs in progress); `ts.SplitServer`/`ts.SplitClient` + Flower
+    `split_client_app` (TorchSlicer clients in Flower's engine, 1 node = SplitFedAlgorithm exactly);
+    fedavg single-client optimizer fix (#37); version 0.13.0. **Skipped (owner, 2026-10-19):**
+    local-loss/async. **Left:** C3-SL results + README, contributor guide check, merge.
 - **M14, real environment and testbed** (was M13; deferred from M3 on 2026-10-15, owner decision).
   - **Containers.** This container has no Docker or kubectl, so this runs in a fresh clone on a machine that
     has them:
@@ -552,7 +555,7 @@ shown in a Flower-based SplitFed baseline.
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-19: M13 part 1 committed on `feat/m13-baselines` (not pushed); see M13 Status.** NCCL unvalidated on this hardware. M7 deferred.
+Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-19: M13 parts 1-3 on `feat/m13-baselines` (pushed), version 0.13.0; see M13 Status.** NCCL unvalidated on this hardware. M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
     M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),
