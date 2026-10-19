@@ -336,7 +336,7 @@ def test_config_unknown_algorithm_raises():
 
 # ── SplitFed against a plain-PyTorch reference ────────────────────────────────
 
-def _splitfed_reference(datas, v1: bool, rounds=2, select=None):
+def _splitfed_reference(datas, v1: bool, rounds=2, select=None, weighted=False):
     """SplitFed in plain PyTorch, parallel clients: each client has its own client model
     and optimizer; the server is shared (V2) or one copy per client (V1). At round end
     the client models (and V1's server copies) are averaged and their optimizer states
@@ -353,8 +353,10 @@ def _splitfed_reference(datas, v1: bool, rounds=2, select=None):
     for r in range(1, rounds + 1):
         part = select(r) if select else list(range(k))
         losses = []
-        for b in range(len(datas[0])):
+        for b in range(max(len(d) for d in datas)):
             for i in part:
+                if b >= len(datas[i]):
+                    continue
                 x, y = datas[i][b]
                 a = clients[i](x)
                 a_in = a.detach().requires_grad_(True)
@@ -367,7 +369,12 @@ def _splitfed_reference(datas, v1: bool, rounds=2, select=None):
         for models, opts in groups:
             with torch.no_grad():       # average the participants, give it to everyone
                 for ps in zip(*(m.parameters() for m in models)):
-                    avg = torch.stack([ps[i] for i in part]).mean(0)
+                    if weighted:            # FedAvg: n_k / n (here batches, all of size B)
+                        w = torch.tensor([len(datas[i]) for i in part], dtype=torch.float64)
+                        w = (w / w.sum()).reshape((-1,) + (1,) * ps[0].dim())
+                        avg = (torch.stack([ps[i].double() for i in part]) * w).sum(0).float()
+                    else:
+                        avg = torch.stack([ps[i] for i in part]).mean(0)
                     for p in ps:
                         p.copy_(avg)
             for o in opts:
@@ -387,6 +394,34 @@ def test_splitfed_matches_reference(algo_cls, v1):
     session = ts.ClientSession(datas, mode="parallel")
     hist = ts.slice(_model(), n=2, cuts=["1"]).train(session, run_config=cfg, algorithm=algo_cls())
     assert [h["loss"] for h in hist] == pytest.approx(_splitfed_reference(datas, v1), abs=1e-6)
+
+
+@pytest.mark.parametrize("algo_cls,v1", [(SplitFedAlgorithm, False), (SplitFedV1Algorithm, True)])
+def test_splitfed_weights_clients_by_samples(algo_cls, v1):
+    """Thapa et al., Algorithm 1: the client-side (and V1 server-side) models are averaged
+    with weights n_k / n; weighting="equal" keeps the plain mean."""
+    g = torch.Generator().manual_seed(6)
+    datas = [[(torch.randn(B, D_IN, generator=g), torch.randint(0, 4, (B,), generator=g))
+              for _ in range(n)] for n in (1, 2, 4)]
+    cfg = _cfg(epochs=2)
+    cfg.sl.setting = "vanilla"
+    for weighting, weighted in (("samples", True), ("equal", False)):
+        session = ts.ClientSession(datas, mode="parallel")
+        hist = ts.slice(_model(), n=2, cuts=["1"]).train(session, run_config=cfg,
+                                                         algorithm=algo_cls(weighting=weighting))
+        ref = _splitfed_reference(datas, v1, weighted=weighted)
+        assert [h["loss"] for h in hist] == pytest.approx(ref, abs=1e-6)
+    assert _splitfed_reference(datas, v1, weighted=True)[1] != pytest.approx(
+        _splitfed_reference(datas, v1, weighted=False)[1], abs=1e-6)
+
+
+def test_fedavg_weights():
+    s1 = {0: {"model": {"w": torch.tensor([0.0, 4.0])}, "optimizer": None}}
+    s2 = {0: {"model": {"w": torch.tensor([2.0, 0.0])}, "optimizer": None}}
+    assert torch.allclose(fedavg([s1, s2], [1, 3])[0]["model"]["w"], torch.tensor([1.5, 1.0]))
+    assert torch.equal(fedavg([s1, s2], [2, 2])[0]["model"]["w"], fedavg([s1, s2])[0]["model"]["w"])
+    with pytest.raises(ValueError, match="weights"):
+        fedavg([s1, s2], [1])
 
 
 class _Sample(ts.Algorithm):

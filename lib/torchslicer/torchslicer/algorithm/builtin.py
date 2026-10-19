@@ -16,18 +16,35 @@ from .registry import register
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def fedavg(states: list) -> "dict | None":
-    """Equal-weight average of a list of client/server state dicts.
+def fedavg(states: list, weights: "list | None" = None) -> "dict | None":
+    """Average of a list of client/server state dicts, weighted by ``weights`` (e.g. the
+    clients' sample counts, as FedAvg's n_k / n), equal weights when ``None`` or all equal.
 
     Each state dict maps slice_index → {"model": state_dict, "optimizer": ...}.
     Optimizer state is dropped (not averaged — re-warms on the next batch).
     """
+    if weights is not None:
+        if len(weights) != len(states):
+            raise ValueError(f"fedavg: {len(weights)} weights for {len(states)} states")
+        weights = [w for s, w in zip(states, weights) if s is not None]
     states = [s for s in states if s is not None]
     if not states:
         return None
     n = len(states)
     if n == 1:
         return copy.deepcopy(states[0])
+    if weights is not None and len(set(weights)) > 1:
+        total = float(sum(weights))
+        w = torch.tensor([x / total for x in weights], dtype=torch.float64)
+        result = {}
+        for idx in states[0]:
+            model_sd = states[0][idx]["model"]
+            avg = {}
+            for k in model_sd:
+                stacked = torch.stack([s[idx]["model"][k].double() for s in states])
+                avg[k] = (stacked * w.reshape((-1,) + (1,) * (stacked.dim() - 1))).sum(0).to(model_sd[k].dtype)
+            result[idx] = {"model": avg, "optimizer": None}
+        return result
     result = {}
     for idx in states[0]:
         model_sd = states[0][idx]["model"]
@@ -57,17 +74,27 @@ class SplitFedAlgorithm(Algorithm):
     Works with a ``ts.ClientSession(mode="parallel")``; this algorithm
     provides the aggregation in place of a manual ``on_round_end`` callback.
 
-    Reference: arXiv:2108.09027 / https://ojs.aaai.org/index.php/AAAI/article/view/20825
+    ``weighting``: "samples" (default) averages the clients by their sample counts
+    n_k / n, as in the paper's Algorithm 1; "equal" ignores the sizes.
+
+    Reference: arXiv:2004.12088 / https://ojs.aaai.org/index.php/AAAI/article/view/20825
     """
 
+    def __init__(self, weighting: str = "samples"):
+        if weighting not in ("samples", "equal"):
+            raise ValueError("weighting must be 'samples' or 'equal'")
+        self.weighting = weighting
+        self._weights = None
+
     def on_round_end(self, client_states, metrics, round):
-        avg = fedavg(client_states)
+        self._weights = metrics.get("client_samples") if self.weighting == "samples" else None
+        avg = fedavg(client_states, self._weights)
         if avg is None:
             return None
         return [avg] * len(client_states)
 
     def aggregate(self, client_states, server_states, round):
-        return fedavg(client_states), None
+        return fedavg(client_states, self._weights), None
 
 
 register("splitfed", SplitFedAlgorithm)
@@ -82,20 +109,31 @@ class SplitFedV1Algorithm(Algorithm):
     Requires the executor to allocate separate server-slice states per client
     (``needs_per_client_server_state()`` returns True).
 
-    Reference: arXiv:2108.09027 / https://ojs.aaai.org/index.php/AAAI/article/view/20825
+    ``weighting``: "samples" (default) averages the clients by their sample counts
+    n_k / n, as in the paper's Algorithm 1; "equal" ignores the sizes.
+
+    Reference: arXiv:2004.12088 / https://ojs.aaai.org/index.php/AAAI/article/view/20825
     """
 
     def needs_per_client_server_state(self) -> bool:
         return True
 
+    def __init__(self, weighting: str = "samples"):
+        if weighting not in ("samples", "equal"):
+            raise ValueError("weighting must be 'samples' or 'equal'")
+        self.weighting = weighting
+        self._weights = None
+
     def on_round_end(self, client_states, metrics, round):
-        avg = fedavg(client_states)
+        self._weights = metrics.get("client_samples") if self.weighting == "samples" else None
+        avg = fedavg(client_states, self._weights)
         if avg is None:
             return None
         return [avg] * len(client_states)
 
     def aggregate(self, client_states, server_states, round):
-        return fedavg(client_states), fedavg(server_states)
+        w = self._weights if self._weights is not None and len(self._weights) == len(server_states) else None
+        return fedavg(client_states, self._weights), fedavg(server_states, w)
 
 
 register("splitfed_v1", SplitFedV1Algorithm)

@@ -119,7 +119,8 @@ class Algorithm:
         round: int,
     ) -> "list | None":
         """End of a round (epoch) with all client states. Return updated states
-        or None to keep them. Default: no-op."""
+        or None to keep them. Default: no-op. ``metrics["client_samples"]`` holds the
+        participating clients' sample counts, in order (for weighted averaging)."""
         return None
 
 

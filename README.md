@@ -119,6 +119,8 @@ python -m torchslicer launch train.py -c run.yaml --target k8s            # or c
 | **Algorithms** | `ts.Algorithm` (Flower-Strategy-style): vanilla SplitNN, SplitFed V1/V2, local loss, FedAvg, client sampling | [algorithm](docs/tutorials/algorithm.md) |
 | **Multiple clients** | `ts.ClientSession`: sequential or parallel clients against shared server slices | [sl_settings](docs/tutorials/sl_settings.md) |
 | **Data** | MNIST, Fashion-MNIST, CIFAR-10/100, synthetic, `.npz`; iid / Dirichlet / shards / quantity splits; test-set evaluation | [data](docs/tutorials/data.md) |
+| **Flower interop** | any Flower strategy (FedAvg, FedMedian, Krum, FedAdam, ...) as the SplitFed aggregation of the client (and server) slices; Flower FedAvg = `ts.SplitFedAlgorithm` exactly | [flower](docs/tutorials/flower.md) |
+| **Baselines** | published SL results rerun from one command with the paper's number and a tolerance (SLPerf: vanilla, U-shaped, SplitFed) | [baselines](docs/baselines.md) |
 | **Privacy** | label inference from gradients (norm / direction), learning-based input inversion, a malicious server (FSHA), architecture-only inversion (UnSplit), LLM hidden-state inversion, distance correlation; NoPeek, noise and clipped-noise defences with a DP accountant; `leak_*` metrics per epoch | [privacy](docs/tutorials/privacy.md) |
 | **Transport** | gRPC, raw TCP (pinned memory), CUDA IPC, NCCL | [transport](docs/tutorials/transport.md) |
 | **NAT traversal** | clients that only dial out, tunnels, optional relay | [nat](docs/tutorials/nat.md) |

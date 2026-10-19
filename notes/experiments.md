@@ -274,3 +274,33 @@ NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
   clipping), long before ε is meaningful (ε = 5.2 at z = 3): the heuristic attacks need far
   less noise than the worst-case bound. Clipping alone does not protect, and clipping makes
   the noise effective (z 0.1 vs unclipped noise of the same std: direction AUC 0.60 vs 0.73).
+
+## 2026-10-18 — M13 baselines: SLPerf Table 2 (MNIST) and Li et al. label leakage
+- Hypothesis: TorchSlicer reproduces published SL numbers from one config (`baselines/<name>/config.yaml`,
+  `baselines/run.py <name> --seed k`, `--merge`, `--check`), 3 seeds, 9 processes in parallel.
+- SLPerf (arXiv:2304.01502), LeNet cut after conv block 1, 3 clients, batch 64, 30 epochs, last-epoch test
+  acc (ours vs paper): vanilla IID 0.9902 ± 0.0012 vs 0.9792; vanilla Dir0.1 0.8982 ± 0.0545 vs 0.7288;
+  U-shape IID 0.9899 ± 0.0008 vs 0.9728; U-shape Dir0.1 0.9385 ± 0.0046 vs 0.7019; SplitFed IID
+  0.9755 ± 0.0031 vs 0.9882 (best epoch 0.9853 ± 0.0012); SplitFed Dir0.1 0.8021 ± 0.0231 vs 0.9768.
+  Non-IID split = SLFrame's `hetero` ported (`slperf_hetero`); a first pass with ts.data `dirichlet` (discarded)
+  gave vanilla/U-shape Dir0.1 0.83–0.95, same picture.
+- SLFrame code reading: vanilla `client_manager.py:67` rebinds `trainer.model = torch.load(...)` while the
+  optimizer (client.py:23) holds the old parameters → client layers stop training after the first handoff
+  [code read, not run]. Consistent with SLPerf's lower vanilla/U-shape. Eval: every client on the full test
+  set after its turn (= ours). SplitFed Dir0.1 gap (0.80 vs 0.98) unexplained.
+- Li et al. (arXiv:2102.08504), CIFAR-10 airplane binary stand-in, cut2, 3 epochs, q95 leak AUC: direction
+  1.000 ± 0, norm 0.993 ± 0.009 (paper ≈ 1); ClipNoise C 1e-2 z 1: direction 0.746 ± 0.035, ε 20.1.
+- Conclusion: label leakage reproduced; **SLPerf not reproduced** (IID within 0.011–0.017, outside ±0.01;
+  non-IID ranking reversed). Not tuned towards the paper; a vanilla run that freezes the client after the
+  first handoff would test the SLFrame-bug explanation (not run).
+- 2026-10-18 follow-up: ran SLFrame itself (scratch venv + MPICH, my driver: torch/numpy shims, unused
+  imports stubbed, polling sleeps capped; same accuracies with and without the caps). Vanilla Dir0.1 seed 0,
+  30 epochs, last client: 0.946 published code, 0.959 with the optimizer rebuilt after each handoff
+  (bug confirmed, +1.3 pt only). SLFrame is at 0.71–0.73 after 2 epochs → Table 2's 0.7288 is not SLFrame's
+  30-epoch result [setting of Table 2 unverified]. U-shaped in SLFrame = private client head/tail per
+  client (no handoff), never terminates (epoch counted twice, stop at == 3); 0.55–0.67 after 2–4 rounds ≈
+  paper's 0.70. Conclusion: the vanilla/U-shape gaps are the paper's, not TorchSlicer's.
+- 2026-10-19 SLFrame batches B+C (seed 0, 30 epochs, last client): vanilla IID 0.987; U IID 0.988 (mean of
+  clients); U α0.1 0.738 (0.649/0.767/0.799); SplitFed IID 0.980; SplitFed α0.1 0.932 (0.60–0.94 across
+  epochs). SLFrame ≈ TorchSlicer everywhere except SplitFed α0.1 (0.93 vs our 0.80 ± 0.02): open; next test =
+  train TorchSlicer on SLFrame's exact seed-0 split. Batch C took 74 min (3 runs on 4 CPUs), not the 25 estimated.

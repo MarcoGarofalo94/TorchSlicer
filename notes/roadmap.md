@@ -475,6 +475,14 @@ shown in a Flower-based SplitFed baseline.
     SplitFed aggregation. This puts SL where the FL community already works; SplitBud (`notes/sota.md`) shows
     the demand.
   - **A contributor guide** for adding a baseline (cf. Flower Baselines).
+  - **Status (2026-10-19, branch `feat/m13-baselines`, part 1 committed):** template + runner + CI smoke
+    (`baselines/`, `docs/baselines.md`); SLPerf MNIST (vanilla, U-shaped, SplitFed V2) **not reproduced**
+    (authors' SLFrame doesn't reproduce its own Table 2 either; SplitFed α0.1 0.80 vs SLFrame 0.93 open:
+    next = TorchSlicer on SLFrame's exact split); SplitFed FMNIST (SL, V1, V2) reproduced ±0.01; label
+    leakage + ClipNoise reproduced; Flower strategies as SplitFed aggregation (`ts.interop.flower`), FedAvg =
+    weighted SplitFed within 1e-6; FedAvg now sample-weighted (validation #33). **Left:** local-loss/async
+    (needs owner decision: ResNet-110 is hours), compression paper (search), split-LLM/LoRA (read SplitLoRA),
+    TorchSlicer client inside Flower's engine, version 0.13.0.
 - **M14, real environment and testbed** (was M13; deferred from M3 on 2026-10-15, owner decision).
   - **Containers.** This container has no Docker or kubectl, so this runs in a fresh clone on a machine that
     has them:
@@ -542,7 +550,7 @@ shown in a Flower-based SplitFed baseline.
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). NCCL unvalidated on this hardware. M7 deferred.
+Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-19: M13 part 1 committed on `feat/m13-baselines` (not pushed); see M13 Status.** NCCL unvalidated on this hardware. M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
     M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),

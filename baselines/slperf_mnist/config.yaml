@@ -1,0 +1,62 @@
+# SLPerf (Zhou, Hu, Wu, Chen, 2023), Table 2, MNIST: three SL paradigms, 3 clients, IID and
+# Dirichlet(0.1) label skew. Setting from the paper's text (§4.1) and its code
+# (github.com/Rainysponge/Split-learning-Attacks, SLFrame): LeNet split after the first conv
+# block, batch 64, lr 0.01. Optimizers from the code: SGD momentum 0.9, weight decay 5e-4
+# (vanilla, U-shape), Adam (SplitFed); the paper's text says SGD for all. Non-IID split: SLPerf's
+# own (extras.py: slperf_hetero), not ts.data's dirichlet. See README.md.
+training:
+  epochs: 30
+  optimizer: {name: SGD, params: {lr: 0.01, momentum: 0.9, weight_decay: 5.0e-4}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+network: {device: auto}
+data:
+  dataset: mnist
+  root: data
+  partition: iid
+  batch_size: 64
+  eval_every: 1
+sl:
+  setting: vanilla
+  clients: 3
+  client_mode: sequential
+  handoff: copy
+baseline:
+  paper:
+    title: "SLPerf: a Unified Framework for Benchmarking Split Learning"
+    url: https://arxiv.org/abs/2304.01502
+    table: "Table 2 (3 clients), centralized 0.9843"
+  model: {name: lenet, params: {in_ch: 1, n_classes: 10, side: 28}}
+  metric: test_accuracy
+  report: last
+  seeds: [0, 1, 2]
+  smoke: {training: {epochs: 1}, data: {train_subset: 900, test_subset: 300}}
+  synthetic: {shape: [1, 28, 28], classes: 10}     # CI: same runs on random data, no download
+  runs:
+    - label: vanilla_iid
+      cuts: [2]
+      expected: {value: 0.9792, tol: 0.01}
+    - label: vanilla_dir0.1
+      cuts: [2]
+      config: {data: {partition: slperf_hetero, partition_params: {alpha: 0.1}}}
+      expected: {value: 0.7288, tol: 0.10}
+    - label: ushape_iid
+      cuts: [2, 6]
+      config: {sl: {setting: u_shaped}}
+      expected: {value: 0.9728, tol: 0.01}
+    - label: ushape_dir0.1
+      cuts: [2, 6]
+      config: {sl: {setting: u_shaped}, data: {partition: slperf_hetero, partition_params: {alpha: 0.1}}}
+      expected: {value: 0.7019, tol: 0.10}
+    - label: splitfed_iid
+      cuts: [2]
+      config:
+        training: {optimizer: {name: Adam, params: {lr: 0.01}}}
+        sl: {handoff: keep, algorithm: splitfed}
+      expected: {value: 0.9882, tol: 0.01}
+    - label: splitfed_dir0.1
+      cuts: [2]
+      config:
+        training: {optimizer: {name: Adam, params: {lr: 0.01}}}
+        sl: {handoff: keep, algorithm: splitfed}
+        data: {partition: slperf_hetero, partition_params: {alpha: 0.1}}
+      expected: {value: 0.9768, tol: 0.02}

@@ -1359,3 +1359,29 @@ identical.
   usability gap: worth a fallback to the local npz files.
 - Bugs found in existing code: none.
 - Matrix after M12 step 4 (CPU): 115/117, the same 2 GPipe + BatchNorm cells; losses unchanged.
+
+## M13 baselines + Flower interop (2026-10-18, branch `feat/m13-baselines`, from `feat/m12-privacy`)
+
+### Bugs found while reading the baseline papers
+**32. Wrong SplitFed citation (docs).** `SplitFedAlgorithm`/`SplitFedV1Algorithm` cited
+  arXiv:2108.09027, which is a physics paper ("Spin-to-Charge conversion with electrode
+  confinement in diamond"). SplitFed is arXiv:2004.12088 (Thapa et al., AAAI 2022). Fixed.
+**33. FedAvg was unweighted (silent deviation from the paper).** `fedavg` took the plain mean of the client states;
+  SplitFed's Algorithm 1 (and FedAvg) weight client k by n_k / n. With unequal clients (any
+  Dirichlet or quantity split) the aggregated model differed from the paper's. Fix:
+  `fedavg(states, weights=None)`; `algorithm_round_end` passes the participants' sample
+  counts as `metrics["client_samples"]` (`ClientSession.n_samples(k)`: the loader's dataset
+  size, else its batches); both SplitFed algorithms take `weighting="samples"` (default,
+  the paper) or `"equal"` (the old behaviour). Equal weights keep the old code path, so
+  equal-size splits are bit-identical. Tests: weighted and equal SplitFed V1/V2 against a
+  plain-PyTorch reference with clients of 1, 2 and 4 batches (1e-6); `fedavg` weights.
+
+### Baseline template and reproductions
+- `baselines/` (shipped): one config per paper with a `baseline:` section, a shared runner, `--check` against
+  `expected {value, tol}`; CI runs every baseline for 1 epoch on synthetic data (`tests/test_baselines.py`).
+- Runner bug found while running: a deep merge carried SGD's `momentum` into Adam's params (`_ATOMIC` keys
+  are now replaced, not merged); seed files of `--runs` groups overwrote each other (suffix per group).
+- Usability gap: `load_dataset("cifar10")` downloads through torchvision even when npz copies exist (50 KB/s
+  here); baselines use `dataset: npz`.
+- Reproductions: label leakage yes; SLPerf no (README lists the code differences, incl. a SLFrame vanilla
+  optimizer-rebinding bug found by reading). Flower FedAvg = our weighted SplitFed within 1e-6 (checks #33).
