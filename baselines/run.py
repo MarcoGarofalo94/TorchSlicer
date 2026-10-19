@@ -55,16 +55,26 @@ def _merge(base: dict, over: dict) -> dict:
     return out
 
 
+_EVALUATE = {}   # baseline name -> extras.evaluate
+
+
 def load(name: str) -> tuple[dict, dict]:
     """``(baseline section, RunConfig dict)``; imports ``<name>/extras.py`` if there is one
-    (a baseline's own partitioner, hook or algorithm registrations)."""
+    (a baseline's own dataset, partitioner, model, hook or algorithm registrations). An
+    ``evaluate(model, cfg, run, smoke) -> {metric: value}`` there runs after training, and its
+    metrics can be the baseline's ``metric``."""
     extras = os.path.join(HERE, name, "extras.py")
+    raw = yaml.safe_load(open(os.path.join(HERE, name, "config.yaml")))
+    spec = raw.pop("baseline")
     if os.path.isfile(extras):
         import importlib.util
-        mod = importlib.util.spec_from_file_location(f"baseline_{name}_extras", extras)
-        mod.loader.exec_module(importlib.util.module_from_spec(mod))
-    raw = yaml.safe_load(open(os.path.join(HERE, name, "config.yaml")))
-    return raw.pop("baseline"), raw
+        loc = importlib.util.spec_from_file_location(f"baseline_{name}_extras", extras)
+        mod = importlib.util.module_from_spec(loc)
+        loc.loader.exec_module(mod)
+        if hasattr(mod, "evaluate"):
+            _EVALUATE[name] = mod.evaluate
+            spec["evaluate"] = name
+    return spec, raw
 
 
 def run_one(spec: dict, setting: dict, run: dict, seed: int, smoke: bool) -> dict:
@@ -77,19 +87,31 @@ def run_one(spec: dict, setting: dict, run: dict, seed: int, smoke: bool) -> dic
     cfg.discovery.n_workers = len(cuts) + 1
     m = spec["model"]
 
+    built = []
+
     def model_fn():
         torch.manual_seed(seed)
-        return MODELS[m["name"]](**(m.get("params") or {}))
+        built.append(MODELS[m["name"]](**(m.get("params") or {})))
+        return built[-1]
 
     t0 = time.perf_counter()
     hist = ts.run(model_fn, run_config=cfg, verbose=False, cuts=cuts)
+    train_s = time.perf_counter() - t0
     metric = run.get("metric", spec["metric"])
+    extra = {}
+    if spec.get("evaluate"):
+        extra = _EVALUATE[spec["evaluate"]](built[-1], cfg, run, smoke)
+        hist = hist + [extra]
     values = [e[metric] for e in hist if metric in e]
+    if not values and smoke and extra:       # CI without the baseline's external scorer
+        return {"value": None, "scores": extra, "time_s": round(time.perf_counter() - t0, 2)}
     if not values:
         raise RuntimeError(f"run {run['label']}: no {metric!r} in the history (data.eval_every?)")
     return {"value": values[-1] if spec.get("report", "last") == "last" else max(values),
             "last": values[-1], "best": max(values), "curve": values,
-            "bytes_fwd": hist[-1].get("bytes_fwd"), "time_s": round(time.perf_counter() - t0, 2)}
+            "bytes_fwd": next((e["bytes_fwd"] for e in reversed(hist) if "bytes_fwd" in e), None),
+            "time_s": round(time.perf_counter() - t0, 2), "train_s": round(train_s, 2),
+            **({"scores": extra} if extra else {})}
 
 
 def _summary(run, rows, smoke):

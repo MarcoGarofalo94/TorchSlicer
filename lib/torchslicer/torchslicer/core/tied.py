@@ -27,6 +27,7 @@ class TiedGroup:
     """One shared parameter: ``members`` maps partition index → its local names."""
     group_id: int
     members: dict = field(default_factory=dict)   # {partition_index: [name, ...]}
+    requires_grad: bool = True                    # False: frozen, it never changes
 
     @property
     def owner(self) -> int:
@@ -47,15 +48,17 @@ def find_tied_parameters(partitions_layers: list) -> list:
     Only parameters reachable under more than one name are reported.
     """
     by_param: dict = {}
+    grad: dict = {}
     for p_idx, layers in enumerate(partitions_layers):
         container = nn.ModuleDict({"layers": nn.ModuleList(layers)})
         for name, param in container.named_parameters(remove_duplicate=False):
             by_param.setdefault(id(param), []).append((p_idx, name))
+            grad[id(param)] = param.requires_grad
     groups = []
-    for uses in by_param.values():
+    for key, uses in by_param.items():
         if len(uses) < 2:
             continue
-        group = TiedGroup(group_id=len(groups))
+        group = TiedGroup(group_id=len(groups), requires_grad=grad[key])
         for p_idx, name in uses:
             group.members.setdefault(p_idx, []).append(name)
         groups.append(group)

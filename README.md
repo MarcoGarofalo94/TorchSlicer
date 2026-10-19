@@ -417,6 +417,7 @@ training:
   epochs: 10
   optimizer: {name: AdamW, params: {lr: 3.0e-4}}
   criterion: {name: CrossEntropyLoss, params: {}}
+  scheduler: {name: linear, params: {warmup_steps: 500, total_steps: 20000}}   # local executor
   mixed_precision: true          # bf16 autocast
 pipeline: {use_gpipe: true, n_micro: 4}
 discovery: {n_workers: 3}        # number of slices

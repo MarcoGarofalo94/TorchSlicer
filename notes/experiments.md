@@ -308,3 +308,12 @@ NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
   checked), 3 seeds: vanilla 0.959 ± 0.004 (= SLFrame with optimizer fix 0.959); SplitFed last 0.890 ± 0.018,
   best 0.925 (SLFrame 0.932 last, last-5 mean 0.876). Conclusion: the 0.80 vs 0.93 gap was the split;
   TorchSlicer = SLFrame; SLPerf Table 2 ≠ its own code. Script: scratchpad slperf_driver/ts_exact.py.
+
+## 2026-10-19 — SplitLoRA (GPT-2 S, r = 4, E2E), seed 0, full recipe
+- Hypothesis: TorchSlicer reproduces SplitLoRA Table I (CenLoRA BLEU 69.41, SplitLoRA 68.79), tol 0.01.
+- Config `baselines/splitlora_e2e/config.yaml`; `baselines/run.py splitlora_e2e --seed 0 --runs <run>` (both in parallel on the A100, 2 h 14 min each).
+- cen_lora: BLEU 0.5604, NIST 7.842, METEOR 0.401, ROUGE-L 0.622, CIDEr 1.429.
+- split_lora: BLEU 0.5627, NIST 7.842, METEOR 0.409, ROUGE-L 0.628, CIDEr 1.449.
+- Both ~13 BLEU below the paper; split ≈ centralized, as in the paper (gap there 0.6). Not reproduced.
+- Found after the run: HF GPT-2 trains with attn/resid/embd dropout 0.1; the LoRA recipe's GPT-2 (examples/NLG/src/model.py) has none (only lora_dropout). A recipe-fidelity bug in the baseline, fixed (`gpt2_lora(pdrop=0.0)`). Predictions were not saved; now `E2E_PREDS` writes them.
+- Conclusion: SL vs centralized parity holds; absolute BLEU gap open, rerun with dropout fixed pending the owner's OK.

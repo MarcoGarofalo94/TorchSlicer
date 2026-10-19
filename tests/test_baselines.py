@@ -24,14 +24,19 @@ def test_baseline_runs_on_synthetic_data(name):
     for key in ("paper", "model", "metric", "runs", "synthetic", "smoke"):
         assert key in spec, f"{name}: baseline.{key} missing"
     assert spec["paper"].get("url"), f"{name}: the paper needs a link"
-    syn = {"data": {"dataset": "synthetic", "params": {**spec["synthetic"], "n": 192},
-                    "train_subset": 0, "test_subset": 0, "batch_size": 32}}
-    spec = {**spec, "smoke": baselines._merge(spec["smoke"], syn)}
+    syn = spec["synthetic"]
+    if "data" not in syn:      # shorthand: the synthetic image dataset with this shape/classes
+        syn = {"data": {"dataset": "synthetic", "params": {**syn, "n": 192},
+                        "train_subset": 0, "test_subset": 0, "batch_size": 32}}
+    spec = {**spec, "smoke": baselines._merge(spec["smoke"], {"data": syn["data"]}),
+            "model": syn.get("model", spec["model"])}
     for run in spec["runs"]:
         assert "expected" in run, f"{name}/{run['label']}: expected missing (null = not checked)"
         assert run["expected"] is None or {"value", "tol"} <= set(run["expected"]), f"{name}/{run['label']}"
+        if "cuts" in syn:
+            run = {**run, "cuts": syn["cuts"]}
         out = baselines.run_one(spec, setting, run, seed=0, smoke=True)
-        assert 0.0 <= out["value"] <= 1.0
+        assert out["value"] is None or 0.0 <= out["value"] <= 1.0
 
 
 def test_slperf_partitioner_matches_its_definition():

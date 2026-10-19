@@ -52,6 +52,7 @@ class TrainingConfig:
     criterion:        dict = field(default_factory=lambda: {
         "name": "CrossEntropyLoss", "params": {},
     })
+    scheduler:        dict = None   # {name: linear, params: {warmup_steps, total_steps}}, local only
     mixed_precision:  bool = False
 
 

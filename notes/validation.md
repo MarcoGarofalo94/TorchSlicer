@@ -1385,3 +1385,18 @@ identical.
   here); baselines use `dataset: npz`.
 - Reproductions: label leakage yes; SLPerf no (README lists the code differences, incl. a SLFrame vanilla
   optimizer-rebinding bug found by reading). Flower FedAvg = our weighted SplitFed within 1e-6 (checks #33).
+
+### Gaps found by the SplitLoRA (GPT-2 + LoRA, E2E) baseline
+**34. Frozen tied weights refused in multi-client sessions (over-strict check).** GPT-2 ties `wte` (client)
+  and `lm_head` (server); `check_session_ties` refused any tie across a client and a server slice, so split
+  LoRA fine-tuning with clients was impossible. A frozen tie never changes, so all clients see the same value.
+  Fix: `TiedGroup.requires_grad`; frozen groups are exempt. Test: trainable tie still refused, frozen allowed
+  and unchanged after training.
+**35. No learning-rate schedule.** Every LLM fine-tuning recipe uses warmup + decay. New `training.scheduler`
+  (`core/schedule.py`, `linear` = HF's linear warmup/decay, `register_schedule`): each slice writes
+  lr = base x factor(step) right before its step, so client-state swaps can't leave a stale lr. Local executor
+  only (offload and distributed refuse). Test: identical weights to plain PyTorch + LambdaLR.
+**36. No user datasets in `data:` configs.** `ts.data.register_dataset(name, fn)` (like `register_partitioner`).
+- Baseline runner: `extras.py` may define `evaluate(model, cfg, run, smoke)` (here beam search + the official E2E
+  scorer) and register model builders; CI `synthetic` may override data/model/cuts.
+- Overhead measured: GPT-2 S + LoRA, batch 8, A100: plain PyTorch 0.136 s/step, TorchSlicer (1 cut) 0.138.

@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from .base import BaseExecutor
+from ..core.schedule import build_schedule
 from ..core.split_layer import SplitLayer
 from ..core.tied import find_tied_parameters, non_owned_names, optimizer_parameters
 from ..monitor import tracer
@@ -55,9 +56,12 @@ def _detach_payload(payload):
 
 
 def check_session_ties(tied_groups, placement) -> None:
-    """Client states are swapped per client; a parameter tied across a client and a
-    server slice would then be shared by every client, so it is refused."""
+    """Client states are swapped per client; a trainable parameter tied across a client and
+    a server slice would then be shared by every client, so it is refused. A frozen one (e.g.
+    GPT-2's tied embeddings under LoRA) never changes, so every client sees the same value."""
     for g in tied_groups:
+        if not g.requires_grad:
+            continue
         sides = {placement.is_client(p) for p in g.members}
         if len(sides) > 1:
             raise ValueError("multi-client sessions don't support parameters tied across a "
@@ -160,6 +164,7 @@ class LocalExecutor(BaseExecutor):
             params = optimizer_parameters(sl, exclude=non_owned_names(i, self.tied_groups))
             opt = getattr(optim, optimizer_cfg["name"])(params, **optimizer_cfg["params"]) if params else None
             sl.set_optimizer(opt)
+            sl.set_lr_schedule(build_schedule(run_config.training.scheduler) if run_config else None)
             self.split_layers.append(sl)
 
         self.criterion = getattr(nn, criterion_cfg["name"])(**criterion_cfg["params"])

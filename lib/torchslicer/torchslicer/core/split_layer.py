@@ -62,12 +62,18 @@ class SplitLayer(nn.Module):
         self.x = None
         self.optimizer = None
         self._optimizer_set = False
+        self.lr_schedule = None   # factor(step) of each param group's base lr (core/schedule.py)
+        self.steps = 0
 
     def set_optimizer(self, optimizer: "torch.optim.Optimizer | None"):
         """``None`` = this slice has nothing to optimize (no parameters, or only tied
         parameters owned by another slice)."""
         self.optimizer = optimizer
         self._optimizer_set = True
+
+    def set_lr_schedule(self, factor):
+        """``factor(step) -> float``: lr = base lr * factor, set before each optimizer step."""
+        self.lr_schedule = factor
 
     # ── forward ───────────────────────────────────────────────────────────────
 
@@ -169,6 +175,11 @@ class SplitLayer(nn.Module):
         assert self._optimizer_set, "Call set_optimizer() before optimize()"
         if self.optimizer is not None:
             if not dry_run:
+                if self.lr_schedule is not None:
+                    f = self.lr_schedule(self.steps)
+                    for g in self.optimizer.param_groups:
+                        g["lr"] = g.setdefault("initial_lr", g["lr"]) * f
                 self.optimizer.step()
+                self.steps += 1
             self.optimizer.zero_grad()
         self.x = None  # release cut-point tensor; prevents CUDA allocator growth

@@ -297,6 +297,13 @@ def test_sessions_refuse_ties_across_client_and_server():
     # u_shaped: embedding and head are both on the data owner, so the tie is fine
     ts.slice(Tied(), cuts=["emb", "mid"]).train(ts.ClientSession([data, data], mode="parallel"),
                                                 SGD, CE, epochs=1, run_config=_cfg(setting="u_shaped"))
+    # frozen tied weight (LoRA-style fine-tuning): every client sees the same value, allowed
+    frozen = Tied()
+    frozen.emb.weight.requires_grad_(False)
+    before = frozen.emb.weight.detach().clone()
+    ts.slice(frozen, cuts=["mid"]).train(ts.ClientSession([data, data]), SGD, CE, epochs=1,
+                                         run_config=_cfg(setting="vanilla"))
+    assert torch.equal(frozen.emb.weight, before)
 
 
 def test_run_wraps_client_loaders_from_the_config():

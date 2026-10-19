@@ -25,7 +25,8 @@ that it doesn't and why.
   - `metric` (a history key, e.g. `test_accuracy`) and `report` (`last` or `best` epoch:
     whichever the paper reports);
   - `seeds` (at least 3), `smoke` (a tiny override), `synthetic` (input shape and classes,
-    for the CI test);
+    for the CI test; or `{data, model, cuts}` overrides, for a baseline that needs its own
+    data or a smaller model in CI);
   - `runs`: each a `label`, its `cuts`, a `config` override and `expected: {value, tol}`.
 - `README.md`: the paper, the setting, a table of published vs ours (mean ± std), the
   tolerance, and every deviation from the paper with its reason.
@@ -38,7 +39,10 @@ that it doesn't and why.
    Where they disagree, follow the one that produced the number (usually the code), and
    say so in the README.
 2. Add the model to `baselines/models.py` as a flat `nn.Sequential`, so cuts are layer
-   indices.
+   indices. What only one baseline needs goes in its `extras.py`, which the runner imports
+   first: a dataset (`ts.data.register_dataset`), a partitioner, a model builder (added to
+   `models.MODELS`), and an `evaluate(model, cfg, run, smoke) -> {metric: value}` that runs
+   after training when the metric is not in the training history (e.g. generation scores).
 3. Write `config.yaml`. One run per number you reproduce. Choose the tolerance before
    running: about two standard deviations of what the paper's setting gives between seeds,
    wider for non-IID runs, which vary a lot.
