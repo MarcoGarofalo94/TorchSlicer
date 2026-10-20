@@ -7,7 +7,7 @@ it: FedAvg, FedMedian, FedTrimmedAvg, Krum, FedAvgM, FedAdam, FedYogi, and more.
 of a split model.
 
 ```bash
-pip install "torchslicer[flower]"      # flwr >= 1.40
+pip install "torchslicer[flower]"      # flwr >= 1.40, Python 3.11+
 ```
 
 ```python

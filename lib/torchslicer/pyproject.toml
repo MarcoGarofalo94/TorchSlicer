@@ -33,7 +33,7 @@ Repository = "https://github.com/MarcoGarofalo94/TorchSlicer"
 torchslicer = "torchslicer.__main__:main"
 
 [project.optional-dependencies]
-flower = ["flwr>=1.40"]
+flower = ["flwr>=1.40; python_version >= '3.11'"]   # flwr 1.40 needs Python 3.11+
 grpc = [
     "grpcio>=1.64.0",
     "grpcio-tools>=1.64.0",

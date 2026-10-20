@@ -21,6 +21,8 @@ def test_there_are_baselines():
 @pytest.mark.parametrize("name", NAMES)
 def test_baseline_runs_on_synthetic_data(name):
     spec, setting = baselines.load(name)
+    for module in spec.get("requires", []):
+        pytest.importorskip(module)
     for key in ("paper", "model", "metric", "runs", "synthetic", "smoke"):
         assert key in spec, f"{name}: baseline.{key} missing"
     assert spec["paper"].get("url"), f"{name}: the paper needs a link"
