@@ -1507,3 +1507,8 @@ invisible there.
   there are no client nodes).
 - Refused, with a reason: `nccl` (fixed process group), `u_shaped` (later), fault tolerance
   (step 4), per-client server copies (step 3), k8s rendering (identical pod template).
+- **Across the two containers** (2026-10-20): `launch --target baremetal` on
+  `experiments/sl_client_nodes.yaml`, coordinator + 2 server workers on `10.224.0.11`, the 4
+  client nodes on `10.224.0.9` (registration with the coordinator over the bridge): losses
+  `[2.369131, 2.207663]`, equal to the in-process `ClientSession`; every node exited cleanly.
+  First run of client nodes on two hosts (same physical machine: correctness only).

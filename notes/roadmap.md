@@ -462,6 +462,9 @@ shown in a Flower-based SplitFed baseline.
       schedule (many clients in flight; the realistic overhead mode, not loss-equal by design)
       + overhead benchmark. Later: U-shaped clients, vertical SL, a multi-worker server under
       concurrency.
+    - **Status 2026-10-20:** steps 1–2 done (555bd1a): `ts.ClientNodesExecutor`, `ts.RemoteSession`,
+      worker RPCs, `ROLE=client`, launcher nodes; = `ClientSession` in every schedule (tests,
+      OS processes, and across the two containers). Next: step 3 (SplitFed V1).
 - **M11, data and scale simulation** (was M10):
   - **Federated partitioners:** IID; Dirichlet(α) label skew; quantity skew; per-client feature shift.
   - **Standard datasets:** MNIST, CIFAR-10/100, FEMNIST-like, a text/LLM fine-tuning set, tabular for vertical SL.
