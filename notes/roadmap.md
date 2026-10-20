@@ -487,7 +487,7 @@ shown in a Flower-based SplitFed baseline.
     VGG-16/CIFAR-10 baseline, **reproduced** (all 5 runs within 0.01, 3 seeds; e60a31d); `ts.SplitServer`/`ts.SplitClient` + Flower
     `split_client_app` (TorchSlicer clients in Flower's engine, 1 node = SplitFedAlgorithm exactly);
     fedavg single-client optimizer fix (#37); version 0.13.0. **Skipped (owner, 2026-10-19):**
-    local-loss/async. Contributor guide checked (docs/baselines.md, no change needed). **Left:** merge (owner's call).
+    local-loss/async. Contributor guide checked. **Merged to main** 2026-10-20 (PR #5, 665a519; CI green after the py3.10 Flower and transformers fixes, 652b296). **M13 done.**
 - **M14, real environment and testbed** (was M13; deferred from M3 on 2026-10-15, owner decision).
   - **Containers.** This container has no Docker or kubectl, so this runs in a fresh clone on a machine that
     has them:
@@ -555,7 +555,7 @@ shown in a Flower-based SplitFed baseline.
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-19: M13 parts 1-3 on `feat/m13-baselines` (pushed), version 0.13.0; see M13 Status.** NCCL unvalidated on this hardware. M7 deferred.
+Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-20: M13 done and merged to `main` (PR #5, 665a519), version 0.13.0; see M13 Status. Next by the milestone order: M10 multi-client engine, branch `feat/m10-*` forked from `feat/m13-baselines` (`ts.SplitServer`/`ts.SplitClient` are a start on it).** NCCL unvalidated on this hardware. M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
     M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),
@@ -571,7 +571,7 @@ Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12
     validation.md "M12"). Next: **M13 baselines**, branch `feat/m13-baselines` forked from
     `feat/m12-privacy`. M13's "one attack + defence pair" can use label leakage + ClipNoise (DP
     curve) or inversion + NoPeek. Papers are in `notes/sota.md` (don't re-search them).
-  - **`main` is up to date** (2026-10-18): M1–M11 + `fix/post-m11` merged via PRs #3 and #4,
+  - **`main` is up to date** (2026-10-20): M1–M13 + `fix/post-m11` merged via PRs #3, #4, #5,
     without `notes/` (see `notes/README.md` and `notes/merge_to_main.sh`). CI: `tests.yml`
     (CPU, py3.10–3.12, on PRs and main) and `gpu-tests.yml` (self-hosted runner
     `torchslicer-a100` in this container: push to main, nightly 03:00 UTC with the CUDA matrix,
