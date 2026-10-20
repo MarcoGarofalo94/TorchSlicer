@@ -325,3 +325,10 @@ NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
 - Dropout was not the cause (+0.5 BLEU). Outputs are fluent and cover the slots; mean length 29.0 words vs refs 27.2. Name copies are often off (`Crown Plaza` for `Crowne`, which train refs also have 189 times; `The sorrento`).
 - Eval path checked against microsoft/LoRA gpt2_decode.py (grouping by context, cut at <|endoftext|> / "\n\n", no lowercasing/tokenizing for E2E): same.
 - Conclusion: not reproduced, ~12.5 BLEU below SplitLoRA Table I in both settings; SL vs centralized parity holds (0.567 vs 0.566). Next: run microsoft/LoRA's own code with gpt2.sm to see whether the recipe reaches ~69 at GPT2-S.
+
+## 2026-10-19/20: C3-SL Table 1 (VGG-16, CIFAR-10), 3 seeds
+- Hypothesis: ts.CircularConv reproduces C3-SL Table 1 (vanilla 89.9; R 2/4/8/16 → 90.3/90.0/89.9/89.6) within 0.01.
+- Config: baselines/c3sl_cifar10/config.yaml. Command: `baselines/run.py c3sl_cifar10 --seed k --runs ...`, 4 in parallel on the A100 (~5.7 GB RAM in total), 20:18 to 02:17 UTC.
+- Best test acc (mean ± std): vanilla 0.9045±0.0026, R2 0.9032±0.0014, R4 0.9030±0.0010, R8 0.9019±0.0009, R16 0.9012±0.0014. Last epoch: 0.8955 / 0.8964 / 0.8969 / 0.8917 / 0.8963.
+- Bytes fwd/epoch: 409.6 MB → 204.8 / 102.4 / 51.2 / 25.6 MB (gradients the same).
+- Conclusion: reproduced, all within 0.01; the drop from R = 16 is ≤0.3 points (paper 0.3).
