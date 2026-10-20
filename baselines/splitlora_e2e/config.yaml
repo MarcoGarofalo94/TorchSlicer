@@ -25,6 +25,7 @@ baseline:
     title: "SplitLoRA: A Split Parameter-Efficient Fine-Tuning Framework for Large Language Models"
     url: https://arxiv.org/abs/2407.00952
     table: "Table I, GPT2-S, r = 4 (metrics x 100 in the paper)"
+  requires: [transformers]      # Python packages beyond TorchSlicer's; the CI test skips without them
   model: {name: gpt2_lora, params: {name: gpt2, r: 4, alpha: 32, dropout: 0.1}}
   metric: bleu
   report: last

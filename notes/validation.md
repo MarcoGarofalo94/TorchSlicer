@@ -1420,3 +1420,10 @@ identical.
   client = local vanilla SL (Adam, 3 slices, with and without `CircularConv`); Flower
   `run_simulation`, 1 node = `ts.SplitFedAlgorithm` (momentum SGD), 3 nodes train. These tests run
   only where `flwr[simulation]` is installed (scratch venv here; skipped in the repo venv).
+
+- **CI on the M13 merge PR (#5), 2026-10-20.** (a) py3.10: `flwr>=1.40` (the `flower` extra and the CI's
+  `flwr[simulation]`) needs Python 3.11+, so the install failed. Fix: environment marker
+  `python_version >= '3.11'` on both; on 3.10 the Flower tests skip. (b) py3.11/3.12: the SplitLoRA
+  baseline's CI test needs `transformers`, which CI doesn't install. Fix: optional `baseline.requires`
+  (packages), the test `importorskip`s each. Also `merge_to_main.sh` now stops on a missing git identity or
+  a failed non-conflict merge (it used to swallow it with `|| true`).

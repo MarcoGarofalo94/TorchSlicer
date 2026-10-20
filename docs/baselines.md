@@ -22,6 +22,8 @@ that it doesn't and why.
   `sl`, ...) plus a `baseline` section, which TorchSlicer itself ignores:
   - `paper`: title, link, and the table or figure the numbers come from;
   - `model`: a builder in `baselines/models.py` and its arguments;
+  - `requires` (optional): Python packages it needs beyond TorchSlicer and PyTorch, e.g.
+    `[transformers]`; the CI test skips the baseline when one is missing;
   - `metric` (a history key, e.g. `test_accuracy`) and `report` (`last` or `best` epoch:
     whichever the paper reports);
   - `seeds` (at least 3), `smoke` (a tiny override), `synthetic` (input shape and classes,
