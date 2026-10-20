@@ -13,10 +13,14 @@ BRANCH=${1:?usage: notes/merge_to_main.sh <branch>}
 WORK=merge/${BRANCH//\//-}
 DIR=$(git rev-parse --show-toplevel)/../TorchSlicer-merge
 
+git var GIT_COMMITTER_IDENT >/dev/null || { echo "no git identity: set user.name/user.email (or GIT_AUTHOR_*/GIT_COMMITTER_*)"; exit 1; }
 git fetch -q origin
 git worktree add -q -B "$WORK" "$DIR" origin/main
 cd "$DIR"
-git merge --no-ff --no-commit "origin/$BRANCH" || true
+if ! git merge --no-ff --no-commit "origin/$BRANCH"; then
+  # only a conflicted merge may go on (its conflicts are checked below); any other failure stops here
+  git rev-parse -q --verify MERGE_HEAD >/dev/null || { echo "git merge failed (above)"; exit 1; }
+fi
 git rm -r -q -f --ignore-unmatch notes             # notes never reach main
 for f in $(git diff --name-only --diff-filter=U); do
   case "$f" in notes/*) git rm -q -f "$f" ;; *) echo "conflict outside notes/: $f"; exit 1 ;; esac
