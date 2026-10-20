@@ -1,0 +1,50 @@
+# Label leakage from the returned gradients (Li et al., ICLR 2022): with no protection the
+# party below the cut infers the labels of an imbalanced binary task from the cut gradients,
+# leak AUC ≈ 1 (the paper summarizes a run by the 95 % quantile of the per-batch AUC). The
+# paper's datasets (Criteo, Avazu, ISIC) are not available here: CIFAR-10 "airplane?" (10 %
+# positives) stands in (run prepare.py first). Defence: per-sample clipped Gaussian noise on
+# the gradient (ts.ClipNoise, z = 1, C = 1e-2), reported with its epsilon, not checked (the
+# paper's defence, Marvell, is not implemented).
+training:
+  epochs: 3
+  optimizer: {name: Adam, params: {lr: 1.0e-3}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+network: {device: auto}
+data:
+  dataset: npz
+  params: {path: data/cifar10_airplane_train.npz, test_path: data/cifar10_airplane_test.npz,
+           mean: [0.4914, 0.4822, 0.4465], std: [0.2470, 0.2435, 0.2616]}
+  train_subset: 20000
+  test_subset: 5000
+  batch_size: 64
+  eval_every: 3
+sl: {setting: vanilla}
+privacy:
+  attacks:
+    - {name: label_norm, cut: 0}
+    - {name: label_direction, cut: 0}
+baseline:
+  paper:
+    title: "Label Leakage and Protection in Two-party Split Learning"
+    url: https://arxiv.org/abs/2102.08504
+    table: "§5, Fig. 2: no_noise leak AUC ≈ 1 (95 % quantile over batches)"
+  model: {name: cnn, params: {in_ch: 3, n_classes: 2, side: 32}}
+  metric: leak_label_direction_auc_q95
+  report: last
+  seeds: [0, 1, 2]
+  smoke: {training: {epochs: 1}, data: {train_subset: 640, test_subset: 128, eval_every: 1}}
+  synthetic: {shape: [3, 32, 32], classes: 2}
+  runs:
+    - label: direction_no_noise
+      cuts: [2]
+      expected: {value: 1.0, tol: 0.02}
+    - label: norm_no_noise
+      cuts: [2]
+      metric: leak_label_norm_auc_q95
+      expected: {value: 1.0, tol: 0.05}
+    - label: direction_clipnoise_z1
+      cuts: [2]
+      config:
+        sl: {cut_hooks: [{cut: 0, name: clip_noise, params: {clip: 1.0e-2, noise_multiplier: 1.0, forward: false, grad: true}}]}
+        privacy: {attacks: [{name: label_direction, cut: 0}, {name: dp, cut: 0}]}
+      expected: null

@@ -1,0 +1,337 @@
+{
+ "baseline": {
+  "paper": {
+   "title": "Label Leakage and Protection in Two-party Split Learning",
+   "url": "https://arxiv.org/abs/2102.08504",
+   "table": "\u00a75, Fig. 2: no_noise leak AUC \u2248 1 (95 % quantile over batches)"
+  },
+  "model": {
+   "name": "cnn",
+   "params": {
+    "in_ch": 3,
+    "n_classes": 2,
+    "side": 32
+   }
+  },
+  "metric": "leak_label_direction_auc_q95",
+  "report": "last",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "smoke": {
+   "training": {
+    "epochs": 1
+   },
+   "data": {
+    "train_subset": 640,
+    "test_subset": 128,
+    "eval_every": 1
+   }
+  },
+  "synthetic": {
+   "shape": [
+    3,
+    32,
+    32
+   ],
+   "classes": 2
+  },
+  "runs": [
+   {
+    "label": "direction_no_noise",
+    "cuts": [
+     2
+    ],
+    "expected": {
+     "value": 1.0,
+     "tol": 0.02
+    }
+   },
+   {
+    "label": "norm_no_noise",
+    "cuts": [
+     2
+    ],
+    "metric": "leak_label_norm_auc_q95",
+    "expected": {
+     "value": 1.0,
+     "tol": 0.05
+    }
+   },
+   {
+    "label": "direction_clipnoise_z1",
+    "cuts": [
+     2
+    ],
+    "config": {
+     "sl": {
+      "cut_hooks": [
+       {
+        "cut": 0,
+        "name": "clip_noise",
+        "params": {
+         "clip": 0.01,
+         "noise_multiplier": 1.0,
+         "forward": false,
+         "grad": true
+        }
+       }
+      ]
+     },
+     "privacy": {
+      "attacks": [
+       {
+        "name": "label_direction",
+        "cut": 0
+       },
+       {
+        "name": "dp",
+        "cut": 0
+       }
+      ]
+     }
+    },
+    "expected": null
+   }
+  ]
+ },
+ "setting": {
+  "training": {
+   "epochs": 3,
+   "optimizer": {
+    "name": "Adam",
+    "params": {
+     "lr": 0.001
+    }
+   },
+   "criterion": {
+    "name": "CrossEntropyLoss",
+    "params": {}
+   }
+  },
+  "network": {
+   "device": "auto"
+  },
+  "data": {
+   "dataset": "npz",
+   "params": {
+    "path": "data/cifar10_airplane_train.npz",
+    "test_path": "data/cifar10_airplane_test.npz",
+    "mean": [
+     0.4914,
+     0.4822,
+     0.4465
+    ],
+    "std": [
+     0.247,
+     0.2435,
+     0.2616
+    ]
+   },
+   "train_subset": 20000,
+   "test_subset": 5000,
+   "batch_size": 64,
+   "eval_every": 3
+  },
+  "sl": {
+   "setting": "vanilla"
+  },
+  "privacy": {
+   "attacks": [
+    {
+     "name": "label_norm",
+     "cut": 0
+    },
+    {
+     "name": "label_direction",
+     "cut": 0
+    }
+   ]
+  }
+ },
+ "results": [
+  {
+   "run": "direction_no_noise",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "per_seed": [
+    {
+     "seed": 0,
+     "value": 1.0,
+     "last": 1.0,
+     "best": 1.0,
+     "curve": [
+      1.0,
+      1.0,
+      1.0
+     ],
+     "bytes_fwd": [
+      327680000
+     ],
+     "time_s": 9.0
+    },
+    {
+     "seed": 1,
+     "value": 1.0,
+     "last": 1.0,
+     "best": 1.0,
+     "curve": [
+      1.0,
+      1.0,
+      1.0
+     ],
+     "bytes_fwd": [
+      327680000
+     ],
+     "time_s": 8.91
+    },
+    {
+     "seed": 2,
+     "value": 1.0,
+     "last": 1.0,
+     "best": 1.0,
+     "curve": [
+      1.0,
+      1.0,
+      1.0
+     ],
+     "bytes_fwd": [
+      327680000
+     ],
+     "time_s": 9.1
+    }
+   ],
+   "mean": 1.0,
+   "std": 0.0,
+   "expected": {
+    "value": 1.0,
+    "tol": 0.02
+   },
+   "within_tolerance": true
+  },
+  {
+   "run": "norm_no_noise",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "per_seed": [
+    {
+     "seed": 0,
+     "value": 0.997073,
+     "last": 0.997073,
+     "best": 1.0,
+     "curve": [
+      1.0,
+      1.0,
+      0.997073
+     ],
+     "bytes_fwd": [
+      327680000
+     ],
+     "time_s": 7.33
+    },
+    {
+     "seed": 1,
+     "value": 0.983042,
+     "last": 0.983042,
+     "best": 1.0,
+     "curve": [
+      1.0,
+      1.0,
+      0.983042
+     ],
+     "bytes_fwd": [
+      327680000
+     ],
+     "time_s": 7.31
+    },
+    {
+     "seed": 2,
+     "value": 0.998496,
+     "last": 0.998496,
+     "best": 1.0,
+     "curve": [
+      1.0,
+      1.0,
+      0.998496
+     ],
+     "bytes_fwd": [
+      327680000
+     ],
+     "time_s": 7.28
+    }
+   ],
+   "mean": 0.9928703333333333,
+   "std": 0.008541272407161233,
+   "expected": {
+    "value": 1.0,
+    "tol": 0.05
+   },
+   "within_tolerance": true
+  },
+  {
+   "run": "direction_clipnoise_z1",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "per_seed": [
+    {
+     "seed": 0,
+     "value": 0.721858,
+     "last": 0.721858,
+     "best": 0.76127,
+     "curve": [
+      0.76127,
+      0.731733,
+      0.721858
+     ],
+     "bytes_fwd": [
+      327691268
+     ],
+     "time_s": 6.94
+    },
+    {
+     "seed": 1,
+     "value": 0.786059,
+     "last": 0.786059,
+     "best": 0.786059,
+     "curve": [
+      0.760871,
+      0.707711,
+      0.786059
+     ],
+     "bytes_fwd": [
+      327691268
+     ],
+     "time_s": 6.94
+    },
+    {
+     "seed": 2,
+     "value": 0.731421,
+     "last": 0.731421,
+     "best": 0.760272,
+     "curve": [
+      0.760272,
+      0.759033,
+      0.731421
+     ],
+     "bytes_fwd": [
+      327691268
+     ],
+     "time_s": 6.93
+    }
+   ],
+   "mean": 0.7464459999999999,
+   "std": 0.034637480696494055
+  }
+ ]
+}

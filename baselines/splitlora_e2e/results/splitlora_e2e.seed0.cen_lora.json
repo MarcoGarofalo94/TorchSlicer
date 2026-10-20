@@ -1,0 +1,27 @@
+{
+ "seed": 0,
+ "runs": {
+  "cen_lora": {
+   "seed": 0,
+   "value": 0.5658,
+   "last": 0.5658,
+   "best": 0.5658,
+   "curve": [
+    0.5658
+   ],
+   "bytes_fwd": [
+    14988521472
+   ],
+   "time_s": 8057.93,
+   "train_s": 7995.8,
+   "scores": {
+    "bleu": 0.5658,
+    "nist": 7.8257,
+    "meteor": 0.402,
+    "rouge_l": 0.6277,
+    "cider": 1.4616,
+    "generated": 630
+   }
+  }
+ }
+}

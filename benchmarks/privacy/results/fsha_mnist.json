@@ -1,0 +1,701 @@
+{
+ "config": {
+  "dataset": "mnist",
+  "train_subset": 30000,
+  "test_subset": 2000,
+  "batch_size": 64,
+  "epochs": 3,
+  "model": "cnn",
+  "cut": 2,
+  "device": "cuda",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "runs": [
+   {
+    "label": "inversion_cut2",
+    "cut": 2,
+    "attacks": [
+     {
+      "name": "inversion",
+      "cut": 0,
+      "params": {
+       "n_aux": 2000
+      }
+     }
+    ]
+   },
+   {
+    "label": "honest_cut2",
+    "cut": 2,
+    "attacks": [
+     {
+      "name": "fsha",
+      "cut": 0,
+      "params": {
+       "n_aux": 2000,
+       "forge": false
+      }
+     }
+    ]
+   },
+   {
+    "label": "fsha_cut2",
+    "cut": 2,
+    "attacks": [
+     {
+      "name": "fsha",
+      "cut": 0,
+      "params": {
+       "n_aux": 2000
+      }
+     }
+    ]
+   },
+   {
+    "label": "inversion_cut5",
+    "cut": 5,
+    "attacks": [
+     {
+      "name": "inversion",
+      "cut": 0,
+      "params": {
+       "n_aux": 2000
+      }
+     }
+    ]
+   },
+   {
+    "label": "honest_cut5",
+    "cut": 5,
+    "attacks": [
+     {
+      "name": "fsha",
+      "cut": 0,
+      "params": {
+       "n_aux": 2000,
+       "forge": false
+      }
+     }
+    ]
+   },
+   {
+    "label": "fsha_cut5",
+    "cut": 5,
+    "attacks": [
+     {
+      "name": "fsha",
+      "cut": 0,
+      "params": {
+       "n_aux": 2000
+      }
+     }
+    ]
+   },
+   {
+    "label": "fsha_cut5_nopeek10",
+    "cut": 5,
+    "attacks": [
+     {
+      "name": "fsha",
+      "cut": 0,
+      "params": {
+       "n_aux": 2000
+      }
+     },
+     {
+      "name": "dcor",
+      "cut": 0
+     }
+    ],
+    "defences": [
+     {
+      "name": "nopeek",
+      "cut": 0,
+      "params": {
+       "alpha": 10.0
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "results": [
+  {
+   "run": "inversion_cut2",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.044985,
+     0.0007827917986284718
+    ],
+    "leak_inversion_psnr": [
+     30.668666666666667,
+     0.3847360177229754
+    ],
+    "leak_inversion_ssim": [
+     0.9805,
+     0.0008888194417315234
+    ],
+    "test_loss": [
+     0.04761933333333333,
+     0.003974729215095457
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9853333333333333,
+     0.0020816659994661348
+    ],
+    "time_s": [
+     159.77666666666667,
+     3.7435856252172677
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.044682,
+     "leak_inversion_psnr": 30.2334,
+     "leak_inversion_ssim": 0.9795,
+     "test_loss": 0.051484,
+     "test_samples": 2000,
+     "test_accuracy": 0.983,
+     "time_s": 162.46,
+     "bytes_fwd": [
+      376320000
+     ]
+    },
+    {
+     "loss": 0.045874,
+     "leak_inversion_psnr": 30.8093,
+     "leak_inversion_ssim": 0.9812,
+     "test_loss": 0.043543,
+     "test_samples": 2000,
+     "test_accuracy": 0.987,
+     "time_s": 155.5,
+     "bytes_fwd": [
+      376320000
+     ]
+    },
+    {
+     "loss": 0.044399,
+     "leak_inversion_psnr": 30.9633,
+     "leak_inversion_ssim": 0.9808,
+     "test_loss": 0.047831,
+     "test_samples": 2000,
+     "test_accuracy": 0.986,
+     "time_s": 161.37,
+     "bytes_fwd": [
+      376320000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "honest_cut2",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.044709,
+     0.0004431557288358144
+    ],
+    "leak_fsha_mse": [
+     0.6222793333333333,
+     0.15061904344847407
+    ],
+    "leak_fsha_psnr": [
+     12.5587,
+     0.9897978025839419
+    ],
+    "leak_fsha_ssim": [
+     0.1572,
+     0.04851515227225408
+    ],
+    "test_loss": [
+     0.046473,
+     0.005580000358422928
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9853333333333334,
+     0.0018929694486001123
+    ],
+    "time_s": [
+     229.79,
+     3.3352810975988114
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.044566,
+     "leak_fsha_mse": 0.773986,
+     "leak_fsha_psnr": 11.6204,
+     "leak_fsha_ssim": 0.1154,
+     "test_loss": 0.049803,
+     "test_samples": 2000,
+     "test_accuracy": 0.984,
+     "time_s": 232.54,
+     "bytes_fwd": [
+      376320000
+     ]
+    },
+    {
+     "loss": 0.045206,
+     "leak_fsha_mse": 0.62008,
+     "leak_fsha_psnr": 12.4627,
+     "leak_fsha_ssim": 0.1458,
+     "test_loss": 0.040031,
+     "test_samples": 2000,
+     "test_accuracy": 0.9875,
+     "time_s": 226.08,
+     "bytes_fwd": [
+      376320000
+     ]
+    },
+    {
+     "loss": 0.044355,
+     "leak_fsha_mse": 0.472772,
+     "leak_fsha_psnr": 13.593,
+     "leak_fsha_ssim": 0.2104,
+     "test_loss": 0.049585,
+     "test_samples": 2000,
+     "test_accuracy": 0.9845,
+     "time_s": 230.75,
+     "bytes_fwd": [
+      376320000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "fsha_cut2",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.076075,
+     0.00167862205394782
+    ],
+    "leak_fsha_mse": [
+     0.2651026666666667,
+     0.21830848570390787
+    ],
+    "leak_fsha_psnr": [
+     17.157566666666668,
+     3.1694092151903224
+    ],
+    "leak_fsha_ssim": [
+     0.5517666666666666,
+     0.26900015489462703
+    ],
+    "test_loss": [
+     0.08083433333333333,
+     0.016275621534470913
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9743333333333333,
+     0.00763762615825974
+    ],
+    "time_s": [
+     244.34333333333333,
+     3.1939682736892236
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.074853,
+     "leak_fsha_mse": 0.131375,
+     "leak_fsha_psnr": 19.2149,
+     "leak_fsha_ssim": 0.7276,
+     "test_loss": 0.076402,
+     "test_samples": 2000,
+     "test_accuracy": 0.976,
+     "time_s": 241.52,
+     "bytes_fwd": [
+      376320000
+     ]
+    },
+    {
+     "loss": 0.075383,
+     "leak_fsha_mse": 0.146909,
+     "leak_fsha_psnr": 18.7501,
+     "leak_fsha_ssim": 0.6856,
+     "test_loss": 0.067234,
+     "test_samples": 2000,
+     "test_accuracy": 0.981,
+     "time_s": 247.81,
+     "bytes_fwd": [
+      376320000
+     ]
+    },
+    {
+     "loss": 0.077989,
+     "leak_fsha_mse": 0.517024,
+     "leak_fsha_psnr": 13.5077,
+     "leak_fsha_ssim": 0.2421,
+     "test_loss": 0.098867,
+     "test_samples": 2000,
+     "test_accuracy": 0.966,
+     "time_s": 243.7,
+     "bytes_fwd": [
+      376320000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "inversion_cut5",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.04492566666666667,
+     0.0008380461403367532
+    ],
+    "leak_inversion_psnr": [
+     23.165933333333335,
+     0.16235394461895078
+    ],
+    "leak_inversion_ssim": [
+     0.8927333333333333,
+     0.0046800997140374724
+    ],
+    "test_loss": [
+     0.045975,
+     0.004069212577391356
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9865,
+     0.0013228756555323175
+    ],
+    "time_s": [
+     87.27000000000001,
+     7.2085227335425675
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.044623,
+     "leak_inversion_psnr": 23.3368,
+     "leak_inversion_ssim": 0.8981,
+     "test_loss": 0.04931,
+     "test_samples": 2000,
+     "test_accuracy": 0.985,
+     "time_s": 92.29,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.045873,
+     "leak_inversion_psnr": 23.1473,
+     "leak_inversion_ssim": 0.8906,
+     "test_loss": 0.041441,
+     "test_samples": 2000,
+     "test_accuracy": 0.9875,
+     "time_s": 79.01,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.044281,
+     "leak_inversion_psnr": 23.0137,
+     "leak_inversion_ssim": 0.8895,
+     "test_loss": 0.047174,
+     "test_samples": 2000,
+     "test_accuracy": 0.987,
+     "time_s": 90.51,
+     "bytes_fwd": [
+      188160000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "honest_cut5",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.04506266666666667,
+     0.0011530417743227397
+    ],
+    "leak_fsha_mse": [
+     1.016225,
+     0.06511443697829229
+    ],
+    "leak_fsha_psnr": [
+     10.416933333333333,
+     0.3026232366050784
+    ],
+    "leak_fsha_ssim": [
+     0.035633333333333336,
+     0.01666923313573043
+    ],
+    "test_loss": [
+     0.04687633333333333,
+     0.004747669568676125
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9846666666666667,
+     0.0020207259421636875
+    ],
+    "time_s": [
+     172.06,
+     2.138878210651554
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.044384,
+     "leak_fsha_mse": 0.941239,
+     "leak_fsha_psnr": 10.7661,
+     "leak_fsha_ssim": 0.0494,
+     "test_loss": 0.052356,
+     "test_samples": 2000,
+     "test_accuracy": 0.9825,
+     "time_s": 173.48,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.046394,
+     "leak_fsha_mse": 1.048952,
+     "leak_fsha_psnr": 10.2304,
+     "leak_fsha_ssim": 0.0171,
+     "test_loss": 0.043994,
+     "test_samples": 2000,
+     "test_accuracy": 0.985,
+     "time_s": 169.6,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.04441,
+     "leak_fsha_mse": 1.058484,
+     "leak_fsha_psnr": 10.2543,
+     "leak_fsha_ssim": 0.0404,
+     "test_loss": 0.044279,
+     "test_samples": 2000,
+     "test_accuracy": 0.9865,
+     "time_s": 173.1,
+     "bytes_fwd": [
+      188160000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "fsha_cut5",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.40947,
+     0.0922745620471861
+    ],
+    "leak_fsha_mse": [
+     0.801039,
+     0.19297100999632041
+    ],
+    "leak_fsha_psnr": [
+     11.709233333333334,
+     0.6833082930371427
+    ],
+    "leak_fsha_ssim": [
+     0.1501,
+     0.039265633829087744
+    ],
+    "test_loss": [
+     0.39742866666666665,
+     0.11626548189954458
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.8836666666666667,
+     0.03827640700657957
+    ],
+    "time_s": [
+     142.37333333333333,
+     9.051498955053429
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.514686,
+     "leak_fsha_mse": 1.020654,
+     "leak_fsha_psnr": 10.9644,
+     "leak_fsha_ssim": 0.1711,
+     "test_loss": 0.495756,
+     "test_samples": 2000,
+     "test_accuracy": 0.8515,
+     "time_s": 136.33,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.371415,
+     "leak_fsha_mse": 0.723862,
+     "leak_fsha_psnr": 11.8562,
+     "leak_fsha_ssim": 0.1048,
+     "test_loss": 0.427426,
+     "test_samples": 2000,
+     "test_accuracy": 0.8735,
+     "time_s": 152.78,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.342309,
+     "leak_fsha_mse": 0.658601,
+     "leak_fsha_psnr": 12.3071,
+     "leak_fsha_ssim": 0.1744,
+     "test_loss": 0.269104,
+     "test_samples": 2000,
+     "test_accuracy": 0.926,
+     "time_s": 138.01,
+     "bytes_fwd": [
+      188160000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "fsha_cut5_nopeek10",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     1.049576,
+     1.08506043326812
+    ],
+    "leak_fsha_mse": [
+     0.884993,
+     0.10668340077537831
+    ],
+    "leak_fsha_psnr": [
+     11.007733333333332,
+     0.5153256187434629
+    ],
+    "leak_fsha_ssim": [
+     0.0626,
+     0.04606224050130432
+    ],
+    "leak_dcor_value": [
+     0.5823953333333334,
+     0.49962836924091225
+    ],
+    "test_loss": [
+     1.0304416666666665,
+     1.1008007177492813
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.6216666666666667,
+     0.43792046462038436
+    ],
+    "time_s": [
+     90.54,
+     1.1793218390244444
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 2.301518,
+     "leak_fsha_mse": 1.007874,
+     "leak_fsha_psnr": 10.4298,
+     "leak_fsha_ssim": 0.0387,
+     "leak_dcor_value": 0.00551,
+     "test_loss": 2.301455,
+     "test_samples": 2000,
+     "test_accuracy": 0.116,
+     "time_s": 91.0,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.380744,
+     "leak_fsha_mse": 0.831072,
+     "leak_fsha_psnr": 11.174,
+     "leak_fsha_ssim": 0.0334,
+     "leak_dcor_value": 0.865271,
+     "test_loss": 0.382443,
+     "test_samples": 2000,
+     "test_accuracy": 0.874,
+     "time_s": 89.2,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.466466,
+     "leak_fsha_mse": 0.816033,
+     "leak_fsha_psnr": 11.4194,
+     "leak_fsha_ssim": 0.1157,
+     "leak_dcor_value": 0.876405,
+     "test_loss": 0.407427,
+     "test_samples": 2000,
+     "test_accuracy": 0.875,
+     "time_s": 91.42,
+     "bytes_fwd": [
+      188160000
+     ]
+    }
+   ]
+  }
+ ]
+}

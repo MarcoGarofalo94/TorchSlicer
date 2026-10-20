@@ -15,7 +15,7 @@ def _blocks(name):
 
 
 @pytest.mark.parametrize("name", ["custom_strategy.md", "pack.md", "p2p.md", "sl_settings.md", "offload.md",
-                                  "nat.md", "algorithm.md"])
+                                  "nat.md", "algorithm.md", "privacy.md"])
 def test_tutorial_code_runs(name):
     pytest.importorskip("torchvision")
     ns = {}

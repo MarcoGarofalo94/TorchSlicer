@@ -166,6 +166,8 @@ class OffloadExecutor(LocalExecutor):
     def setup(self, model_graph, partitions, optimizer_cfg, criterion_cfg, mixed_precision=False,
               n_micro_batches=1, run_config=None, **kwargs):
         cfg = run_config
+        if cfg is not None and cfg.training.scheduler:
+            raise ValueError("training.scheduler isn't supported with offload yet")
         if kwargs.get("eval_data") is not None:
             raise ValueError("evaluation (eval_data / data.eval_every) isn't supported with "
                              "offload yet: the weights live paged out of the device")
@@ -176,6 +178,10 @@ class OffloadExecutor(LocalExecutor):
         super().setup(model_graph, partitions, optimizer_cfg, criterion_cfg,
                       mixed_precision=mixed_precision, n_micro_batches=n_micro_batches,
                       run_config=run_config, **kwargs)
+        for a in self._attacks:
+            if a.needs_query or a.needs_client:
+                raise ValueError(f"{type(a).__name__} runs the client slices, which offload keeps "
+                                 "paged out of the device; use the local executor")
         shared = _shared_trainable(self.split_layers)
         self._bw = measure_bandwidth(self.device)
         placement = self._opt("optimizer", cfg, "auto")
@@ -289,6 +295,7 @@ class OffloadExecutor(LocalExecutor):
             mains, labs, auxs = [main], [labels], [aux]
         self._count_io(main, aux, labels, msgs=M)
         bid = (lambda m: batch_id * M + m) if M > 1 else (lambda m: batch_id)
+        self._set_truth(mains, labs, [bid(m) for m in range(M)], scale=1.0 / M)
 
         # 1. forward without a graph; keep each slice's inputs and RNG states
         stash, rng = [None] * n, [None] * n

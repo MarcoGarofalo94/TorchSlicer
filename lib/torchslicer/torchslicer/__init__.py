@@ -1,4 +1,4 @@
-__version__ = "0.11.0"
+__version__ = "0.13.0"
 __author__ = 'Marco Garofalo'
 
 from .core.slicer import Slicer
@@ -27,7 +27,7 @@ from .config import (
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
     StartupConfig, TransportConfig,
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
-    NetworkConfig, PlanningConfig, DeployConfig, SLConfig, OffloadConfig, DataConfig,
+    NetworkConfig, PlanningConfig, DeployConfig, SLConfig, OffloadConfig, DataConfig, PrivacyConfig,
 )
 from .monitor import TrainingCallback, RunLogger
 from .core.stages import (
@@ -42,9 +42,10 @@ from .checkpoint_utils import restore_model_from_run, resolve_checkpoint_epoch
 from .deploy import run
 from . import sl
 from . import data
+from . import privacy
 from .sl import (
-    CutHook, CutContext, Float16, BFloat16, Quantize, TopK, GaussianNoise, Recorder, Chain,
-    register_hook, ClientSession, Placement,
+    CutHook, CutContext, Float16, BFloat16, Quantize, TopK, CircularConv, GaussianNoise, ClipNoise, Recorder, Chain,
+    register_hook, ClientSession, Placement, SplitServer, SplitClient,
 )
 from . import algorithm as _algorithm_module  # noqa: ensure builtin registrations run
 from .algorithm import (
@@ -168,6 +169,7 @@ class SlicedModel:
         algorithm=None,
         eval_data=None,
         eval_every: int = None,
+        privacy=None,
     ) -> list:
         """Train the sliced model.
 
@@ -175,6 +177,8 @@ class SlicedModel:
         several clients (data owners) against the shared server slices.
         ``eval_data``: a test loader, evaluated every ``eval_every`` epochs (default
         ``data.eval_every``, else 1); ``test_loss``/``test_accuracy`` go into the history.
+        ``privacy``: ``ts.privacy`` attacks / defences (or a list), added to the config's
+        ``privacy`` section; attack metrics go into the history as ``leak_*``.
 
         When ``run_config`` is supplied all training parameters default to the
         values in the config; explicit kwargs override individual fields::
@@ -220,6 +224,11 @@ class SlicedModel:
             extra["eval_data"] = eval_data
             extra["eval_every"] = (eval_every if eval_every is not None
                                    else (cfg.data.eval_every if cfg else 1))
+        if privacy is not None:
+            if "privacy" not in accepted and not isinstance(self.executor, LocalExecutor):
+                raise ValueError(f"{type(self.executor).__name__} doesn't support privacy attacks or "
+                                 "defences yet; they run on the local executor")
+            extra["privacy"] = privacy
         self.executor.setup(
             self.graph,
             self.partitions,
@@ -321,8 +330,8 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
         cut_hooks: What crosses the cuts: a ``ts.CutHook`` (every cut), or
                   ``{cut: hook}`` with cut ``k`` = between slice ``k`` and ``k+1``,
                   e.g. ``{0: ts.Quantize(bits=8)}``. Built in: ``Float16``,
-                  ``BFloat16``, ``Quantize``, ``TopK``, ``GaussianNoise``,
-                  ``Recorder``, ``Chain``. See docs/tutorials/sl_settings.md.
+                  ``BFloat16``, ``Quantize``, ``TopK``, ``CircularConv``, ``GaussianNoise``,
+                  ``ClipNoise``, ``Recorder``, ``Chain``. See docs/tutorials/sl_settings.md.
 
     Serialization constraint
     ------------------------

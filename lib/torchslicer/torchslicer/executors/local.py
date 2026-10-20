@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from .base import BaseExecutor
+from ..core.schedule import build_schedule
 from ..core.split_layer import SplitLayer
 from ..core.tied import find_tied_parameters, non_owned_names, optimizer_parameters
 from ..monitor import tracer
@@ -21,8 +22,32 @@ from ..sl.clients import (ClientSession, SplitLayerClientState, algorithm_round_
                           resolve_client_store, select_clients)
 from ..algorithm.base import Algorithm, AlgorithmContext, BackwardPolicy
 from ..algorithm.builtin import DefaultAlgorithm
+from ..privacy.base import Observation, resolve_privacy
 
 _LOG = get_logger("torchslicer.local")
+
+
+class _ClientCopy(nn.Module):
+    """A frozen copy of client slices for white-box attacks, chained with
+    :meth:`SplitLayer.run` so gradients reach its input. ``fresh``: re-initialized
+    parameters (the architecture only)."""
+
+    def __init__(self, slices, fresh: bool = False):
+        super().__init__()
+        self.slices = nn.ModuleList(
+            SplitLayer(copy.deepcopy(list(sl.layers)), predecessors=sl._predecessors,
+                       mixed_precision=sl._mixed_precision) for sl in slices)
+        if fresh:
+            for m in self.modules():
+                if m is not self and hasattr(m, "reset_parameters"):
+                    m.reset_parameters()
+        self.requires_grad_(False)
+        self.eval()
+
+    def forward(self, x):
+        for sl in self.slices:
+            x = sl.run(x)
+        return x
 
 def _detach_payload(payload):
     if isinstance(payload, torch.Tensor):
@@ -31,9 +56,12 @@ def _detach_payload(payload):
 
 
 def check_session_ties(tied_groups, placement) -> None:
-    """Client states are swapped per client; a parameter tied across a client and a
-    server slice would then be shared by every client, so it is refused."""
+    """Client states are swapped per client; a trainable parameter tied across a client and
+    a server slice would then be shared by every client, so it is refused. A frozen one (e.g.
+    GPT-2's tied embeddings under LoRA) never changes, so every client sees the same value."""
     for g in tied_groups:
+        if not g.requires_grad:
+            continue
         sides = {placement.is_client(p) for p in g.members}
         if len(sides) > 1:
             raise ValueError("multi-client sessions don't support parameters tied across a "
@@ -87,6 +115,11 @@ class LocalExecutor(BaseExecutor):
         self._client_states = "cpu"
         self._client_store = None
         self._server_store = None
+        self._attacks: list = []
+        self._defences: list = []
+        self._truth: dict = {}
+        self._privacy_scale = 1.0
+        self._rng_devices: list = []
 
     def setup(
         self,
@@ -104,10 +137,12 @@ class LocalExecutor(BaseExecutor):
         algorithm: "Algorithm | None" = None,
         eval_data=None,
         eval_every: int = 1,
+        privacy=None,
     ) -> None:
         """``cut_hooks``: ``ts.slice(cut_hooks=)`` (see ``torchslicer.sl.hooks``); the
         config's ``sl`` section adds hooks, the setting and the link model.
-        ``eval_data``: a test loader, evaluated every ``eval_every`` epochs (``evaluate``)."""
+        ``eval_data``: a test loader, evaluated every ``eval_every`` epochs (``evaluate``).
+        ``privacy``: ``ts.privacy`` attacks and defences, added to the config's ``privacy``."""
         self._eval_loader = eval_data
         self._eval_every = int(eval_every or 0) if eval_data is not None else 0
         layers = model_graph.get_layers()
@@ -129,6 +164,7 @@ class LocalExecutor(BaseExecutor):
             params = optimizer_parameters(sl, exclude=non_owned_names(i, self.tied_groups))
             opt = getattr(optim, optimizer_cfg["name"])(params, **optimizer_cfg["params"]) if params else None
             sl.set_optimizer(opt)
+            sl.set_lr_schedule(build_schedule(run_config.training.scheduler) if run_config else None)
             self.split_layers.append(sl)
 
         self.criterion = getattr(nn, criterion_cfg["name"])(**criterion_cfg["params"])
@@ -181,6 +217,20 @@ class LocalExecutor(BaseExecutor):
         self._algorithm = algorithm if algorithm is not None else DefaultAlgorithm()
         self._algorithm.configure(len(partitions), self.criterion, self._placement)
 
+        self._attacks, self._defences = resolve_privacy(privacy, cfg.privacy if cfg else None, n)
+        self._rng_devices = [device] if device is not None and device.type == "cuda" else []
+        for a in self._attacks:
+            if a.needs_query or a.needs_client:
+                self._check_query(a)
+            if a.needs_query:
+                a.bind(lambda x, cut=a.cut: self._query(cut, x))
+            if a.needs_client:
+                a.bind_client(lambda fresh=False, cut=a.cut: _ClientCopy(self.split_layers[:cut + 1], fresh))
+            if hasattr(a, "set_aux"):
+                a.set_aux(eval_data)
+            if hasattr(a, "bind_hook"):
+                a.bind_hook(self._hooks.get(a.cut))
+
         # Notify callbacks
         for cb in self._callbacks:
             try:
@@ -231,6 +281,8 @@ class LocalExecutor(BaseExecutor):
         else:
             batches = ((None, b) for b in data_loader)
         self._meter.reset()
+        for a in self._attacks:
+            a.reset()
 
         for cb in self._callbacks:
             try:
@@ -321,6 +373,8 @@ class LocalExecutor(BaseExecutor):
             **self._meter.summary(self._placement, *self._link),
             **self._epoch_extras(epoch_duration_s),
         }
+        for a in self._attacks:
+            epoch_metrics.update({f"leak_{a.key}_{k}": v for k, v in a.metrics().items()})
         if self._profiles:
             n_clients = session.n_clients if session is not None else 1
             if self._tiers is None:
@@ -470,27 +524,110 @@ class LocalExecutor(BaseExecutor):
         hook = self._hooks.get(cut)
         if hook is None:
             self._meter.add_fwd(cut, raw, raw)
-            return x
-        ctx = CutContext(cut, "forward", batch_id, len(self.split_layers))
-        payload = _detach_payload(hook.encode(x, ctx))
-        self._meter.add_fwd(cut, payload_nbytes(payload), raw)
-        return hook.decode(payload, ctx)
+        else:
+            ctx = CutContext(cut, "forward", batch_id, len(self.split_layers))
+            payload = _detach_payload(hook.encode(x, ctx))
+            self._meter.add_fwd(cut, payload_nbytes(payload), raw)
+            x = hook.decode(payload, ctx)
+        if self._attacks:
+            self._observe(cut, "forward", x, batch_id)
+        return x
 
     def _cut_backward(self, cut: int, g, out, batch_id: int):
         """The gradient slice ``cut`` backpropagates through ``out``, from ``g`` sent by
         slice ``cut + 1``."""
         if g is None:
             return None
+        if self._attacks:
+            g = self._forge(cut, g, batch_id)
         raw = tensor_nbytes(g)
         hook = self._hooks.get(cut)
         if hook is None:
             self._meter.add_bwd(cut, raw, raw)
-            return g
-        ctx = CutContext(cut, "backward", batch_id, len(self.split_layers))
-        payload = _detach_payload(hook.encode_grad(g, ctx))
-        self._meter.add_bwd(cut, payload_nbytes(payload), raw)
-        g = hook.decode_grad(payload, ctx)
+        else:
+            ctx = CutContext(cut, "backward", batch_id, len(self.split_layers))
+            payload = _detach_payload(hook.encode_grad(g, ctx))
+            self._meter.add_bwd(cut, payload_nbytes(payload), raw)
+            g = hook.decode_grad(payload, ctx)
+        if self._attacks:
+            self._observe(cut, "backward", g, batch_id)
+        if self._defences:
+            g = self._defend(cut, g, out, batch_id)
         return g.to(out.dtype) if g.dtype != out.dtype else g
+
+    # ── privacy: attacks observe the receiving side, defences add a client term ──
+
+    def _set_truth(self, inputs, labels, ids, scale: float = 1.0) -> None:
+        """The (micro-)batches' raw inputs and labels by batch id, for attack scoring and
+        the defences."""
+        if self._attacks or self._defences:
+            self._truth = dict(zip(ids, zip(inputs, labels)))
+            self._privacy_scale = scale
+
+    def _obs(self, cut, direction, t, batch_id) -> Observation:
+        inputs, labels = self._truth.get(batch_id, (None, None))
+        return Observation(t.detach(), CutContext(cut, direction, batch_id, len(self.split_layers)),
+                           inputs, labels)
+
+    def _observe(self, cut: int, direction: str, t, batch_id: int) -> None:
+        attacks = [a for a in self._attacks if a.cut == cut and a.direction == direction]
+        if not attacks:
+            return
+        obs = self._obs(cut, direction, t, batch_id)
+        # attacks draw their own random numbers (decoder init, sampling): training's stay intact
+        with torch.random.fork_rng(devices=self._rng_devices):
+            for a in attacks:
+                a.observe(obs)
+
+    def _forge(self, cut: int, g, batch_id: int):
+        """A malicious server's gradient replaces the honest one before it is sent."""
+        for a in self._attacks:
+            if a.forges and a.cut == cut:
+                with torch.random.fork_rng(devices=self._rng_devices):
+                    forged = a.forge(self._obs(cut, "backward", g, batch_id))
+                if forged is not None:
+                    if forged.shape != g.shape:
+                        raise ValueError(f"{type(a).__name__}.forge returned shape {tuple(forged.shape)} "
+                                         f"for a cut gradient of shape {tuple(g.shape)}")
+                    g = (self._privacy_scale * forged).to(device=g.device, dtype=g.dtype)
+        return g
+
+    def _defend(self, cut: int, g, out, batch_id: int):
+        obs = None
+        for d in self._defences:
+            if d.cut != cut:
+                continue
+            obs = obs or self._obs(cut, "backward", g, batch_id)
+            extra = d.grad_term(out, obs)
+            if extra is not None:
+                g = g + (self._privacy_scale * extra).to(g.dtype)
+        return g
+
+    def _check_query(self, attack) -> None:
+        for sl in self.split_layers[:attack.cut + 1]:
+            if any(hasattr(layer, "pop_aux_loss") for layer in sl.layers):
+                raise ValueError(f"{type(attack).__name__} runs the client slices, which hold MoE "
+                                 "blocks (their auxiliary losses would mix with training's)")
+
+    def _query(self, cut: int, x):
+        """Black-box query access for an attack: what slice ``cut + 1`` would receive for
+        inputs ``x`` (eval mode, no gradients, hooks applied as in ``evaluate``). Leaves the
+        slices' training state (mode, saved cut inputs) as it was."""
+        layers = self.split_layers[:cut + 1]
+        saved = [(sl.x, sl.training) for sl in layers]
+        try:
+            for sl in layers:
+                sl.eval()
+            with torch.no_grad():
+                for i, sl in enumerate(layers):
+                    if i > 0:
+                        x = self._eval_cut(i - 1, x)
+                    x = sl(x)
+                return self._eval_cut(cut, x)
+        finally:
+            for sl, (x_saved, mode) in zip(layers, saved):
+                sl.x = x_saved
+                sl.train(mode)
 
     def _count_io(self, main, aux: dict, labels, msgs: int = 1) -> None:
         """Raw inputs / labels that would leave the data owner (``sl.setting``)."""
@@ -509,6 +646,7 @@ class LocalExecutor(BaseExecutor):
         labels = labels.to(device)
         aux    = {k: v.to(device) for k, v in aux.items()}
         self._count_io(main, aux, labels)
+        self._set_truth([main], [labels], [batch_id])
 
         ctx    = AlgorithmContext(round=self._round, batch_id=batch_id,
                                   n_slices=len(self.split_layers))
@@ -651,6 +789,8 @@ class LocalExecutor(BaseExecutor):
         micro_mains  = main.chunk(M)
         micro_labels = labels.chunk(M)
         self._count_io(main, aux, labels, msgs=len(micro_mains))
+        self._set_truth(micro_mains, micro_labels, [batch_id * M + m for m in range(len(micro_mains))],
+                        scale=1.0 / M)
         # Chunk aux tensors that share the batch dimension; broadcast scalars/constants
         micro_aux = [
             {k: v.chunk(M)[m] if v.dim() > 0 and v.shape[0] == main.shape[0] else v

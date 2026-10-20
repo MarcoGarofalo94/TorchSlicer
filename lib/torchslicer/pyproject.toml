@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchslicer"
-version = "0.11.0"
+version = "0.13.0"
 description = "Split learning framework for PyTorch — pipeline-parallel training across heterogeneous devices."
 authors = [{ name = "Marco Garofalo", email = "garofalomarco58@gmail.com" }]
 license = "GPL-3.0-or-later"
@@ -33,6 +33,7 @@ Repository = "https://github.com/MarcoGarofalo94/TorchSlicer"
 torchslicer = "torchslicer.__main__:main"
 
 [project.optional-dependencies]
+flower = ["flwr>=1.40; python_version >= '3.11'"]   # flwr 1.40 needs Python 3.11+
 grpc = [
     "grpcio>=1.64.0",
     "grpcio-tools>=1.64.0",

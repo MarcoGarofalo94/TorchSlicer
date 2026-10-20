@@ -1,0 +1,867 @@
+{
+ "config": {
+  "dataset": "mnist",
+  "train_subset": 10000,
+  "test_subset": 2000,
+  "batch_size": 64,
+  "epochs": 3,
+  "model": "cnn",
+  "cut": 1,
+  "device": "cuda",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "attacks": [
+   {
+    "name": "inversion",
+    "cut": 0,
+    "params": {
+     "n_aux": 512,
+     "steps": 2
+    }
+   },
+   {
+    "name": "dcor",
+    "cut": 0
+   }
+  ],
+  "runs": [
+   {
+    "label": "cut1"
+   },
+   {
+    "label": "cut4",
+    "cut": 4
+   },
+   {
+    "label": "cut8",
+    "cut": 8
+   },
+   {
+    "label": "cut1_act_noise_0.5",
+    "cut_hooks": [
+     {
+      "cut": 0,
+      "name": "gaussian_noise",
+      "params": {
+       "std": 0.5
+      }
+     }
+    ]
+   },
+   {
+    "label": "cut1_act_noise_2",
+    "cut_hooks": [
+     {
+      "cut": 0,
+      "name": "gaussian_noise",
+      "params": {
+       "std": 2.0
+      }
+     }
+    ]
+   },
+   {
+    "label": "cut1_nopeek_1",
+    "defences": [
+     {
+      "name": "nopeek",
+      "cut": 0,
+      "params": {
+       "alpha": 1.0
+      }
+     }
+    ]
+   },
+   {
+    "label": "cut1_nopeek_10",
+    "defences": [
+     {
+      "name": "nopeek",
+      "cut": 0,
+      "params": {
+       "alpha": 10.0
+      }
+     }
+    ]
+   },
+   {
+    "label": "cut4_nopeek_10",
+    "cut": 4,
+    "defences": [
+     {
+      "name": "nopeek",
+      "cut": 0,
+      "params": {
+       "alpha": 10.0
+      }
+     }
+    ]
+   },
+   {
+    "label": "cut4_nopeek_100",
+    "cut": 4,
+    "defences": [
+     {
+      "name": "nopeek",
+      "cut": 0,
+      "params": {
+       "alpha": 100.0
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "results": [
+  {
+   "run": "cut1",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.08589166666666666,
+     0.0015798235133499337
+    ],
+    "leak_inversion_psnr": [
+     42.58,
+     0.9178040368183182
+    ],
+    "leak_inversion_ssim": [
+     0.9954999999999999,
+     0.0007937253933193527
+    ],
+    "leak_dcor_value": [
+     0.999009,
+     0.0006377123175853023
+    ],
+    "test_loss": [
+     0.07849366666666667,
+     0.007558049505880025
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9743333333333334,
+     0.0038188130791298944
+    ],
+    "time_s": [
+     3.54,
+     0.5199999999999998
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.084478,
+     "leak_inversion_psnr": 41.6065,
+     "leak_inversion_ssim": 0.9949,
+     "leak_dcor_value": 0.998362,
+     "test_loss": 0.074514,
+     "test_samples": 2000,
+     "test_accuracy": 0.9785,
+     "time_s": 4.14,
+     "bytes_fwd": [
+      501760000
+     ]
+    },
+    {
+     "loss": 0.0856,
+     "leak_inversion_psnr": 43.4295,
+     "leak_inversion_ssim": 0.9964,
+     "leak_dcor_value": 0.999028,
+     "test_loss": 0.08721,
+     "test_samples": 2000,
+     "test_accuracy": 0.971,
+     "time_s": 3.26,
+     "bytes_fwd": [
+      501760000
+     ]
+    },
+    {
+     "loss": 0.087597,
+     "leak_inversion_psnr": 42.704,
+     "leak_inversion_ssim": 0.9952,
+     "leak_dcor_value": 0.999637,
+     "test_loss": 0.073757,
+     "test_samples": 2000,
+     "test_accuracy": 0.9735,
+     "time_s": 3.22,
+     "bytes_fwd": [
+      501760000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut4",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.08594266666666667,
+     0.0013384477327611007
+    ],
+    "leak_inversion_psnr": [
+     26.353866666666665,
+     0.26236229403886074
+    ],
+    "leak_inversion_ssim": [
+     0.9462666666666667,
+     0.003910669166950006
+    ],
+    "leak_dcor_value": [
+     0.984857,
+     0.0021904280403610313
+    ],
+    "test_loss": [
+     0.078382,
+     0.007219715576115174
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.975,
+     0.0027838821814149834
+    ],
+    "time_s": [
+     3.8000000000000003,
+     0.16643316977093245
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.084463,
+     "leak_inversion_psnr": 26.4212,
+     "leak_inversion_ssim": 0.9452,
+     "leak_dcor_value": 0.985482,
+     "test_loss": 0.074973,
+     "test_samples": 2000,
+     "test_accuracy": 0.978,
+     "time_s": 3.73,
+     "bytes_fwd": [
+      250880000
+     ]
+    },
+    {
+     "loss": 0.086296,
+     "leak_inversion_psnr": 26.0644,
+     "leak_inversion_ssim": 0.943,
+     "leak_dcor_value": 0.982422,
+     "test_loss": 0.086675,
+     "test_samples": 2000,
+     "test_accuracy": 0.9725,
+     "time_s": 3.99,
+     "bytes_fwd": [
+      250880000
+     ]
+    },
+    {
+     "loss": 0.087069,
+     "leak_inversion_psnr": 26.576,
+     "leak_inversion_ssim": 0.9506,
+     "leak_dcor_value": 0.986667,
+     "test_loss": 0.073498,
+     "test_samples": 2000,
+     "test_accuracy": 0.9745,
+     "time_s": 3.68,
+     "bytes_fwd": [
+      250880000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut8",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.08557133333333333,
+     0.0015101736103287323
+    ],
+    "leak_inversion_psnr": [
+     15.372866666666667,
+     0.08441861958912425
+    ],
+    "leak_inversion_ssim": [
+     0.4589333333333333,
+     0.009376744282176686
+    ],
+    "leak_dcor_value": [
+     0.8456066666666666,
+     0.005774095629043023
+    ],
+    "test_loss": [
+     0.07826433333333334,
+     0.007846075218434587
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.974,
+     0.0030000000000000027
+    ],
+    "time_s": [
+     3.0666666666666664,
+     0.04725815626252625
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.084359,
+     "leak_inversion_psnr": 15.405,
+     "leak_inversion_ssim": 0.4613,
+     "leak_dcor_value": 0.845243,
+     "test_loss": 0.07491,
+     "test_samples": 2000,
+     "test_accuracy": 0.977,
+     "time_s": 3.03,
+     "bytes_fwd": [
+      5120000
+     ]
+    },
+    {
+     "loss": 0.085092,
+     "leak_inversion_psnr": 15.2771,
+     "leak_inversion_ssim": 0.4486,
+     "leak_dcor_value": 0.840023,
+     "test_loss": 0.08723,
+     "test_samples": 2000,
+     "test_accuracy": 0.971,
+     "time_s": 3.12,
+     "bytes_fwd": [
+      5120000
+     ]
+    },
+    {
+     "loss": 0.087263,
+     "leak_inversion_psnr": 15.4365,
+     "leak_inversion_ssim": 0.4669,
+     "leak_dcor_value": 0.851554,
+     "test_loss": 0.072653,
+     "test_samples": 2000,
+     "test_accuracy": 0.974,
+     "time_s": 3.05,
+     "bytes_fwd": [
+      5120000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut1_act_noise_0.5",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.11857566666666666,
+     0.004425413464675742
+    ],
+    "leak_inversion_psnr": [
+     30.455566666666666,
+     0.20170791589160217
+    ],
+    "leak_inversion_ssim": [
+     0.9758,
+     0.002029778313018439
+    ],
+    "leak_dcor_value": [
+     0.9868103333333333,
+     0.0005735244836389693
+    ],
+    "test_loss": [
+     0.10643033333333334,
+     0.013903917805184745
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.965,
+     0.00482182538049647
+    ],
+    "time_s": [
+     3.506666666666667,
+     0.08962886439832489
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.114254,
+     "leak_inversion_psnr": 30.3339,
+     "leak_inversion_ssim": 0.974,
+     "leak_dcor_value": 0.987274,
+     "test_loss": 0.10179,
+     "test_samples": 2000,
+     "test_accuracy": 0.9685,
+     "time_s": 3.61,
+     "bytes_fwd": [
+      501765652
+     ]
+    },
+    {
+     "loss": 0.123098,
+     "leak_inversion_psnr": 30.3444,
+     "leak_inversion_ssim": 0.9754,
+     "leak_dcor_value": 0.986988,
+     "test_loss": 0.122061,
+     "test_samples": 2000,
+     "test_accuracy": 0.9595,
+     "time_s": 3.45,
+     "bytes_fwd": [
+      501765652
+     ]
+    },
+    {
+     "loss": 0.118375,
+     "leak_inversion_psnr": 30.6884,
+     "leak_inversion_ssim": 0.978,
+     "leak_dcor_value": 0.986169,
+     "test_loss": 0.09544,
+     "test_samples": 2000,
+     "test_accuracy": 0.967,
+     "time_s": 3.46,
+     "bytes_fwd": [
+      501765652
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut1_act_noise_2",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.27542833333333333,
+     0.027706528478561407
+    ],
+    "leak_inversion_psnr": [
+     24.90726666666667,
+     0.43877415982864537
+    ],
+    "leak_inversion_ssim": [
+     0.9283,
+     0.0049568134925575
+    ],
+    "leak_dcor_value": [
+     0.9370356666666667,
+     0.008319129902419682
+    ],
+    "test_loss": [
+     0.22711066666666668,
+     0.027019195442006295
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9265,
+     0.005196152422706636
+    ],
+    "time_s": [
+     3.4766666666666666,
+     0.12701705922171752
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.249322,
+     "leak_inversion_psnr": 25.3775,
+     "leak_inversion_ssim": 0.9331,
+     "leak_dcor_value": 0.942909,
+     "test_loss": 0.203609,
+     "test_samples": 2000,
+     "test_accuracy": 0.9295,
+     "time_s": 3.33,
+     "bytes_fwd": [
+      501765652
+     ]
+    },
+    {
+     "loss": 0.304497,
+     "leak_inversion_psnr": 24.8355,
+     "leak_inversion_ssim": 0.9286,
+     "leak_dcor_value": 0.940682,
+     "test_loss": 0.256632,
+     "test_samples": 2000,
+     "test_accuracy": 0.9205,
+     "time_s": 3.55,
+     "bytes_fwd": [
+      501765652
+     ]
+    },
+    {
+     "loss": 0.272466,
+     "leak_inversion_psnr": 24.5088,
+     "leak_inversion_ssim": 0.9232,
+     "leak_dcor_value": 0.927516,
+     "test_loss": 0.221091,
+     "test_samples": 2000,
+     "test_accuracy": 0.9295,
+     "time_s": 3.55,
+     "bytes_fwd": [
+      501765652
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut1_nopeek_1",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.086148,
+     0.001642270379687824
+    ],
+    "leak_inversion_psnr": [
+     42.57326666666667,
+     1.1010597364963124
+    ],
+    "leak_inversion_ssim": [
+     0.9958333333333333,
+     0.0011718930554164382
+    ],
+    "leak_dcor_value": [
+     0.9983806666666667,
+     0.0011909644551090764
+    ],
+    "test_loss": [
+     0.07971833333333334,
+     0.008000794231408112
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9741666666666666,
+     0.002565800719723437
+    ],
+    "time_s": [
+     4.083333333333334,
+     0.09073771725877483
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.08465,
+     "leak_inversion_psnr": 41.3607,
+     "leak_inversion_ssim": 0.9945,
+     "leak_dcor_value": 0.997163,
+     "test_loss": 0.07566,
+     "test_samples": 2000,
+     "test_accuracy": 0.977,
+     "time_s": 4.15,
+     "bytes_fwd": [
+      501760000
+     ]
+    },
+    {
+     "loss": 0.08589,
+     "leak_inversion_psnr": 43.5106,
+     "leak_inversion_ssim": 0.9967,
+     "leak_dcor_value": 0.998436,
+     "test_loss": 0.088935,
+     "test_samples": 2000,
+     "test_accuracy": 0.972,
+     "time_s": 3.98,
+     "bytes_fwd": [
+      501760000
+     ]
+    },
+    {
+     "loss": 0.087904,
+     "leak_inversion_psnr": 42.8485,
+     "leak_inversion_ssim": 0.9963,
+     "leak_dcor_value": 0.999543,
+     "test_loss": 0.07456,
+     "test_samples": 2000,
+     "test_accuracy": 0.9735,
+     "time_s": 4.12,
+     "bytes_fwd": [
+      501760000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut1_nopeek_10",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.111975,
+     0.015988126438078978
+    ],
+    "leak_inversion_psnr": [
+     36.228233333333336,
+     4.803910001585511
+    ],
+    "leak_inversion_ssim": [
+     0.9823333333333333,
+     0.011201041618230566
+    ],
+    "leak_dcor_value": [
+     0.9611006666666667,
+     0.026492409787207613
+    ],
+    "test_loss": [
+     0.10814733333333333,
+     0.006116649436851298
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9675,
+     0.0010000000000000009
+    ],
+    "time_s": [
+     4.093333333333334,
+     0.17616280348965077
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.123357,
+     "leak_inversion_psnr": 32.151,
+     "leak_inversion_ssim": 0.9718,
+     "leak_dcor_value": 0.94014,
+     "test_loss": 0.113605,
+     "test_samples": 2000,
+     "test_accuracy": 0.9685,
+     "time_s": 4.29,
+     "bytes_fwd": [
+      501760000
+     ]
+    },
+    {
+     "loss": 0.093696,
+     "leak_inversion_psnr": 41.5241,
+     "leak_inversion_ssim": 0.9941,
+     "leak_dcor_value": 0.990877,
+     "test_loss": 0.101536,
+     "test_samples": 2000,
+     "test_accuracy": 0.9675,
+     "time_s": 3.95,
+     "bytes_fwd": [
+      501760000
+     ]
+    },
+    {
+     "loss": 0.118872,
+     "leak_inversion_psnr": 35.0096,
+     "leak_inversion_ssim": 0.9811,
+     "leak_dcor_value": 0.952285,
+     "test_loss": 0.109301,
+     "test_samples": 2000,
+     "test_accuracy": 0.9665,
+     "time_s": 4.04,
+     "bytes_fwd": [
+      501760000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut4_nopeek_10",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.4196823333333333,
+     0.007211615930797569
+    ],
+    "leak_inversion_psnr": [
+     18.6,
+     1.2175881118013605
+    ],
+    "leak_inversion_ssim": [
+     0.7221666666666667,
+     0.04392975453304211
+    ],
+    "leak_dcor_value": [
+     0.6410186666666666,
+     0.05556591097366561
+    ],
+    "test_loss": [
+     0.46410233333333334,
+     0.09938380701267857
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9296666666666666,
+     0.0030138568866708597
+    ],
+    "time_s": [
+     4.3566666666666665,
+     0.037859388972002035
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.427768,
+     "leak_inversion_psnr": 17.9621,
+     "leak_inversion_ssim": 0.6995,
+     "leak_dcor_value": 0.610392,
+     "test_loss": 0.384916,
+     "test_samples": 2000,
+     "test_accuracy": 0.9325,
+     "time_s": 4.34,
+     "bytes_fwd": [
+      250880000
+     ]
+    },
+    {
+     "loss": 0.417364,
+     "leak_inversion_psnr": 17.8339,
+     "leak_inversion_ssim": 0.6942,
+     "leak_dcor_value": 0.607505,
+     "test_loss": 0.431763,
+     "test_samples": 2000,
+     "test_accuracy": 0.9265,
+     "time_s": 4.4,
+     "bytes_fwd": [
+      250880000
+     ]
+    },
+    {
+     "loss": 0.413915,
+     "leak_inversion_psnr": 20.004,
+     "leak_inversion_ssim": 0.7728,
+     "leak_dcor_value": 0.705159,
+     "test_loss": 0.575628,
+     "test_samples": 2000,
+     "test_accuracy": 0.93,
+     "time_s": 4.33,
+     "bytes_fwd": [
+      250880000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut4_nopeek_100",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     2.300441,
+     8.283115355950999e-05
+    ],
+    "leak_inversion_psnr": [
+     10.666666666666666,
+     0.004178915329762985
+    ],
+    "leak_inversion_ssim": [
+     -0.05896666666666667,
+     5.773502691896023e-05
+    ],
+    "leak_dcor_value": [
+     0.003715333333333333,
+     0.00022394270100481805
+    ],
+    "test_loss": [
+     2.3019973333333335,
+     0.00010565194429503592
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.116,
+     0.0
+    ],
+    "time_s": [
+     4.373333333333333,
+     0.0650640709864775
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 2.300532,
+     "leak_inversion_psnr": 10.6621,
+     "leak_inversion_ssim": -0.059,
+     "leak_dcor_value": 0.003645,
+     "test_loss": 2.301876,
+     "test_samples": 2000,
+     "test_accuracy": 0.116,
+     "time_s": 4.31,
+     "bytes_fwd": [
+      250880000
+     ]
+    },
+    {
+     "loss": 2.30037,
+     "leak_inversion_psnr": 10.6703,
+     "leak_inversion_ssim": -0.059,
+     "leak_dcor_value": 0.003966,
+     "test_loss": 2.302069,
+     "test_samples": 2000,
+     "test_accuracy": 0.116,
+     "time_s": 4.44,
+     "bytes_fwd": [
+      250880000
+     ]
+    },
+    {
+     "loss": 2.300421,
+     "leak_inversion_psnr": 10.6676,
+     "leak_inversion_ssim": -0.0589,
+     "leak_dcor_value": 0.003535,
+     "test_loss": 2.302047,
+     "test_samples": 2000,
+     "test_accuracy": 0.116,
+     "time_s": 4.37,
+     "bytes_fwd": [
+      250880000
+     ]
+    }
+   ]
+  }
+ ]
+}

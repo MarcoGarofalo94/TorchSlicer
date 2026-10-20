@@ -126,6 +126,7 @@ These hooks are built in:
 | `Float16`, `BFloat16` | send the tensor at half precision |
 | `Quantize(bits=1/2/4/8)` | uniform per-tensor quantization, bit-packed |
 | `TopK(ratio)` | per-sample top-k sparsification |
+| `CircularConv(ratio)` | C3-SL batch-wise compression: each group of `ratio` samples goes as one vector (circular convolution with random keys), both ways; the gradient is exact for the decoded activation |
 | `GaussianNoise(std)` | add noise, from a generator seeded per `(seed, cut, batch)`, so the global RNG is untouched and runs reproduce in every topology |
 | `Recorder` | an observer; see below |
 | `Chain([...])` | several hooks on one cut |

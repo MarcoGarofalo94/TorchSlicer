@@ -1,0 +1,167 @@
+{
+ "seed": 1,
+ "results": [
+  {
+   "loss": 0.179914,
+   "leak_label_norm_auc": 0.746338,
+   "leak_label_norm_auc_q95": 1.0,
+   "leak_label_norm_batches": 311,
+   "leak_label_direction_auc": 0.924917,
+   "leak_label_direction_auc_q95": 1.0,
+   "leak_label_direction_batches": 308,
+   "test_loss": 0.180856,
+   "test_samples": 5000,
+   "test_accuracy": 0.9286,
+   "time_s": 128.76,
+   "bytes_fwd": [
+    327680000
+   ]
+  },
+  {
+   "loss": 0.196214,
+   "leak_label_norm_auc": 0.781998,
+   "leak_label_norm_auc_q95": 0.994527,
+   "leak_label_norm_batches": 311,
+   "leak_label_direction_auc": 0.741885,
+   "leak_label_direction_auc_q95": 1.0,
+   "leak_label_direction_batches": 308,
+   "test_loss": 0.202377,
+   "test_samples": 5000,
+   "test_accuracy": 0.9184,
+   "time_s": 104.82,
+   "bytes_fwd": [
+    327691268
+   ]
+  },
+  {
+   "loss": 0.220913,
+   "leak_label_norm_auc": 0.825106,
+   "leak_label_norm_auc_q95": 0.997631,
+   "leak_label_norm_batches": 311,
+   "leak_label_direction_auc": 0.947924,
+   "leak_label_direction_auc_q95": 1.0,
+   "leak_label_direction_batches": 308,
+   "test_loss": 0.22214,
+   "test_samples": 5000,
+   "test_accuracy": 0.913,
+   "time_s": 131.51,
+   "bytes_fwd": [
+    327691268
+   ]
+  },
+  {
+   "loss": 0.216132,
+   "leak_label_norm_auc": 0.833518,
+   "leak_label_norm_auc_q95": 0.99392,
+   "leak_label_norm_batches": 311,
+   "leak_label_direction_auc": 0.92608,
+   "leak_label_direction_auc_q95": 1.0,
+   "leak_label_direction_batches": 308,
+   "leak_dp_epsilon": 61477.401509,
+   "leak_dp_mu": 346.410162,
+   "leak_dp_releases": 3,
+   "test_loss": 0.22201,
+   "test_samples": 5000,
+   "test_accuracy": 0.9126,
+   "time_s": 131.25,
+   "bytes_fwd": [
+    327691268
+   ]
+  },
+  {
+   "loss": 0.214398,
+   "leak_label_norm_auc": 0.827341,
+   "leak_label_norm_auc_q95": 0.988955,
+   "leak_label_norm_batches": 311,
+   "leak_label_direction_auc": 0.889446,
+   "leak_label_direction_auc_q95": 1.0,
+   "leak_label_direction_batches": 308,
+   "leak_dp_epsilon": 7159.133836,
+   "leak_dp_mu": 115.470054,
+   "leak_dp_releases": 3,
+   "test_loss": 0.220628,
+   "test_samples": 5000,
+   "test_accuracy": 0.9106,
+   "time_s": 130.9,
+   "bytes_fwd": [
+    327691268
+   ]
+  },
+  {
+   "loss": 0.206141,
+   "leak_label_norm_auc": 0.662648,
+   "leak_label_norm_auc_q95": 0.8523,
+   "leak_label_norm_batches": 311,
+   "leak_label_direction_auc": 0.608143,
+   "leak_label_direction_auc_q95": 0.857049,
+   "leak_label_direction_batches": 308,
+   "leak_dp_epsilon": 747.740151,
+   "leak_dp_mu": 34.641016,
+   "leak_dp_releases": 3,
+   "test_loss": 0.221093,
+   "test_samples": 5000,
+   "test_accuracy": 0.9112,
+   "time_s": 56.0,
+   "bytes_fwd": [
+    327691268
+   ]
+  },
+  {
+   "loss": 0.194025,
+   "leak_label_norm_auc": 0.52357,
+   "leak_label_norm_auc_q95": 0.733037,
+   "leak_label_norm_batches": 311,
+   "leak_label_direction_auc": 0.512514,
+   "leak_label_direction_auc_q95": 0.739867,
+   "leak_label_direction_batches": 308,
+   "leak_dp_epsilon": 115.063397,
+   "leak_dp_mu": 11.547005,
+   "leak_dp_releases": 3,
+   "test_loss": 0.195285,
+   "test_samples": 5000,
+   "test_accuracy": 0.9232,
+   "time_s": 82.29,
+   "bytes_fwd": [
+    327691268
+   ]
+  },
+  {
+   "loss": 0.195225,
+   "leak_label_norm_auc": 0.502226,
+   "leak_label_norm_auc_q95": 0.710045,
+   "leak_label_norm_batches": 311,
+   "leak_label_direction_auc": 0.496697,
+   "leak_label_direction_auc_q95": 0.729828,
+   "leak_label_direction_batches": 308,
+   "leak_dp_epsilon": 20.125024,
+   "leak_dp_mu": 3.464102,
+   "leak_dp_releases": 3,
+   "test_loss": 0.194714,
+   "test_samples": 5000,
+   "test_accuracy": 0.9246,
+   "time_s": 104.7,
+   "bytes_fwd": [
+    327691268
+   ]
+  },
+  {
+   "loss": 0.196333,
+   "leak_label_norm_auc": 0.500165,
+   "leak_label_norm_auc_q95": 0.702931,
+   "leak_label_norm_batches": 311,
+   "leak_label_direction_auc": 0.495748,
+   "leak_label_direction_auc_q95": 0.73431,
+   "leak_label_direction_batches": 308,
+   "leak_dp_epsilon": 5.17481,
+   "leak_dp_mu": 1.154701,
+   "leak_dp_releases": 3,
+   "test_loss": 0.199863,
+   "test_samples": 5000,
+   "test_accuracy": 0.921,
+   "time_s": 101.97,
+   "bytes_fwd": [
+    327691268
+   ]
+  }
+ ]
+}

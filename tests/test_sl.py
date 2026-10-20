@@ -126,6 +126,41 @@ def test_topk_keeps_the_largest_entries_per_sample():
                        torch.tensor([[0.0, -3.0, 0.0, 2.0], [5.0, 0.0, -0.5, 0.0]]))
 
 
+def test_circular_conv_compresses_both_ways_and_gives_the_exact_gradient():
+    """C3-SL: groups of ``ratio`` samples go as one vector each way, and slice 0 trains as if
+    ``decode(encode(z))`` were a differentiable layer (the two maps are each other's adjoint)."""
+    from torchslicer.sl.hooks import CutContext
+    h, ctx = ts.CircularConv(ratio=4, seed=3), CutContext(0, "forward", 0)
+    z, w = torch.randn(10, 2, 3, 4), torch.randn(3, 24)
+    v, shape = h.encode(z, ctx)
+    assert v.shape == (3, 24)                                  # 10 samples, padded to 12, / 4
+    zz = h.decode([w, shape], ctx)                             # <E z, w> == <z, E^T w>
+    assert torch.allclose((v * w).sum(), (z * zz).sum(), atol=1e-4)
+
+    def model():
+        torch.manual_seed(0)
+        return nn.Sequential(nn.Linear(6, 24), nn.Tanh(), nn.Linear(24, 3))
+
+    g = torch.Generator().manual_seed(1)
+    data = [(torch.randn(8, 6, generator=g), torch.randint(0, 3, (8,), generator=g)) for _ in range(3)]
+    cfg = ts.RunConfig()
+    cfg.training.optimizer = {"name": "SGD", "params": {"lr": 0.5}}
+    cfg.training.criterion = {"name": "CrossEntropyLoss", "params": {}}
+    cfg.training.epochs, cfg.logging.enabled = 1, False
+    m = model()
+    ts.slice(m, cuts=["1"], cut_hooks={0: ts.CircularConv(ratio=4, seed=3)}).train(data, run_config=cfg)
+
+    ref, c3 = model(), ts.CircularConv(ratio=4, seed=3)
+    opt = torch.optim.SGD(ref.parameters(), lr=0.5)
+    for x, y in data:
+        opt.zero_grad()
+        z = ref[1](ref[0](x))
+        nn.functional.cross_entropy(ref[2](c3._unbind(c3._bind(z))), y).backward()
+        opt.step()
+    for a, b in zip(m.parameters(), ref.parameters()):
+        assert torch.allclose(a, b, atol=1e-5)
+
+
 def test_cut_hook_resolution():
     q, f = ts.Quantize(), ts.Float16()
     assert resolve_cut_hooks(q, 3) == {0: q, 1: q}
@@ -297,6 +332,13 @@ def test_sessions_refuse_ties_across_client_and_server():
     # u_shaped: embedding and head are both on the data owner, so the tie is fine
     ts.slice(Tied(), cuts=["emb", "mid"]).train(ts.ClientSession([data, data], mode="parallel"),
                                                 SGD, CE, epochs=1, run_config=_cfg(setting="u_shaped"))
+    # frozen tied weight (LoRA-style fine-tuning): every client sees the same value, allowed
+    frozen = Tied()
+    frozen.emb.weight.requires_grad_(False)
+    before = frozen.emb.weight.detach().clone()
+    ts.slice(frozen, cuts=["mid"]).train(ts.ClientSession([data, data]), SGD, CE, epochs=1,
+                                         run_config=_cfg(setting="vanilla"))
+    assert torch.equal(frozen.emb.weight, before)
 
 
 def test_run_wraps_client_loaders_from_the_config():

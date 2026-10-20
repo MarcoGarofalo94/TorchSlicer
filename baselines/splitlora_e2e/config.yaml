@@ -1,0 +1,47 @@
+# SplitLoRA (Lin et al., 2024), Table I, GPT-2 small, LoRA rank 4, E2E NLG: centralized LoRA
+# (CenLoRA) and split LoRA over 3 clients (SplitLoRA), the client holding the first 3 blocks.
+# The paper gives the lr (2e-4), batch (8), sequence length (512), rank, cut and client count,
+# not the epochs, optimizer, schedule or LoRA targets: those follow the LoRA paper's GPT-2 E2E
+# recipe (microsoft/LoRA examples/NLG), which SplitLoRA's trainable-parameter counts match
+# (q and v, alpha 32, dropout 0.1, AdamW wd 0.01, 500 warmup steps then linear decay, 5
+# epochs, label smoothing 0.1, beam 10). Run prepare.py first. See README.md.
+training:
+  epochs: 5
+  optimizer: {name: AdamW, params: {lr: 2.0e-4, weight_decay: 0.01, betas: [0.9, 0.999]}}
+  criterion: {name: CrossEntropyLoss, params: {ignore_index: -100, label_smoothing: 0.1}}
+  scheduler: {name: linear, params: {warmup_steps: 500, total_steps: 26295}}   # 5 x 5259 batches
+network: {device: auto}
+data:
+  dataset: e2e
+  root: data
+  partition: iid
+  batch_size: 8
+  eval_every: 0
+sl:
+  setting: vanilla
+  clients: 1
+baseline:
+  paper:
+    title: "SplitLoRA: A Split Parameter-Efficient Fine-Tuning Framework for Large Language Models"
+    url: https://arxiv.org/abs/2407.00952
+    table: "Table I, GPT2-S, r = 4 (metrics x 100 in the paper)"
+  requires: [transformers]      # Python packages beyond TorchSlicer's; the CI test skips without them
+  model: {name: gpt2_lora, params: {name: gpt2, r: 4, alpha: 32, dropout: 0.1}}
+  metric: bleu
+  report: last
+  seeds: [0, 1, 2]
+  smoke: {training: {epochs: 1, scheduler: {name: linear, params: {warmup_steps: 10, total_steps: 60}}},
+          data: {train_subset: 480, test_subset: 20}}
+  synthetic:     # CI: a 2-block random GPT-2 on random tokens, no download, no scorer
+    data: {dataset: e2e_synthetic, params: {n: 48}, train_subset: 0, test_subset: 4, batch_size: 8}
+    model: {name: gpt2_lora, params: {pretrained: false, n_layer: 2, r: 2}}
+    cuts: [1]
+  runs:
+    - label: cen_lora
+      cuts: [3]
+      expected: {value: 0.6941, tol: 0.01}
+    - label: split_lora
+      cuts: [3]
+      config:
+        sl: {clients: 3, client_mode: sequential, handoff: keep, algorithm: splitfed}
+      expected: {value: 0.6879, tol: 0.01}

@@ -165,16 +165,25 @@ def _shakespeare(root: str, train: bool, download: bool, seed: int = 0, seq_len:
 
 
 _DATASETS = ("mnist", "fashion_mnist", "cifar10", "cifar100", "synthetic", "npz", "shakespeare")
+_REGISTERED: dict = {}
+
+
+def register_dataset(name: str, fn) -> None:
+    """``fn(train, root, download, seed, **params) -> Dataset`` under ``data.dataset: name``.
+    The partitioners read its ``targets`` (or ``groups``) when it is split across clients."""
+    _REGISTERED[name.strip().lower()] = fn
 
 
 def available_datasets() -> list[str]:
-    return list(_DATASETS)
+    return list(_DATASETS) + sorted(_REGISTERED)
 
 
 def load_dataset(name: str, root: str = "data", train: bool = True, download: bool = True,
                  seed: int = 0, **params):
     """One split (train or test) of a named dataset; see the module docstring."""
     name = name.strip().lower()
+    if name in _REGISTERED:
+        return _REGISTERED[name](train=train, root=root, download=download, seed=seed, **params)
     if name in _STATS:
         if params:
             raise ValueError(f"dataset {name!r} takes no params, got {sorted(params)}")

@@ -1,0 +1,607 @@
+{
+ "config": {
+  "dataset": "mnist",
+  "binary_positive": 0,
+  "train_subset": 10000,
+  "test_subset": 2000,
+  "batch_size": 64,
+  "epochs": 3,
+  "model": "cnn",
+  "cut": 2,
+  "device": "cuda",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "attacks": [
+   {
+    "name": "label_norm",
+    "cut": 0
+   },
+   {
+    "name": "label_direction",
+    "cut": 0
+   }
+  ],
+  "runs": [
+   {
+    "label": "none"
+   },
+   {
+    "label": "grad_noise_1e-4",
+    "cut_hooks": [
+     {
+      "cut": 0,
+      "name": "gaussian_noise",
+      "params": {
+       "std": 0.0001,
+       "grad": true
+      }
+     }
+    ]
+   },
+   {
+    "label": "grad_noise_3e-4",
+    "cut_hooks": [
+     {
+      "cut": 0,
+      "name": "gaussian_noise",
+      "params": {
+       "std": 0.0003,
+       "grad": true
+      }
+     }
+    ]
+   },
+   {
+    "label": "grad_noise_1e-3",
+    "cut_hooks": [
+     {
+      "cut": 0,
+      "name": "gaussian_noise",
+      "params": {
+       "std": 0.001,
+       "grad": true
+      }
+     }
+    ]
+   },
+   {
+    "label": "grad_noise_3e-3",
+    "cut_hooks": [
+     {
+      "cut": 0,
+      "name": "gaussian_noise",
+      "params": {
+       "std": 0.003,
+       "grad": true
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "results": [
+  {
+   "run": "none",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.010789333333333333,
+     0.0011732358387525224
+    ],
+    "leak_label_norm_auc": [
+     0.8646343333333334,
+     0.01876403134545807
+    ],
+    "leak_label_norm_auc_q95": [
+     0.982758,
+     0.0050684051732275874
+    ],
+    "leak_label_norm_batches": [
+     156,
+     1.0
+    ],
+    "leak_label_direction_auc": [
+     1.0,
+     0.0
+    ],
+    "leak_label_direction_auc_q95": [
+     1.0,
+     0.0
+    ],
+    "leak_label_direction_batches": [
+     154.33333333333334,
+     0.5773502691896257
+    ],
+    "test_loss": [
+     0.008750333333333332,
+     0.0030135189286502467
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9968333333333333,
+     0.0007637626158259982
+    ],
+    "time_s": [
+     1.9766666666666666,
+     0.22590558499809898
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.010863,
+     "leak_label_norm_auc": 0.844994,
+     "leak_label_norm_auc_q95": 0.987789,
+     "leak_label_norm_batches": 157,
+     "leak_label_direction_auc": 1.0,
+     "leak_label_direction_auc_q95": 1.0,
+     "leak_label_direction_batches": 155,
+     "test_loss": 0.01177,
+     "test_samples": 2000,
+     "test_accuracy": 0.996,
+     "time_s": 2.19,
+     "bytes_fwd": [
+      125440000
+     ]
+    },
+    {
+     "loss": 0.009581,
+     "leak_label_norm_auc": 0.882378,
+     "leak_label_norm_auc_q95": 0.977653,
+     "leak_label_norm_batches": 155,
+     "leak_label_direction_auc": 1.0,
+     "leak_label_direction_auc_q95": 1.0,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.005743,
+     "test_samples": 2000,
+     "test_accuracy": 0.9975,
+     "time_s": 1.74,
+     "bytes_fwd": [
+      125440000
+     ]
+    },
+    {
+     "loss": 0.011924,
+     "leak_label_norm_auc": 0.866531,
+     "leak_label_norm_auc_q95": 0.982832,
+     "leak_label_norm_batches": 156,
+     "leak_label_direction_auc": 1.0,
+     "leak_label_direction_auc_q95": 1.0,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.008738,
+     "test_samples": 2000,
+     "test_accuracy": 0.997,
+     "time_s": 2.0,
+     "bytes_fwd": [
+      125440000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "grad_noise_1e-4",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.010989666666666667,
+     0.0009601459958429933
+    ],
+    "leak_label_norm_auc": [
+     0.5452703333333333,
+     0.0160347265749477
+    ],
+    "leak_label_norm_auc_q95": [
+     0.7688906666666666,
+     0.04912509957581088
+    ],
+    "leak_label_norm_batches": [
+     156,
+     1.0
+    ],
+    "leak_label_direction_auc": [
+     0.5235356666666666,
+     0.0041860579706130595
+    ],
+    "leak_label_direction_auc_q95": [
+     0.7906533333333333,
+     0.042100091844713736
+    ],
+    "leak_label_direction_batches": [
+     154.33333333333334,
+     0.5773502691896257
+    ],
+    "test_loss": [
+     0.009464333333333333,
+     0.0027636963171327874
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9965,
+     0.0008660254037844714
+    ],
+    "time_s": [
+     1.9533333333333334,
+     0.10598742063723085
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.011009,
+     "leak_label_norm_auc": 0.563204,
+     "leak_label_norm_auc_q95": 0.825279,
+     "leak_label_norm_batches": 157,
+     "leak_label_direction_auc": 0.528183,
+     "leak_label_direction_auc_q95": 0.7579,
+     "leak_label_direction_batches": 155,
+     "test_loss": 0.012049,
+     "test_samples": 2000,
+     "test_accuracy": 0.996,
+     "time_s": 1.84,
+     "bytes_fwd": [
+      125445652
+     ]
+    },
+    {
+     "loss": 0.01002,
+     "leak_label_norm_auc": 0.532316,
+     "leak_label_norm_auc_q95": 0.735354,
+     "leak_label_norm_batches": 155,
+     "leak_label_direction_auc": 0.520061,
+     "leak_label_direction_auc_q95": 0.77592,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.006551,
+     "test_samples": 2000,
+     "test_accuracy": 0.9975,
+     "time_s": 1.97,
+     "bytes_fwd": [
+      125445652
+     ]
+    },
+    {
+     "loss": 0.01194,
+     "leak_label_norm_auc": 0.540291,
+     "leak_label_norm_auc_q95": 0.746039,
+     "leak_label_norm_batches": 156,
+     "leak_label_direction_auc": 0.522363,
+     "leak_label_direction_auc_q95": 0.83814,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.009793,
+     "test_samples": 2000,
+     "test_accuracy": 0.996,
+     "time_s": 2.05,
+     "bytes_fwd": [
+      125445652
+     ]
+    }
+   ]
+  },
+  {
+   "run": "grad_noise_3e-4",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.011202,
+     0.0009089867985840059
+    ],
+    "leak_label_norm_auc": [
+     0.529699,
+     0.014721327521660511
+    ],
+    "leak_label_norm_auc_q95": [
+     0.752763,
+     0.045640856115984466
+    ],
+    "leak_label_norm_batches": [
+     156,
+     1.0
+    ],
+    "leak_label_direction_auc": [
+     0.511583,
+     0.005329761814565437
+    ],
+    "leak_label_direction_auc_q95": [
+     0.7787713333333334,
+     0.053561239309162165
+    ],
+    "leak_label_direction_batches": [
+     154.33333333333334,
+     0.5773502691896257
+    ],
+    "test_loss": [
+     0.009609333333333333,
+     0.003236895477665804
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9965,
+     0.0008660254037844714
+    ],
+    "time_s": [
+     1.8566666666666667,
+     0.05507570547286094
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.011003,
+     "leak_label_norm_auc": 0.546511,
+     "leak_label_norm_auc_q95": 0.805402,
+     "leak_label_norm_batches": 157,
+     "leak_label_direction_auc": 0.516882,
+     "leak_label_direction_auc_q95": 0.730169,
+     "leak_label_direction_batches": 155,
+     "test_loss": 0.012109,
+     "test_samples": 2000,
+     "test_accuracy": 0.996,
+     "time_s": 1.82,
+     "bytes_fwd": [
+      125445652
+     ]
+    },
+    {
+     "loss": 0.010409,
+     "leak_label_norm_auc": 0.519117,
+     "leak_label_norm_auc_q95": 0.724221,
+     "leak_label_norm_batches": 155,
+     "leak_label_direction_auc": 0.506223,
+     "leak_label_direction_auc_q95": 0.769949,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.005953,
+     "test_samples": 2000,
+     "test_accuracy": 0.9975,
+     "time_s": 1.83,
+     "bytes_fwd": [
+      125445652
+     ]
+    },
+    {
+     "loss": 0.012194,
+     "leak_label_norm_auc": 0.523469,
+     "leak_label_norm_auc_q95": 0.728666,
+     "leak_label_norm_batches": 156,
+     "leak_label_direction_auc": 0.511644,
+     "leak_label_direction_auc_q95": 0.836196,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.010766,
+     "test_samples": 2000,
+     "test_accuracy": 0.996,
+     "time_s": 1.92,
+     "bytes_fwd": [
+      125445652
+     ]
+    }
+   ]
+  },
+  {
+   "run": "grad_noise_1e-3",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.011237,
+     0.0011885381777629186
+    ],
+    "leak_label_norm_auc": [
+     0.5195569999999999,
+     0.012761126948667215
+    ],
+    "leak_label_norm_auc_q95": [
+     0.7412259999999999,
+     0.03434102006347514
+    ],
+    "leak_label_norm_batches": [
+     156,
+     1.0
+    ],
+    "leak_label_direction_auc": [
+     0.5039236666666667,
+     0.0032813176215254333
+    ],
+    "leak_label_direction_auc_q95": [
+     0.7694863333333334,
+     0.032480681863737614
+    ],
+    "leak_label_direction_batches": [
+     154.33333333333334,
+     0.5773502691896257
+    ],
+    "test_loss": [
+     0.009528,
+     0.003450938278207827
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9968333333333333,
+     0.0014433756729740977
+    ],
+    "time_s": [
+     1.9766666666666666,
+     0.060277137733417134
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.011023,
+     "leak_label_norm_auc": 0.534277,
+     "leak_label_norm_auc_q95": 0.780621,
+     "leak_label_norm_batches": 157,
+     "leak_label_direction_auc": 0.507053,
+     "leak_label_direction_auc_q95": 0.733009,
+     "leak_label_direction_batches": 155,
+     "test_loss": 0.012238,
+     "test_samples": 2000,
+     "test_accuracy": 0.996,
+     "time_s": 1.97,
+     "bytes_fwd": [
+      125445652
+     ]
+    },
+    {
+     "loss": 0.01017,
+     "leak_label_norm_auc": 0.512778,
+     "leak_label_norm_auc_q95": 0.717613,
+     "leak_label_norm_batches": 155,
+     "leak_label_direction_auc": 0.500509,
+     "leak_label_direction_auc_q95": 0.780172,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.005643,
+     "test_samples": 2000,
+     "test_accuracy": 0.9985,
+     "time_s": 2.04,
+     "bytes_fwd": [
+      125445652
+     ]
+    },
+    {
+     "loss": 0.012518,
+     "leak_label_norm_auc": 0.511616,
+     "leak_label_norm_auc_q95": 0.725444,
+     "leak_label_norm_batches": 156,
+     "leak_label_direction_auc": 0.504209,
+     "leak_label_direction_auc_q95": 0.795278,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.010703,
+     "test_samples": 2000,
+     "test_accuracy": 0.996,
+     "time_s": 1.92,
+     "bytes_fwd": [
+      125445652
+     ]
+    }
+   ]
+  },
+  {
+   "run": "grad_noise_3e-3",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.010891,
+     0.001387653054621363
+    ],
+    "leak_label_norm_auc": [
+     0.5110136666666667,
+     0.01177796184971463
+    ],
+    "leak_label_norm_auc_q95": [
+     0.7127789999999999,
+     0.0030901914180192494
+    ],
+    "leak_label_norm_batches": [
+     156,
+     1.0
+    ],
+    "leak_label_direction_auc": [
+     0.5015206666666667,
+     0.003682014439587818
+    ],
+    "leak_label_direction_auc_q95": [
+     0.759465,
+     0.025047042779537843
+    ],
+    "leak_label_direction_batches": [
+     154.33333333333334,
+     0.5773502691896257
+    ],
+    "test_loss": [
+     0.009599666666666666,
+     0.003121690621015051
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9968333333333333,
+     0.0010408329997330585
+    ],
+    "time_s": [
+     1.8666666666666667,
+     0.06350852961085876
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.010432,
+     "leak_label_norm_auc": 0.524591,
+     "leak_label_norm_auc_q95": 0.71322,
+     "leak_label_norm_batches": 157,
+     "leak_label_direction_auc": 0.505493,
+     "leak_label_direction_auc_q95": 0.733009,
+     "leak_label_direction_batches": 155,
+     "test_loss": 0.011776,
+     "test_samples": 2000,
+     "test_accuracy": 0.9965,
+     "time_s": 1.83,
+     "bytes_fwd": [
+      125445652
+     ]
+    },
+    {
+     "loss": 0.009791,
+     "leak_label_norm_auc": 0.504905,
+     "leak_label_norm_auc_q95": 0.709492,
+     "leak_label_norm_batches": 155,
+     "leak_label_direction_auc": 0.500847,
+     "leak_label_direction_auc_q95": 0.782813,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.006023,
+     "test_samples": 2000,
+     "test_accuracy": 0.998,
+     "time_s": 1.94,
+     "bytes_fwd": [
+      125445652
+     ]
+    },
+    {
+     "loss": 0.01245,
+     "leak_label_norm_auc": 0.503545,
+     "leak_label_norm_auc_q95": 0.715625,
+     "leak_label_norm_batches": 156,
+     "leak_label_direction_auc": 0.498222,
+     "leak_label_direction_auc_q95": 0.762573,
+     "leak_label_direction_batches": 154,
+     "test_loss": 0.011,
+     "test_samples": 2000,
+     "test_accuracy": 0.996,
+     "time_s": 1.83,
+     "bytes_fwd": [
+      125445652
+     ]
+    }
+   ]
+  }
+ ]
+}

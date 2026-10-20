@@ -1,0 +1,538 @@
+{
+ "config": {
+  "dataset": "shakespeare",
+  "model": "gpt2",
+  "seq_len": 32,
+  "train_subset": 800,
+  "test_subset": 128,
+  "batch_size": 8,
+  "epochs": 1,
+  "optimizer": {
+   "name": "AdamW",
+   "params": {
+    "lr": 5e-05
+   }
+  },
+  "cut": 1,
+  "device": "cuda",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "attacks": [
+   {
+    "name": "embedding_recovery",
+    "cut": 0,
+    "params": {
+     "steps": 1000,
+     "lr": 0.01,
+     "n_invert": 4,
+     "every": 34
+    }
+   }
+  ],
+  "runs": [
+   {
+    "label": "cut1",
+    "cut": 1
+   },
+   {
+    "label": "cut3",
+    "cut": 3
+   },
+   {
+    "label": "cut6",
+    "cut": 6
+   },
+   {
+    "label": "cut9",
+    "cut": 9
+   },
+   {
+    "label": "cut1_act_noise0.1",
+    "cut": 1,
+    "cut_hooks": [
+     {
+      "cut": 0,
+      "name": "gaussian_noise",
+      "params": {
+       "std": 0.1
+      }
+     }
+    ]
+   },
+   {
+    "label": "cut1_act_noise1",
+    "cut": 1,
+    "cut_hooks": [
+     {
+      "cut": 0,
+      "name": "gaussian_noise",
+      "params": {
+       "std": 1.0
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "results": [
+  {
+   "run": "cut1",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     4.253938333333333,
+     0.0035912595747638813
+    ],
+    "leak_embedding_recovery_token_acc": [
+     0.9262333333333334,
+     0.0143196834229439
+    ],
+    "leak_embedding_recovery_token_f1": [
+     0.9271,
+     0.015600000000000003
+    ],
+    "test_loss": [
+     3.8860403333333333,
+     0.006605367842394098
+    ],
+    "test_samples": [
+     128,
+     0.0
+    ],
+    "test_accuracy": [
+     0.32779933333333333,
+     0.0039465190146930115
+    ],
+    "time_s": [
+     56.67333333333333,
+     0.10263202878893596
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 4.250013,
+     "leak_embedding_recovery_token_acc": 0.9115,
+     "leak_embedding_recovery_token_f1": 0.9115,
+     "test_loss": 3.878456,
+     "test_samples": 128,
+     "test_accuracy": 0.332031,
+     "time_s": 56.76,
+     "bytes_fwd": [
+      78643200
+     ]
+    },
+    {
+     "loss": 4.254743,
+     "leak_embedding_recovery_token_acc": 0.9271,
+     "leak_embedding_recovery_token_f1": 0.9271,
+     "test_loss": 3.890532,
+     "test_samples": 128,
+     "test_accuracy": 0.327148,
+     "time_s": 56.7,
+     "bytes_fwd": [
+      78643200
+     ]
+    },
+    {
+     "loss": 4.257059,
+     "leak_embedding_recovery_token_acc": 0.9401,
+     "leak_embedding_recovery_token_f1": 0.9427,
+     "test_loss": 3.889133,
+     "test_samples": 128,
+     "test_accuracy": 0.324219,
+     "time_s": 56.56,
+     "bytes_fwd": [
+      78643200
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut3",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     4.253938333333333,
+     0.0035912595747638813
+    ],
+    "leak_embedding_recovery_token_acc": [
+     0.8359666666666666,
+     0.015872722933804838
+    ],
+    "leak_embedding_recovery_token_f1": [
+     0.8403,
+     0.012882934448331246
+    ],
+    "test_loss": [
+     3.886039666666667,
+     0.00660560196600833
+    ],
+    "test_samples": [
+     128,
+     0.0
+    ],
+    "test_accuracy": [
+     0.32779933333333333,
+     0.0039465190146930115
+    ],
+    "time_s": [
+     75.38666666666667,
+     0.48387326164330857
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 4.250013,
+     "leak_embedding_recovery_token_acc": 0.8438,
+     "leak_embedding_recovery_token_f1": 0.849,
+     "test_loss": 3.878455,
+     "test_samples": 128,
+     "test_accuracy": 0.332031,
+     "time_s": 75.76,
+     "bytes_fwd": [
+      78643200
+     ]
+    },
+    {
+     "loss": 4.254743,
+     "leak_embedding_recovery_token_acc": 0.8464,
+     "leak_embedding_recovery_token_f1": 0.8464,
+     "test_loss": 3.890531,
+     "test_samples": 128,
+     "test_accuracy": 0.327148,
+     "time_s": 75.56,
+     "bytes_fwd": [
+      78643200
+     ]
+    },
+    {
+     "loss": 4.257059,
+     "leak_embedding_recovery_token_acc": 0.8177,
+     "leak_embedding_recovery_token_f1": 0.8255,
+     "test_loss": 3.889133,
+     "test_samples": 128,
+     "test_accuracy": 0.324219,
+     "time_s": 74.84,
+     "bytes_fwd": [
+      78643200
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut6",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     4.253938333333333,
+     0.0035912595747638813
+    ],
+    "leak_embedding_recovery_token_acc": [
+     0.6840333333333334,
+     0.024158090432261654
+    ],
+    "leak_embedding_recovery_token_f1": [
+     0.6892333333333334,
+     0.022416363071054456
+    ],
+    "test_loss": [
+     3.886039666666667,
+     0.00660560196600833
+    ],
+    "test_samples": [
+     128,
+     0.0
+    ],
+    "test_accuracy": [
+     0.32779933333333333,
+     0.0039465190146930115
+    ],
+    "time_s": [
+     117.52333333333334,
+     0.24006943440041315
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 4.250013,
+     "leak_embedding_recovery_token_acc": 0.6641,
+     "leak_embedding_recovery_token_f1": 0.6693,
+     "test_loss": 3.878455,
+     "test_samples": 128,
+     "test_accuracy": 0.332031,
+     "time_s": 117.53,
+     "bytes_fwd": [
+      78643200
+     ]
+    },
+    {
+     "loss": 4.254743,
+     "leak_embedding_recovery_token_acc": 0.6771,
+     "leak_embedding_recovery_token_f1": 0.6849,
+     "test_loss": 3.890531,
+     "test_samples": 128,
+     "test_accuracy": 0.327148,
+     "time_s": 117.76,
+     "bytes_fwd": [
+      78643200
+     ]
+    },
+    {
+     "loss": 4.257059,
+     "leak_embedding_recovery_token_acc": 0.7109,
+     "leak_embedding_recovery_token_f1": 0.7135,
+     "test_loss": 3.889133,
+     "test_samples": 128,
+     "test_accuracy": 0.324219,
+     "time_s": 117.28,
+     "bytes_fwd": [
+      78643200
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut9",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     4.253938333333333,
+     0.0035912595747638813
+    ],
+    "leak_embedding_recovery_token_acc": [
+     0.579,
+     0.0329759002909701
+    ],
+    "leak_embedding_recovery_token_f1": [
+     0.5833333333333334,
+     0.03579864988143171
+    ],
+    "test_loss": [
+     3.8860403333333333,
+     0.006605367842394098
+    ],
+    "test_samples": [
+     128,
+     0.0
+    ],
+    "test_accuracy": [
+     0.32779933333333333,
+     0.0039465190146930115
+    ],
+    "time_s": [
+     125.23,
+     0.848587060943073
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 4.250013,
+     "leak_embedding_recovery_token_acc": 0.5495,
+     "leak_embedding_recovery_token_f1": 0.5521,
+     "test_loss": 3.878456,
+     "test_samples": 128,
+     "test_accuracy": 0.332031,
+     "time_s": 125.54,
+     "bytes_fwd": [
+      78643200
+     ]
+    },
+    {
+     "loss": 4.254743,
+     "leak_embedding_recovery_token_acc": 0.5729,
+     "leak_embedding_recovery_token_f1": 0.5755,
+     "test_loss": 3.890532,
+     "test_samples": 128,
+     "test_accuracy": 0.327148,
+     "time_s": 125.88,
+     "bytes_fwd": [
+      78643200
+     ]
+    },
+    {
+     "loss": 4.257059,
+     "leak_embedding_recovery_token_acc": 0.6146,
+     "leak_embedding_recovery_token_f1": 0.6224,
+     "test_loss": 3.889133,
+     "test_samples": 128,
+     "test_accuracy": 0.324219,
+     "time_s": 124.27,
+     "bytes_fwd": [
+      78643200
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut1_act_noise0.1",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     4.253395666666667,
+     0.005042108718912247
+    ],
+    "leak_embedding_recovery_token_acc": [
+     0.9244666666666667,
+     0.01825714472017282
+    ],
+    "leak_embedding_recovery_token_f1": [
+     0.9262,
+     0.01957217412552834
+    ],
+    "test_loss": [
+     3.884725,
+     0.007759616034315168
+    ],
+    "test_samples": [
+     128,
+     0.0
+    ],
+    "test_accuracy": [
+     0.328532,
+     0.0026781151954312857
+    ],
+    "time_s": [
+     41.42,
+     0.6630233781700337
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 4.248662,
+     "leak_embedding_recovery_token_acc": 0.9036,
+     "leak_embedding_recovery_token_f1": 0.9036,
+     "test_loss": 3.875765,
+     "test_samples": 128,
+     "test_accuracy": 0.331543,
+     "time_s": 41.88,
+     "bytes_fwd": [
+      78646000
+     ]
+    },
+    {
+     "loss": 4.252827,
+     "leak_embedding_recovery_token_acc": 0.9375,
+     "leak_embedding_recovery_token_f1": 0.9375,
+     "test_loss": 3.889226,
+     "test_samples": 128,
+     "test_accuracy": 0.327637,
+     "time_s": 41.72,
+     "bytes_fwd": [
+      78646000
+     ]
+    },
+    {
+     "loss": 4.258698,
+     "leak_embedding_recovery_token_acc": 0.9323,
+     "leak_embedding_recovery_token_f1": 0.9375,
+     "test_loss": 3.889184,
+     "test_samples": 128,
+     "test_accuracy": 0.326416,
+     "time_s": 40.66,
+     "bytes_fwd": [
+      78646000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut1_act_noise1",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     4.382748666666666,
+     0.010282777073015772
+    ],
+    "leak_embedding_recovery_token_acc": [
+     0.5955,
+     0.015719096666157374
+    ],
+    "leak_embedding_recovery_token_f1": [
+     0.6033333333333333,
+     0.009130899919139035
+    ],
+    "test_loss": [
+     3.9453983333333333,
+     0.00706233603939469
+    ],
+    "test_samples": [
+     128,
+     0.0
+    ],
+    "test_accuracy": [
+     0.3173013333333333,
+     0.0009241213845233494
+    ],
+    "time_s": [
+     40.01,
+     0.10440306508910514
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 4.373383,
+     "leak_embedding_recovery_token_acc": 0.5807,
+     "leak_embedding_recovery_token_f1": 0.5938,
+     "test_loss": 3.937298,
+     "test_samples": 128,
+     "test_accuracy": 0.316895,
+     "time_s": 40.06,
+     "bytes_fwd": [
+      78646000
+     ]
+    },
+    {
+     "loss": 4.381111,
+     "leak_embedding_recovery_token_acc": 0.612,
+     "leak_embedding_recovery_token_f1": 0.612,
+     "test_loss": 3.950264,
+     "test_samples": 128,
+     "test_accuracy": 0.31665,
+     "time_s": 40.08,
+     "bytes_fwd": [
+      78646000
+     ]
+    },
+    {
+     "loss": 4.393752,
+     "leak_embedding_recovery_token_acc": 0.5938,
+     "leak_embedding_recovery_token_f1": 0.6042,
+     "test_loss": 3.948633,
+     "test_samples": 128,
+     "test_accuracy": 0.318359,
+     "time_s": 39.89,
+     "bytes_fwd": [
+      78646000
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -137,3 +137,24 @@ def test_teardown_clears_criterion():
     ex = _setup()
     ex.teardown()
     assert ex.criterion is None
+
+
+def test_linear_lr_schedule_matches_lambdalr():
+    """training.scheduler sets each step's lr as LambdaLR with HF's linear warmup/decay would."""
+    import copy
+    import torchslicer as ts
+    from torchslicer.core.schedule import linear
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+    ref = copy.deepcopy(model)
+    xs, ys = torch.randn(10, 3, 4), torch.randint(0, 2, (10, 3))
+    cfg = ts.RunConfig()
+    cfg.training.optimizer = {"name": "SGD", "params": {"lr": 0.1}}
+    cfg.training.scheduler = {"name": "linear", "params": {"warmup_steps": 3, "total_steps": 8}}
+    ts.slice(model, cuts=["1"]).train(list(zip(xs, ys)), epochs=1, run_config=cfg)
+    opt = torch.optim.SGD(ref.parameters(), lr=0.1)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, linear(3, 8))
+    for x, y in zip(xs, ys):
+        opt.zero_grad(); nn.CrossEntropyLoss()(ref(x), y).backward(); opt.step(); sched.step()
+    for a, b in zip(model.parameters(), ref.parameters()):
+        assert torch.allclose(a, b, atol=1e-6)

@@ -1,0 +1,22 @@
+# Label inference from cut gradients (Li et al., ICLR 2022) on an imbalanced binary task:
+# MNIST "is it a 0?" (~10 % positives). Client = conv block 1; defence = Gaussian noise
+# on the returned gradient (the paper's isotropic baseline), std swept.
+dataset: mnist
+binary_positive: 0
+train_subset: 10000
+test_subset: 2000
+batch_size: 64
+epochs: 3
+model: cnn
+cut: 2                       # after conv1 + relu + pool: 16x14x14
+device: cuda
+seeds: [0, 1, 2]
+attacks:
+  - {name: label_norm, cut: 0}
+  - {name: label_direction, cut: 0}
+runs:
+  - {label: none}
+  - {label: grad_noise_1e-4, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 1.0e-4, grad: true}}]}
+  - {label: grad_noise_3e-4, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 3.0e-4, grad: true}}]}
+  - {label: grad_noise_1e-3, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 1.0e-3, grad: true}}]}
+  - {label: grad_noise_3e-3, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 3.0e-3, grad: true}}]}
