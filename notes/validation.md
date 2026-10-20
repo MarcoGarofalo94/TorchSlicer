@@ -1483,3 +1483,27 @@ invisible there.
   time. (3) `ipc` across hosts falls back to TCP (same numbers), as designed. (4) Pinned buffers
   pay off from 32 MB (1.7×), as on one host. (5) gRPC still collapses above 32 MB (issue 26; the
   malloc env vars were not set here). Not a real network: same physical host, bridge.
+
+## M10 multi-client engine, step 1–2: client nodes (2026-10-20, branch `feat/m10-multi-client`)
+
+### Added and how it is checked
+- `sl.client_nodes` (centralized): each client is a worker holding slice 0 and its own loader
+  (`start_worker(data=, client_index=)`, `ts.run` `ROLE=client` + `CLIENT_INDEX`); the
+  coordinator (`ts.ClientNodesExecutor`) holds no data and no slice; `ts.RemoteSession` is
+  the schedule. Protocol: `client_info`, `client_step`, `get_state`, `set_state` RPCs;
+  `SliceConfig.prev_workers` (slice 1: every client) and `label_worker` (a client: the last
+  slice); `WorkerStatsResponse.bytes_label/msgs_label`. Per-batch return address = the batch
+  id: `(batch_id // n_micro) % n_clients`, so no frame format changed.
+- Equivalence (`tests/test_client_nodes.py`, 13 tests): sequential copy / keep / callable
+  handoff, parallel, parallel + `SplitFedAlgorithm`, client sampling, GPipe (2 micro-batches),
+  over gRPC and TCP: losses equal the in-process `ClientSession` (to its 6-decimal rounding)
+  and every client's final weights within 1e-6. Same through `ts.run` (`ROLE=all`) and with
+  `launch --target processes` (7 OS processes: 2 server workers, 4 clients, coordinator) on
+  `experiments/sl_client_nodes.yaml`. `bytes_state` = 0 where no state needs to move (keep,
+  plain parallel, sampling only), > 0 with a handoff copy or aggregation.
+- No bug found in existing code. Behaviour kept: every existing executor path unchanged
+  (two base hooks, `_batch_id` and `_round_end`, default to the old code; the gradient send now
+  picks its peer per batch with `_prev_for`, which returns the single previous worker when
+  there are no client nodes).
+- Refused, with a reason: `nccl` (fixed process group), `u_shaped` (later), fault tolerance
+  (step 4), per-client server copies (step 3), k8s rendering (identical pod template).

@@ -11,7 +11,8 @@ questions on top of the chain:
    a given link.
 
 A fourth question follows: **what if there are many clients?** This page covers all
-four. Every code block below runs as written (`tests/test_docs.py` executes them).
+four, with the clients simulated in one process (section 4) or as their own nodes
+(section 5). Every code block below runs as written (`tests/test_docs.py` executes them).
 
 ## 1. Settings: what the data owner hosts
 
@@ -267,14 +268,71 @@ training, `session.states[k]` is client `k`'s final client-side state. With
 `ts.run`, set `sl.clients: K` (and `sl.client_mode`, `sl.handoff`), and `data_fn()`
 returns one loader per client.
 
+## 5. Clients as nodes: `sl.client_nodes`
+
+A session simulates its clients in one process: right for accuracy studies, wrong for
+measuring what a deployment costs, since every client then runs on one machine and the
+data owner holds every client's data. With `sl.client_nodes: true` (centralized
+topology), each client is its own node:
+
+- a **client node** holds slice 0 and only its own loader (`ROLE=client`,
+  `CLIENT_INDEX=k`; or `ts.start_worker(data=loader, client_index=k)`);
+- **server workers** hold slices 1.., shared by every client;
+- the **coordinator** holds no data and no slice: it runs the schedule, the client
+  selection and the round-end hooks.
+
+For each batch, the coordinator tells a client to run its next batch. The client sends
+the labels to the last slice and the activation to slice 1, and the gradient comes back
+to it: slice 1 knows every client's address and returns each gradient to the client of
+its batch. Clients only open connections outward, so the NAT tunnels of
+[nat.md](nat.md) work unchanged, as do gRPC, `tcp` and `ipc` (not `nccl`, whose process
+group can't change after init). Client states stay on their nodes and cross the network
+only when needed: a sequential `copy` handoff (`keep` moves nothing) and the round-end
+hooks of an `Algorithm` (e.g. `ts.SplitFedAlgorithm`). The history counts those bytes
+in `bytes_state`.
+
+One batch is in flight at a time, so a run on client nodes trains exactly like the
+`ClientSession` of section 4 on the same clients. On the coordinator,
+`ts.RemoteSession(n_clients, mode, handoff)` takes the place of the loaders:
+
+```python
+cfg = config("vanilla", topology="centralized", clients=2)
+clients_data = [get_data()[:2], get_data()[2:]]
+servers = [ts.start_worker(ts.deploy.free_port(), host="127.0.0.1", run_config=cfg)
+           for _ in range(2)]                    # slices 1 and 2
+clients = [ts.start_worker(ts.deploy.free_port(), host="127.0.0.1", run_config=cfg,
+                           data=clients_data[k], client_index=k) for k in range(2)]
+executor = ts.ClientNodesExecutor(
+    discovery=ts.StaticDiscovery(peers=[w.address for w in servers + clients]),
+    coordinator_addr=f"127.0.0.1:{ts.deploy.free_port()}", run_config=cfg)
+remote = ts.RemoteSession(2, mode="parallel")
+h = ts.slice(build_model(), cuts=["1", "3"], executor=executor).train(
+    remote, run_config=cfg, algorithm=ts.SplitFedAlgorithm())
+
+local = ts.ClientSession(clients_data, mode="parallel")
+ref = ts.slice(build_model(), cuts=["1", "3"]).train(
+    local, run_config=config("vanilla"), algorithm=ts.SplitFedAlgorithm())
+assert round(h[0]["loss"], 6) == ref[0]["loss"]
+print("client nodes:", h[0]["loss"], "state bytes moved:", h[0]["bytes_state"])
+for w in servers + clients:
+    w.stop()
+```
+
+After training, `remote.states[k]` is client `k`'s final state, read from its node.
+With `ts.run`, set `sl.client_nodes: true` with `sl.clients` (and `sl.client_mode`,
+`sl.handoff`): every node runs the same script, `data_fn()` returns one loader per
+client, and a client node keeps only its own. `python -m torchslicer launch --target
+processes|compose|baremetal` starts or renders one node per client
+(`experiments/sl_client_nodes.yaml`; k8s is not supported yet).
+
 ## Limits
 
-- **Where clients run.** All clients run in the data owner's process: one process
-  holds every client's data, as in a simulation. Clients spread over several machines
-  with their own data are not supported yet.
+- **Where clients run.** With a `ClientSession`, all clients run in the data owner's
+  process. With `sl.client_nodes` each client is its own node, but the schedule keeps
+  one batch in flight: clients don't train concurrently yet.
 - **Server batches.** In `parallel` mode the server takes the clients' batches one
-  at a time and updates after each one. There are no per-client server copies and no
-  batching across clients.
+  at a time and updates after each one. There is no batching across clients, and
+  per-client server copies (SplitFed V1) run only in-process.
 - **Labels on another party.** Every setting assumes that the data owner holds both
   the inputs and the labels. Vertical SL, where a separate party holds the labels, is
   not supported.

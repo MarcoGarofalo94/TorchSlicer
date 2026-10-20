@@ -586,7 +586,7 @@ class DistributedExecutor(BaseExecutor):
             for client, (inputs, labels) in batches:
                 data_load_total_ms += (time.perf_counter() - iter_t0) * 1000.0
 
-                batch_id = epoch * n_total + n_batches
+                batch_id = self._batch_id(epoch, n_total, n_batches, client)
                 with self._lock:
                     self._batch_losses.clear()
                 self._batch_done.clear()
@@ -678,7 +678,7 @@ class DistributedExecutor(BaseExecutor):
         # one get_stats per worker: communication + compute (always), profiling (verbosity)
         # Algorithm round-end (aggregation)
         if session is not None and hasattr(self, "_algorithm"):
-            algorithm_round_end(session, self._algorithm, adapter, selected, {}, epoch)
+            self._round_end(session, adapter, selected, epoch)
         stats = self._epoch_stats(epoch)
         self._add_worker_comm(stats)
         sl_metrics = self._meter.summary(self._placement, self._run_config.sl.link_bandwidth_mbps,
@@ -735,6 +735,14 @@ class DistributedExecutor(BaseExecutor):
                     self._run_logger.log(**ws)
 
         return {"loss": avg, **sl_metrics}
+
+    def _batch_id(self, epoch: int, n_total: int, n_batches: int, client) -> int:
+        """The id of an epoch's ``n_batches``-th batch (``client``: its client in a session)."""
+        return epoch * n_total + n_batches
+
+    def _round_end(self, session, adapter, selected: list, epoch: int) -> None:
+        """A session's end of round: ``on_round_end`` / ``aggregate`` over the participants."""
+        algorithm_round_end(session, self._algorithm, adapter, selected, {}, epoch)
 
     def reinit(
         self,

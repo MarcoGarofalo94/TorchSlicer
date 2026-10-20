@@ -9,15 +9,15 @@ Every node runs the same script with ``ts.run``; its env says which node it is.
 from dataclasses import dataclass, field
 
 from ..config import RunConfig
-from .runner import hosted_slices, resolve_role
+from .runner import client_nodes, hosted_slices, resolve_role
 
 RELAY_PORT = 50060   # the relay's port where the target picks fixed ports (compose, k8s, baremetal)
 
 
 @dataclass
 class NodeSpec:
-    name:    str            # "coordinator", "worker-0", ... / "driver", "follower-0", ... / "relay"
-    role:    str            # coordinator | worker | driver | follower | relay
+    name:    str            # "coordinator", "worker-0", ..., "client-0", ... / "driver", "follower-0", ... / "relay"
+    role:    str            # coordinator | worker | client | driver | follower | relay
     host:    str            # how the other nodes reach it
     port:    int            # its gRPC port (the coordinator's, for the coordinator)
     env:     dict = field(default_factory=dict)
@@ -43,6 +43,7 @@ def node_names(cfg: RunConfig) -> list[tuple[str, str]]:
     """``(name, role)`` of every node, the driving one first. ``discovery.n_workers`` is
     the number of slices; the driving node hosts ``sl.setting``'s share of them
     (``hosted_slices``) and there is one worker/follower per remaining slice. With
+    ``sl.client_nodes``, one client node per client follows the workers. With
     ``transport.relay: auto`` a relay node comes last."""
     topology, _ = resolve_role(_without_role(cfg))
     n = int(cfg.discovery.n_workers)
@@ -54,7 +55,8 @@ def node_names(cfg: RunConfig) -> list[tuple[str, str]]:
     k = n - hosted_slices(cfg, topology, n)
     relay = [("relay", "relay")] if relay_node(cfg) else []
     if topology == "centralized":
-        return [("coordinator", "coordinator")] + [(f"worker-{i}", "worker") for i in range(k)] + relay
+        clients = [(f"client-{i}", "client") for i in range(client_nodes(cfg))]
+        return [("coordinator", "coordinator")] + [(f"worker-{i}", "worker") for i in range(k)] + clients + relay
     return [("driver", "driver")] + [(f"follower-{i}", "follower") for i in range(k)] + relay
 
 
@@ -125,9 +127,11 @@ def plan_nodes(cfg: RunConfig, hosts: list[str], ports: list[int], *,
         else:
             nd.env["PORT"] = str(nd.port)
             nd.env["WORKER_ADDRESS"] = nd.address
-        if nd.role == "worker":
+        if nd.role in ("worker", "client"):
             nd.env["DISCOVERY_BACKEND"] = backend
-        if nd.role in ("worker", "follower"):
+        if nd.role == "client":
+            nd.env["CLIENT_INDEX"] = nd.name.split("-", 1)[1]
+        if nd.role in ("worker", "follower", "client"):
             nd.env["COORDINATOR_ADDRESS"] = lead.address
         if nd.role == "driver":
             nd.env["WORKER_PEERS"] = ",".join(x.address for x in nodes)

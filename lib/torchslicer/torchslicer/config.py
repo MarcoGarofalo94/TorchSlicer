@@ -295,6 +295,10 @@ class SLConfig:
                    returns one loader per client  (env: SL_CLIENTS)
         client_mode: "sequential" | "parallel"  (env: SL_CLIENT_MODE)
         handoff:   sequential sessions: "copy" | "keep"  (env: SL_HANDOFF)
+        client_nodes: centralized: every client is its own node (``ROLE=client``) holding
+                   slice 0 and its own data, instead of all clients in the coordinator's
+                   process (``ts.ClientNodesExecutor``)  (env: SL_CLIENT_NODES)
+        client_index: a client node's index in ``0 .. clients-1``  (env: CLIENT_INDEX)
         client_states: where a session keeps the clients' states: "cpu" | "gpu" |
                    "cuda:i" | "auto" (the slices' GPU if they fit, else host RAM). A run
                    whose states don't fit in 80 % of the free memory stops before
@@ -313,6 +317,8 @@ class SLConfig:
     clients:             int   = 1
     client_mode:         str   = "sequential"
     handoff:             str   = "copy"
+    client_nodes:        bool  = False
+    client_index:        int   = -1
     algorithm:           str   = ""
     client_states:       str   = "cpu"
     client_profiles:     list  = field(default_factory=list)
@@ -679,6 +685,8 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("SL_PROFILE_SEED",        lambda cfg, v: setattr(cfg.sl, "profile_seed",        int(v))),
     ("SL_CLIENT_STATES",       lambda cfg, v: setattr(cfg.sl, "client_states",       v.strip().lower())),
     ("SL_HANDOFF",             lambda cfg, v: setattr(cfg.sl, "handoff",             v.strip().lower())),
+    ("SL_CLIENT_NODES",        lambda cfg, v: setattr(cfg.sl, "client_nodes",        _parse_bool(v))),
+    ("CLIENT_INDEX",           lambda cfg, v: setattr(cfg.sl, "client_index",        int(v))),
 )
 
 

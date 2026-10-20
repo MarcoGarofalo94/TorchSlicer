@@ -14,6 +14,11 @@ service WorkerService {
     rpc describe         (DescribeRequest)  returns (NodeDescription);  // capabilities, for planning
     rpc echo             (EchoRequest)      returns (EchoReply);        // network probe target
     rpc probe_link       (LinkProbeRequest) returns (LinkProbeReply);   // measure this worker → target
+    // client nodes (sl.client_nodes, M10): a worker holding slice 0 and its own data
+    rpc client_info      (ClientInfoRequest) returns (ClientInfo);      // its data, for the schedule
+    rpc client_step      (ClientStepRequest) returns (Ack);             // run its next batch as batch_id
+    rpc get_state        (StateRequest)     returns (StateBlob);        // slice weights + optimizer state
+    rpc set_state        (StateBlob)        returns (Ack);
 }
 
 // NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
@@ -89,6 +94,11 @@ message SliceConfig {
     string  init_token             = 16; // unique per init round; tied messages from other rounds are dropped
     bytes   cut_hooks              = 17; // torch.save({cut: CutHook}) for this slice's input/output cuts
     uint32  n_slices               = 18; // number of slices in the run (cut hooks' context)
+    // client nodes (M10). On slice 1: every client's address, by client index; the client of
+    // a batch is (batch_id // n_micro) % len(prev_workers). On a client: the last slice, where
+    // it sends its labels.
+    repeated string prev_workers   = 19;
+    string  label_worker           = 20;
 }
 
 // A parameter reachable under several names, possibly on several workers.
@@ -186,6 +196,30 @@ message WorkerStatsResponse {
     uint64 msgs_fwd      = 20;
     uint64 msgs_bwd      = 21;
     double compute_ms    = 22;  // forward + backward + optimizer wall time of this slice
+    uint64 bytes_label   = 23;  // labels a client node sent to the last slice
+    uint64 msgs_label    = 24;
+}
+
+// ── client nodes (M10) ────────────────────────────────────────────────────────
+
+message ClientInfoRequest {}
+
+message ClientInfo {
+    uint32 n_batches = 1;  // batches per epoch of its loader
+    uint64 n_samples = 2;  // its training samples (the dataset size, else n_batches)
+}
+
+message ClientStepRequest {
+    uint32 batch_id = 1;
+    uint32 epoch    = 2;  // a new epoch restarts the loader
+    uint32 index    = 3;  // the batch's index in the client's epoch (checked)
+}
+
+message StateRequest {}
+
+// torch.save({"model": state_dict, "optimizer": state_dict | None}); loaded weights_only
+message StateBlob {
+    bytes data = 1;
 }
 
 // ── tied parameters ───────────────────────────────────────────────────────────

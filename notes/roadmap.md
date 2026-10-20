@@ -433,6 +433,35 @@ shown in a Flower-based SplitFed baseline.
   - **Sessions with fault tolerance:** a failed client is dropped from the round instead of stopping the run
     (carried from M4).
   - **Test:** N client processes equal the in-process `ClientSession` for the same algorithm, and losses match.
+  - **Design (2026-10-20, owner-approved: "push and proceed").** Why: simulation (`ClientSession`)
+    already covers accuracy studies; what is missing is a *deployment* whose clients are real
+    nodes, so overhead (time per round, server contention, bytes per client, stragglers) is
+    measured, not simulated. Today a distributed session keeps every client's data and slice
+    in the data owner's process. Rules: additive only (local, `ClientSession`, today's
+    distributed runs and their defaults unchanged); same experiment in both (same `model_fn`,
+    `Algorithm`, `sl.clients`); a deterministic schedule must give the `ClientSession` losses.
+    - **Shape:** `sl.client_nodes: true` (centralized topology). Coordinator: rounds, schedule,
+      `select_clients`, aggregation; holds no data and no slice. Server workers: today's chain,
+      slices 1..n-1. Client nodes: a worker hosting slice 0 plus its own loader (`ts.run`
+      `ROLE=client`, `CLIENT_INDEX`). The coordinator ships slice 0 to every client, so all
+      start from the same weights. Executor: `ClientNodesExecutor(DistributedExecutor)`; on the
+      coordinator, `ts.RemoteSession(n_clients, mode, handoff)` stands in for the loaders.
+    - **Per-batch return address:** slice 1 gets every client's address (`SliceConfig.prev_workers`);
+      the client of a batch is `(batch_id // n_micro) % n_clients` (the coordinator picks the
+      ids), so gRPC / TCP / IPC frames are unchanged. NCCL refused (its world is fixed at init).
+    - **A batch:** coordinator → `client_step(batch_id)` → the client takes its next batch, sends
+      the labels to the last slice and the activation to slice 1; the gradient comes back to it;
+      it reports `batch_done`. Clients only dial out (NAT works through M6 tunnels unchanged).
+    - **State RPCs** `get_state` / `set_state` (state dicts, `weights_only=True`): sequential
+      handoff (copy = the previous client's state to the next), `on_round_end` / `aggregate`
+      over the round's participants, as `algorithm_round_end` does in-process.
+    - **Steps:** (1) worker side + executor, vanilla, sequential and parallel, = `ClientSession`
+      on the local executor; real OS processes; across the two containers. (2) `ts.run` /
+      `launch` roles. (3) SplitFed V1 (per-client server copies on the server workers). (4)
+      failures: a dead client leaves the round, late joiners, `round_deadline`. (5) concurrent
+      schedule (many clients in flight; the realistic overhead mode, not loss-equal by design)
+      + overhead benchmark. Later: U-shaped clients, vertical SL, a multi-worker server under
+      concurrency.
 - **M11, data and scale simulation** (was M10):
   - **Federated partitioners:** IID; Dirichlet(α) label skew; quantity skew; per-client feature shift.
   - **Standard datasets:** MNIST, CIFAR-10/100, FEMNIST-like, a text/LLM fine-tuning set, tabular for vertical SL.

@@ -18,6 +18,7 @@ from .executors.base import BaseExecutor
 from .executors.local import LocalExecutor
 from .executors.distributed import DistributedExecutor, WorkerFailureError
 from .executors.p2p import P2PExecutor, run_p2p
+from .executors.client_nodes import ClientNodesExecutor
 from .offload import OffloadExecutor
 from .executors.worker import resolve_device, run_worker, start_worker, WorkerHandle, WorkerServicer
 from .transport.base import BaseTransport
@@ -45,7 +46,7 @@ from . import data
 from . import privacy
 from .sl import (
     CutHook, CutContext, Float16, BFloat16, Quantize, TopK, CircularConv, GaussianNoise, ClipNoise, Recorder, Chain,
-    register_hook, ClientSession, Placement, SplitServer, SplitClient,
+    register_hook, ClientSession, RemoteSession, Placement, SplitServer, SplitClient,
 )
 from . import algorithm as _algorithm_module  # noqa: ensure builtin registrations run
 from .algorithm import (

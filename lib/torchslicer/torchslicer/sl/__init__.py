@@ -6,5 +6,5 @@ from .hooks import (
 )
 from .roles import Placement, SETTINGS, resolve_setting
 from .metrics import CommMeter
-from .clients import ClientSession, SplitLayerClientState
+from .clients import ClientSession, RemoteSession, SplitLayerClientState
 from .remote import SplitClient, SplitServer

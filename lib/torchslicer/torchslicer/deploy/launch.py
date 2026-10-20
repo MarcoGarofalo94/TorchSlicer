@@ -217,6 +217,9 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
     discovery is static and the slice order is the pod index. The coordinator or
     driver is a Job behind a Service. Both Jobs complete when the run ends: the
     driving node shuts the workers down."""
+    if cfg.sl.client_nodes:
+        raise ValueError("--target k8s doesn't render client nodes (sl.client_nodes) yet: each "
+                         "needs its own CLIENT_INDEX; use processes, compose or baremetal")
     ns = cfg.deploy.namespace
     names = node_names(cfg)
     lead_name, lead_role = names[0]

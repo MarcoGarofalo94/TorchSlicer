@@ -155,6 +155,123 @@ class ClientSession:
         self.current = k
 
 
+class RemoteSession(ClientSession):
+    """A session whose clients are nodes (``sl.client_nodes``): each client node holds its
+    own loader and its own client slice, and this object, on the coordinator, only holds
+    the schedule. Same modes, handoffs and round-end hooks as :class:`ClientSession`, and
+    the same order of batches, so a run gives the same losses as the in-process session::
+
+        sliced.train(ts.RemoteSession(3, mode="parallel"), run_config=cfg)
+
+    Client states stay on their nodes; they cross the network only when the schedule needs
+    them: a sequential handoff (``copy``: the previous client's state to the next client;
+    ``keep``: nothing), and the round-end hooks (``on_round_end``, an ``Algorithm``'s
+    ``on_round_end`` / ``aggregate``), which get and set the participants' states.
+    ``states[k]`` holds the last state fetched from client ``k``; after training, every
+    client's final state (read before the nodes shut down).
+    """
+
+    def __init__(self, n_clients: int, mode: str = "sequential", handoff="copy", on_round_end=None):
+        super().__init__([None] * int(n_clients), mode=mode, handoff=handoff, on_round_end=on_round_end)
+        self._nodes = None      # the executor's client-node adapter (get / set / info), from bind()
+        self._info = None       # [(n_batches, n_samples)] per client
+        self._trained: set = set()
+
+    def bind(self, nodes) -> None:
+        """Called by the executor before each round: ``nodes.info(k)`` gives client ``k``'s
+        ``(n_batches, n_samples)``; ``nodes.get(k)`` / ``nodes.set(k, state)`` move states."""
+        self._nodes = nodes
+        self._info = [nodes.info(k) for k in range(self.n_clients)]
+
+    def _bound(self):
+        if self._info is None:
+            raise RuntimeError("RemoteSession: no client nodes yet (it runs with sl.client_nodes, "
+                               "on the coordinator)")
+        return self._info
+
+    def __len__(self) -> int:
+        return sum(nb for nb, _ in self._bound())
+
+    def n_samples(self, k: int) -> int:
+        return self._bound()[k][1]
+
+    def _order(self, clients):
+        counts = {k: self._bound()[k][0] for k in clients}
+        if self.mode == "sequential":
+            for k in clients:
+                for i in range(counts[k]):
+                    yield k, i
+            return
+        live, done = list(clients), dict.fromkeys(clients, 0)
+        while live:
+            for k in list(live):
+                if done[k] == counts[k]:
+                    live.remove(k)
+                    continue
+                yield k, done[k]
+                done[k] += 1
+
+    def batches(self, adapter=None, epoch: int = 0, clients=None):
+        """Yield ``(client, (ClientBatch, None))``: which client runs which of its batches.
+        The executor turns each into a ``client_step`` on that node."""
+        nodes = self._nodes
+        clients = list(range(self.n_clients)) if clients is None else list(clients)
+        if self._initial is None and clients:
+            self._initial = nodes.get(clients[0])     # every client starts from the same weights
+        for k, i in self._order(clients):
+            if k != self.current:
+                self._switch_remote(k, epoch)
+            yield k, (ClientBatch(k, i), None)
+        if self.mode == "parallel" and self.on_round_end is not None:
+            states = [nodes.get(k) for k in range(self.n_clients)]
+            out = self.on_round_end(states, {"epoch": epoch, "clients": clients})
+            self.states = list(states)
+            if out is not None:
+                self.replace_states(out, adapter)
+
+    def _switch_remote(self, k: int, epoch: int) -> None:
+        nodes, prev = self._nodes, self.current
+        self.current = k
+        if self.mode != "sequential" or prev is None:
+            self._trained.add(k)
+            return
+        self._trained.add(prev)
+        if self.handoff is _handoff_copy:
+            nodes.set(k, nodes.get(prev))
+        elif self.handoff is not _handoff_keep:      # a callable: it sees both states
+            info = {"from": prev, "to": k, "epoch": epoch, "initial": _copy_state(self._initial)}
+            nodes.set(k, self.handoff(nodes.get(prev), nodes.get(k) if k in self._trained else None, info))
+        self._trained.add(k)
+
+    def fetch_states(self, clients=None) -> list:
+        """Read the clients' states from their nodes into ``states`` (all by default)."""
+        for k in (range(self.n_clients) if clients is None else clients):
+            self.states[k] = self._nodes.get(k)
+        return self.states
+
+    def replace_states(self, states, adapter=None) -> None:
+        """Send each client whose state changed (another object than ``states[k]``) its new one."""
+        states = list(states)
+        for k, st in enumerate(states):
+            if st is not None and st is not self.states[k]:
+                self._nodes.set(k, st)
+        self.states = states
+
+    def finish(self, adapter=None) -> None:
+        """Nothing to store: the states stay on the client nodes."""
+
+
+class ClientBatch:
+    """Batch ``index`` of client ``client``'s epoch (a :class:`RemoteSession` item)."""
+
+    def __init__(self, client: int, index: int):
+        self.client, self.index = client, index
+
+    @property
+    def shape(self):          # what the executor logs as the batch's input shape
+        return ("client", self.client, self.index)
+
+
 def data_for_run(cfg, data_fn):
     """``data_fn()`` for ``ts.run`` / ``ts.run_p2p``: with ``sl.clients`` > 1 it returns
     one loader per client, wrapped in a ``ClientSession`` (``sl.client_mode``,

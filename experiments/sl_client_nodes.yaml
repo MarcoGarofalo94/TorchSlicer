@@ -1,0 +1,32 @@
+# Four clients, each its own node (sl.client_nodes): a client holds slice 0 and its own
+# shard; two workers hold the server slices; the coordinator holds no data. Sequential
+# SplitNN with weight handoff, as experiments/sl_splitfed_local.yaml simulates in one
+# process with sl.client_mode: sequential (same losses).
+# Run: EXPERIMENT_CONFIG=experiments/sl_client_nodes.yaml python examples/sl/train.py
+#      python -m torchslicer launch examples/sl/train.py -c experiments/sl_client_nodes.yaml \
+#          --target processes                                   # one OS process per node
+run_id: sl_client_nodes
+
+training:
+  epochs: 2
+  optimizer: {name: SGD, params: {lr: 0.05, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+
+discovery:
+  n_workers: 3          # slices: 0 on every client, 1 and 2 on the workers
+
+logging:
+  enabled: false
+
+deploy:
+  topology: centralized
+
+network:
+  device: cpu
+
+sl:
+  setting: vanilla
+  clients: 4
+  client_nodes: true
+  client_mode: sequential
+  handoff: copy

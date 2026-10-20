@@ -12,7 +12,7 @@ What the call does depends on the config (``deploy.topology``) and on this node'
 topology       roles
 =============  ==============================================================
 local          ``all``: ``LocalExecutor``, one process, no network
-centralized    ``coordinator`` | ``worker`` | ``all``
+centralized    ``coordinator`` | ``worker`` | ``all`` (+ ``client`` with ``sl.client_nodes``)
 p2p            ``driver`` | ``follower`` | ``all``
 =============  ==============================================================
 
@@ -35,7 +35,7 @@ _LOG = get_logger("torchslicer.run")
 TOPOLOGIES = ("local", "centralized", "p2p")
 ROLES = {
     "local":       ("all",),
-    "centralized": ("all", "coordinator", "worker"),
+    "centralized": ("all", "coordinator", "worker", "client"),
     "p2p":         ("all", "driver", "follower"),
 }
 
@@ -50,6 +50,10 @@ def resolve_role(cfg: RunConfig) -> tuple[str, str]:
     if not role and topology == "p2p" and "IS_DRIVER" in os.environ:
         role = "driver" if os.environ["IS_DRIVER"].lower() in ("true", "1") else "follower"
     role = role or "all"
+    if role == "client" and not cfg.sl.client_nodes:
+        raise ValueError("ROLE=client needs sl.client_nodes (env SL_CLIENT_NODES=true)")
+    if cfg.sl.client_nodes and topology != "centralized":
+        raise ValueError(f"sl.client_nodes runs on the centralized topology, not {topology!r}")
     if role not in ROLES[topology]:
         raise ValueError(f"role {role!r} is not valid for topology {topology!r} "
                          f"(expected one of {ROLES[topology]})")
@@ -62,7 +66,14 @@ def hosted_slices(cfg: RunConfig, topology: str, n: int) -> int:
     from ..sl.roles import Placement, resolve_setting
     if topology == "local":
         return n
+    if cfg.sl.client_nodes:
+        return 1     # slice 0 is on the client nodes (client_nodes()), not on a worker
     return len(Placement(resolve_setting(cfg.sl.setting, topology), n).client_slices)
+
+
+def client_nodes(cfg: RunConfig) -> int:
+    """Client nodes of the run (``sl.client_nodes``: one per client), else 0."""
+    return int(cfg.sl.clients or 1) if cfg.sl.client_nodes else 0
 
 
 def _config_data(cfg, data_fn, topology: str, drives: bool):
@@ -113,7 +124,9 @@ def run(model_fn, data_fn=None, *, run_config: RunConfig | None = None, role: st
     topology, role = resolve_role(cfg)
     n = int(cfg.discovery.n_workers)
     _LOG.info("run topology=%s role=%s n=%s run_id=%s", topology, role, n, cfg.run_id)
-    data_fn, eval_data = _config_data(cfg, data_fn, topology, role not in ("worker", "follower"))
+    # who reads the data: the driving node, or with client nodes, each client
+    needs_data = role in ("client", "all") or (role not in ("worker", "follower") and not cfg.sl.client_nodes)
+    data_fn, eval_data = _config_data(cfg, data_fn, topology, needs_data)
 
     if topology == "local":
         import torch
@@ -127,6 +140,8 @@ def run(model_fn, data_fn=None, *, run_config: RunConfig | None = None, role: st
                             callbacks=callbacks, eval_data=eval_data)
     if role in ("worker", "follower"):
         return _serve(cfg, topology)
+    if role == "client":
+        return _client(cfg, data_fn)
     if role == "all":
         return _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwargs)
     if topology == "centralized":
@@ -149,6 +164,30 @@ def _serve(cfg: RunConfig, topology: str) -> list:
     return []
 
 
+def _client_loaders(cfg: RunConfig, data_fn) -> list:
+    """The clients' loaders: ``data_fn()`` gives one per client (or a ``ClientSession``)."""
+    from ..sl.clients import ClientSession
+    data = data_fn()
+    loaders = list(data.loaders if isinstance(data, ClientSession) else data)
+    c = int(cfg.sl.clients or 1)
+    if len(loaders) != c:
+        raise ValueError(f"sl.clients={c}: data_fn() must return {c} loaders, got {len(loaders)}")
+    return loaders
+
+
+def _client(cfg: RunConfig, data_fn) -> list:
+    """A client node (``sl.client_nodes``): slice 0 and its own data, until shut down."""
+    from ..executors.worker import run_worker
+    k, c = int(cfg.sl.client_index), int(cfg.sl.clients or 1)
+    if not 0 <= k < c:
+        raise ValueError(f"a client node needs sl.client_index in 0..{c - 1} (env CLIENT_INDEX), got {k}")
+    register = cfg.discovery.backend == "coordinator"
+    run_worker(port=cfg.network.worker_port,
+               coordinator_addr=cfg.network.coordinator_address if register else None,
+               data=_client_loaders(cfg, data_fn)[k], client_index=k)
+    return []
+
+
 def _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> list:
     """The centralized coordinator: discovery per ``discovery.backend``, then train."""
     from .. import slice as ts_slice
@@ -158,7 +197,7 @@ def _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> 
 
     bind = cfg.network.coordinator_bind_address
     port = int(bind.rsplit(":", 1)[-1])
-    remote = n - hosted_slices(cfg, "centralized", n)
+    remote = n - hosted_slices(cfg, "centralized", n) + client_nodes(cfg)
     if cfg.discovery.backend == "static":
         if len(cfg.discovery.peers) < remote:
             raise ValueError(f"discovery.backend=static needs {remote} discovery.peers "
@@ -168,12 +207,21 @@ def _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> 
         discovery = CoordinatorDiscovery(run_id=cfg.run_id)
     # the address workers report to (batch_done, metrics): advertised, else hostname
     address = cfg.network.coordinator_address or f"{socket.gethostname()}:{port}"
-    executor = DistributedExecutor(discovery=discovery, coordinator_addr=address,
-                                   coordinator_bind_addr=bind, run_config=cfg)
+    if cfg.sl.client_nodes:
+        from ..executors.client_nodes import ClientNodesExecutor
+        from ..sl.clients import RemoteSession
+        executor = ClientNodesExecutor(discovery=discovery, coordinator_addr=address,
+                                       coordinator_bind_addr=bind, run_config=cfg)
+        mode = cfg.sl.client_mode or "sequential"
+        data = RemoteSession(int(cfg.sl.clients or 1), mode=mode,
+                             handoff=cfg.sl.handoff if mode == "sequential" else "copy")
+    else:
+        executor = DistributedExecutor(discovery=discovery, coordinator_addr=address,
+                                       coordinator_bind_addr=bind, run_config=cfg)
+        data = data_for_run(cfg, data_fn)
     sliced = ts_slice(model_fn(), n=n, executor=executor, **slice_kwargs)
     _LOG.info("coordinator start run_id=%s\n%s", cfg.run_id, sliced.summary())
-    return sliced.train(data_for_run(cfg, data_fn), run_config=cfg, verbose=verbose,
-                        callbacks=callbacks)
+    return sliced.train(data, run_config=cfg, verbose=verbose, callbacks=callbacks)
 
 
 def _drive(cfg, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> list:
@@ -207,6 +255,10 @@ def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwar
         for _ in range(n_workers):
             port = free_port(serves)
             workers.append(start_worker(port, host="127.0.0.1", run_config=worker_cfg))
+        loaders = _client_loaders(cfg, data_fn) if client_nodes(cfg) else []
+        for k, loader in enumerate(loaders):
+            workers.append(start_worker(free_port(serves), host="127.0.0.1", run_config=worker_cfg,
+                                        data=loader, client_index=k))
         peers = [w.address for w in workers]
         cfg.discovery.backend = "static"
         if topology == "centralized":

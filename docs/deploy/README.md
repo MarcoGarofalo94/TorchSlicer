@@ -24,7 +24,7 @@ role says:
 | `deploy.topology` | roles (`deploy.role`, env `ROLE`) | |
 |---|---|---|
 | `local` | `all` | `LocalExecutor`, one process, no network |
-| `centralized` | `coordinator`, `worker`, `all` | a coordinator ships slices and drives; workers chain activations peer to peer |
+| `centralized` | `coordinator`, `worker`, `all` (+ `client`) | a coordinator ships slices and drives; workers chain activations peer to peer |
 | `p2p` | `driver`, `follower`, `all` | the driver holds the data and slice 0 and drives; no coordinator process |
 
 `all` (the default when `ROLE` is unset) runs **every node in this process**. Workers or followers
@@ -34,7 +34,10 @@ does with no environment set. The number of slices is `discovery.n_workers`. The
 driver is the data owner, and it hosts its share of the slices in-process (`sl.setting`):
 none for `pipeline` (the centralized default), slice 0 for `vanilla` (the P2P default), slice 0
 and the last slice for `u_shaped`. There is one worker or follower per remaining slice, and the
-launcher counts nodes the same way. See `docs/tutorials/sl_settings.md`.
+launcher counts nodes the same way. With `sl.client_nodes: true` (centralized), every client is
+its own node instead (`ROLE=client`, `CLIENT_INDEX`), holding slice 0 and its own data; the
+coordinator holds neither, and the launcher adds one `client-<k>` node per client after the
+workers (processes, compose, baremetal; not k8s yet). See `docs/tutorials/sl_settings.md`.
 
 ## The launcher
 
