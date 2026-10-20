@@ -144,7 +144,11 @@ shown in a Flower-based SplitFed baseline.
     - For sub-MB cuts the transport barely matters.
   - NCCL on one GPU now fails at init with the reason, instead of hanging. Cut hooks work
     with IPC and NCCL; payloads are packed on the GPU.
-  - **Not validated: real NCCL.** It needs ≥ 2 GPUs.
+  - **Real NCCL validated 2026-10-20** across two containers on the same host (one A100 each,
+    NCCL socket transport): two bugs fixed (validation #38–39: `device_id` without index; a
+    deadlock at the first transfer); cross-container matrix 54/54 OK; benchmark: NCCL ≈ pinned
+    TCP up to 8 MB, 0.75–0.82× at 32–64 MB (sockets on both; NCCL's edge needs RDMA/NVLink).
+    Still unmeasured: NCCL over NVLink/P2P (two GPUs in one container) and over RDMA.
   - **Open: thread oversubscription.** torch uses the host's core count, not the container's
     CPU quota, which made gRPC/TCP 4–5× slower here. The benchmark sets
     `OMP_NUM_THREADS`; the framework doesn't yet.
@@ -555,7 +559,7 @@ shown in a Flower-based SplitFed baseline.
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
 
 ## Handoff (read this first if you are a new session)
-Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-20: M13 done and merged to `main` (PR #5, 665a519), version 0.13.0; see M13 Status. Next by the milestone order: M10 multi-client engine, branch `feat/m10-*` forked from `feat/m13-baselines` (`ts.SplitServer`/`ts.SplitClient` are a start on it).** NCCL unvalidated on this hardware. M7 deferred.
+Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-20: M13 done and merged to `main` (PR #5, 665a519), version 0.13.0; see M13 Status. Next by the milestone order: M10 multi-client engine, branch `feat/m10-*` forked from `feat/m13-baselines` (`ts.SplitServer`/`ts.SplitClient` are a start on it).** NCCL validated across two containers 2026-10-20 (validation #38–39). M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
     M2 (`feat/m2-p2p`), M3 (`feat/m3-run-anywhere`), M4 (`feat/m4-sl-settings`),
@@ -580,8 +584,9 @@ Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12
     `bash ~/actions-runner/start_gpu_runner.sh` (also `stop`, `remove`). First GPU run: green.
     **This container has 16 GB RAM and may be shut down if it exceeds it:** estimate every
     scaling run first and use the watchdog in `benchmarks/clients/bench_clients.py`.
-    Open item from M9: run `MATRIX_NCCL=1 MATRIX_DEVICE=cuda run_matrix.py` and the NCCL
-    transport benchmark once a machine with ≥2 distinct GPUs is available (at the latest in M14).
+    M9's NCCL item: done 2026-10-20 across two containers (second container `10.224.0.9`, ssh
+    port 2222, its own A100; `MATRIX_REMOTE`/`BENCH_REMOTE` run workers there). Same physical
+    host: correctness yes, real-network overhead no (M14).
     Other open items:
     - `test_offload.py::test_cuda_matches_local` flakes (NaN), with or without the M9 changes,
       seen while another tenant held the GPU at 99 %. It may be a timing race in offload (M5).

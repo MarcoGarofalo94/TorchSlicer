@@ -1427,3 +1427,59 @@ identical.
   baseline's CI test needs `transformers`, which CI doesn't install. Fix: optional `baseline.requires`
   (packages), the test `importorskip`s each. Also `merge_to_main.sh` now stops on a missing git identity or
   a failed non-conflict merge (it used to swallow it with `|| true`).
+
+## M10 prep: first real NCCL, across two containers (2026-10-20, branch `feat/m10-multi-client`)
+
+Setup: this container (A100 `GPU-00b7e1d4`, bus 21:00.0, `10.224.0.11`) and a second container on
+the same Proxmox host with the other A100 (`GPU-38553ba7`, bus 81:00.0, `10.224.0.9`), reached
+over ssh. Different containers = different NCCL host hashes, so NCCL uses `NET/Socket` over eth0
+(no P2P/SHM between them). Plain `torch.distributed` send/recv: bit-exact, ~1.27 GB/s at 32–64 MB
+(virtual bridge, not a real network). Harness: `run_matrix.py` gained `MATRIX_REMOTE` (odd
+workers / P2P followers over ssh), `MATRIX_PARTS` (2 slices = 2 GPUs) and a SIGUSR1 stack dump in
+the matrix workers. Until today every NCCL check had run on gloo (CPU); these two bugs were
+invisible there.
+
+- **38. Real NCCL never initialized: `device_id` without an index** (`executors/worker.py`,
+  since M9). Symptom: `NCCL rendezvous failed: slice 0: Please use a device_id with index.`
+  Root cause: `resolve_device()` returns `cuda`, and `init_process_group(device_id=...)` (eager
+  communicator) refuses an unindexed device in torch 2.11. Fix: `_indexed(device)` (`cuda` →
+  `cuda:<current>`). Cost: none. Test: the cross-container matrix (`central-nccl`, `p2p-nccl`).
+- **39. Real NCCL deadlocked at the first transfer** (`_send_forward_peer`, `_send_backward`,
+  since M9). Symptom: after "NCCL group ready" both workers idle until the 240 s timeout; the
+  stack dump shows rank 0 blocked *inside* `dist.isend`. Root cause: the sender called `isend`
+  and only then the gRPC call carrying the shape, on the assumption that `isend` doesn't block
+  ("kick off async NCCL send before gRPC metadata"). NCCL connects a pair of ranks lazily at
+  their first transfer and `isend` blocks until the peer joins; the peer posts `dist.recv` only
+  when the gRPC call arrives, which came after `isend`. gloo's `isend` doesn't block, so the
+  CPU matrix passed. Fix: `_nccl_send` starts the metadata call first on a small thread pool
+  (context copied, so trace spans stay attached; the routed/tunnel stubs have no `.future()`),
+  then `isend().wait()`, then waits for the call. Same order guarantees as before. Test: the
+  cross-container matrix.
+- **Cross-container matrix after the fixes** (`benchmarks/equivalence/results/out_gpu_sgd_2hosts.txt`):
+  9 models × {central, p2p} × {grpc, tcp, nccl}, CUDA, SGD, 2 slices (slice 0 here, slice 1 on the
+  other GPU): **54/54 OK**. CNNs/TinyGPT(-LoRA) bit-exact; GPT-2/Llama(+LoRA) ≤ 4.8e-7 (HF attention
+  kernels, as in the one-host CUDA matrix). First run of real NCCL, and the first cross-host run
+  of every distributed mode. Harness problems on the way (not TorchSlicer): a port base inside
+  the ephemeral range (`MATRIX_PORT_BASE` must stay < 32768), a log line glued to the JSON result
+  (now parsed with `raw_decode`), remote workers surviving a killed harness (now killed at exit).
+- **Transport benchmark across the two containers** (`bench_transport.py` with `BENCH_REMOTE`,
+  `results/cuda_2hosts.json`, mean ± std of 3, ms/batch, P2P 2 slices, one GPU per container):
+
+  | cut | grpc | tcp (pinned) | tcp-nopin | ipc (→ TCP) | nccl (socket) |
+  |---|---|---|---|---|---|
+  | 0.07 MB (small) | 4.15 ± 0.50 | 3.31 ± 0.04 | 2.92 ± 0.16 | 2.94 ± 0.02 | 3.56 ± 0.22 |
+  | 2.1 MB (medium) | 19.8 ± 1.6 | 10.4 ± 1.4 | 8.5 ± 0.4 | 11.3 ± 0.8 | 9.7 ± 0.2 |
+  | 8.4 MB (act8) | 63.9 ± 0.4 | 19.1 ± 2.5 | 16.8 ± 1.0 | 15.4 ± 0.5 | 17.7 ± 0.9 |
+  | 33.6 MB (act32) | 660 ± 47 | 60.8 ± 4.7 | 101.7 ± 2.7 | 63.0 ± 4.6 | 81.6 ± 8.7 |
+  | 67.1 MB (act64) | 1313 ± 26 | 111.4 ± 7.7 | 189.2 ± 5.4 | 110.3 ± 0.2 | 136.1 ± 11.4 |
+
+  Reading: (1) **NCCL is not faster than pinned TCP here**: ~equal up to 8 MB, 0.75–0.82× at
+  32–64 MB. Expected: between containers NCCL uses its *socket* transport over the same 10 Gbit
+  virtual bridge (no RDMA, no NVLink, no P2P), so it moves the same bytes through the same
+  kernel sockets, with its own chunking on top. Its advantage needs GPUDirect RDMA / NVLink, not
+  available on this host. Default NCCL socket settings (`NCCL_SOCKET_NTHREADS`,
+  `NCCL_NSOCKS_PERTHREAD`) not tuned. (2) Pinned TCP is at the link bound: act64 moves 2 × 67 MB
+  per batch, 106 ms at the 1.27 GB/s measured with plain NCCL send/recv, vs 97.6 ms of non-compute
+  time. (3) `ipc` across hosts falls back to TCP (same numbers), as designed. (4) Pinned buffers
+  pay off from 32 MB (1.7×), as on one host. (5) gRPC still collapses above 32 MB (issue 26; the
+  malloc env vars were not set here). Not a real network: same physical host, bridge.

@@ -5,6 +5,7 @@ Shared by centralized and P2P topologies. Centralised workers register
 with a coordinator; P2P workers wait for init() from the driver node.
 """
 
+import contextvars
 import datetime
 import io
 import os
@@ -479,6 +480,13 @@ def _read_ipc_frame_rest(sock: socket.socket) -> tuple[int, torch.Tensor, bytes]
     return batch_id, tensor, ctx_bytes
 
 
+def _indexed(device: torch.device) -> torch.device:
+    """``device`` with an explicit index (``cuda`` → ``cuda:<current>``)."""
+    if device.type == "cuda" and device.index is None:
+        return torch.device("cuda", torch.cuda.current_device())
+    return device
+
+
 def resolve_device(value: str | None = None) -> str:
     """Resolve the target device from ``value``, else the DEVICE environment variable.
 
@@ -646,6 +654,7 @@ class WorkerServicer(
         self._tied_cond = threading.Condition()
         self._dist_group  = None  # torch.distributed ProcessGroup for NCCL transport; None otherwise
         self._nccl_future = None  # pending rendezvous Future; waited on before first NCCL transfer
+        self._nccl_meta   = futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="nccl-meta")
         self._reset_state()
 
         # Single-worker compute pool: serialises forward/backward on this worker
@@ -997,8 +1006,9 @@ class WorkerServicer(
                     store=dist.PrefixStore(f"{prefix}/pg", store),
                     rank=rank,
                     world_size=world_size,
-                    # eager NCCL communicator: init errors surface here, not on first send
-                    **({"device_id": self.device} if cuda else {}),
+                    # eager NCCL communicator: init errors surface here, not on first send;
+                    # device_id needs an index ("cuda" alone is refused)
+                    **({"device_id": _indexed(self.device)} if cuda else {}),
                 )
             except Exception as exc:
                 store.set(f"{prefix}/status/{rank}", f"err:{exc}")
@@ -1009,6 +1019,18 @@ class WorkerServicer(
         self._nccl_future = executor.submit(_rendezvous)
         executor.shutdown(wait=False)
         _LOG.info("NCCL rendezvous started rank=%s world=%s (background)", rank, world_size)
+
+    def _nccl_send(self, tensor: torch.Tensor, dst: int, metadata_call) -> None:
+        """Send ``tensor`` to rank ``dst`` with NCCL, and the gRPC call that tells the peer
+        its shape (the peer posts ``dist.recv`` when that call arrives). The call is
+        started first, on another thread: NCCL connects a pair of ranks at their first
+        transfer, and ``isend`` blocks until the peer joins, i.e. until it has the call."""
+        import torch.distributed as dist
+        call = self._nccl_meta.submit(contextvars.copy_context().run, metadata_call)
+        try:
+            dist.isend(tensor, dst=dst, group=self._dist_group).wait()
+        finally:
+            call.result()
 
     def _wait_nccl(self) -> bool:
         """Block until the background NCCL rendezvous completes. A failed rendezvous
@@ -1543,12 +1565,11 @@ class WorkerServicer(
     def _send_forward_peer(self, batch_id: int, out: torch.Tensor) -> None:
         out = self._encode_out(batch_id, out)
         try:
-            # NCCL path: send shape/dtype via gRPC (no data), then tensor via dist.isend.
+            # NCCL path: shape/dtype via gRPC (no data), tensor via dist.isend (_nccl_send).
             if self._tensor_transport == "nccl":
                 if self._nccl_future is not None:
                     self._wait_nccl()
             if (self._tensor_transport == "nccl" and self._dist_group is not None):
-                import torch.distributed as dist
                 with _tracer.span(
                     "torchslicer.worker.activation_send",
                     batch_id=batch_id,
@@ -1556,17 +1577,14 @@ class WorkerServicer(
                     peer=self.next_worker,
                     transport="nccl",
                 ):
-                    # Kick off async NCCL send before gRPC metadata so the receiver
-                    # can call dist.recv as soon as the gRPC message arrives.
-                    work = dist.isend(out, dst=self._worker_index + 1, group=self._dist_group)
-                    self._next_stub.forward(worker_service_pb2.ForwardRequest(
-                        batch_id=batch_id,
-                        input=worker_service_pb2.Tensor(
-                            shape=list(out.shape),
-                            dtype=_TORCH_TO_DTYPE.get(out.dtype, worker_service_pb2.FLOAT32),
-                        ),
-                    ))
-                    work.wait()
+                    self._nccl_send(out, self._worker_index + 1, lambda: self._next_stub.forward(
+                        worker_service_pb2.ForwardRequest(
+                            batch_id=batch_id,
+                            input=worker_service_pb2.Tensor(
+                                shape=list(out.shape),
+                                dtype=_TORCH_TO_DTYPE.get(out.dtype, worker_service_pb2.FLOAT32),
+                            ),
+                        )))
                 return
             if (self._tensor_transport in {"tcp", "ipc"} and self._next_tensor is not None
                     and self.router.is_direct(self.next_worker)):
@@ -1877,7 +1895,6 @@ class WorkerServicer(
                     if self._tensor_transport == "nccl" and self._nccl_future is not None:
                         self._wait_nccl()
                     if (self._tensor_transport == "nccl" and self._dist_group is not None):
-                        import torch.distributed as dist
                         with _tracer.span(
                             "torchslicer.worker.gradient_send",
                             batch_id=batch_id,
@@ -1885,15 +1902,14 @@ class WorkerServicer(
                             peer=self.prev_worker,
                             transport="nccl",
                         ):
-                            work = dist.isend(grad, dst=self._worker_index - 1, group=self._dist_group)
-                            self._prev_stub.backward(worker_service_pb2.BackwardRequest(
-                                batch_id=batch_id,
-                                gradient=worker_service_pb2.Tensor(
-                                    shape=list(grad.shape),
-                                    dtype=_TORCH_TO_DTYPE.get(grad.dtype, worker_service_pb2.FLOAT32),
-                                ),
-                            ))
-                            work.wait()
+                            self._nccl_send(grad, self._worker_index - 1, lambda: self._prev_stub.backward(
+                                worker_service_pb2.BackwardRequest(
+                                    batch_id=batch_id,
+                                    gradient=worker_service_pb2.Tensor(
+                                        shape=list(grad.shape),
+                                        dtype=_TORCH_TO_DTYPE.get(grad.dtype, worker_service_pb2.FLOAT32),
+                                    ),
+                                )))
                     elif (self._tensor_transport in {"tcp", "ipc"} and self._prev_tensor is not None
                             and self.router.is_direct(self.prev_worker)):
                         with _tracer.span(

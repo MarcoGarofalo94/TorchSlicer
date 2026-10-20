@@ -12,7 +12,8 @@ import torchvision
 from torch.utils.data import DataLoader, TensorDataset
 
 DEVICE = os.environ.get("MATRIX_DEVICE", "cpu")
-N_SAMPLES, BATCH, EPOCHS, N_PARTS = 64, 16, 2, 3
+N_SAMPLES, BATCH, EPOCHS = 64, 16, 2
+N_PARTS = int(os.environ.get("MATRIX_PARTS", 3))   # slices; the unsplit reference doesn't depend on it
 VOCAB, SEQ = 100, 16
 OPTIMIZER = json.loads(os.environ.get("MATRIX_OPT", '{"name": "SGD", "params": {"lr": 0.05, "momentum": 0.9}}'))
 CRITERION = {"name": "CrossEntropyLoss", "params": {}}

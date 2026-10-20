@@ -18,6 +18,11 @@ act8 act32 act64 (an MLP whose cut is 8/32/64 MB per batch).
 Variants: grpc tcp tcp-nopin (TCP without the pinned buffer) ipc nccl (needs one GPU
 per slice, skipped on fewer than 2 GPUs). Results: results/<device>.json.
 
+Two hosts: BENCH_REMOTE='<ssh args> user@host' runs the follower on that host (same repo
+path, BENCH_REMOTE_REPO; sync the code first), over BENCH_HOST (this host's address) and
+BENCH_REMOTE_HOST. Then ipc falls back to TCP and nccl needs one GPU per host. Results:
+results/<device>_2hosts.json.
+
 Threads: torch sizes its CPU thread pool from the host's cores, not the container's
 CPU quota. Oversubscribed, every CPU tensor op on the receive path spins idle threads
 that burn the quota (measured: gRPC 110 -> 22 ms/batch on 'medium' once matched), so
@@ -26,6 +31,8 @@ both processes get BENCH_THREADS threads.
 import json
 import math
 import os
+import random
+import shlex
 import socket
 import statistics
 import subprocess
@@ -48,6 +55,13 @@ EPOCHS = int(os.environ.get("BENCH_EPOCHS", 4))
 REPEATS = int(os.environ.get("BENCH_REPEATS", 3))
 N_BATCHES = 16
 _WORKER_FLAG = "--_worker_mode"
+REMOTE = os.environ.get("BENCH_REMOTE", "")
+REMOTE_REPO = os.environ.get("BENCH_REMOTE_REPO", str(ROOT))
+LOCAL_HOST = os.environ.get("BENCH_HOST", "127.0.0.1")
+REMOTE_HOST = os.environ.get("BENCH_REMOTE_HOST", "127.0.0.1")
+_MARKER = f"tsbench-{os.getpid()}"   # tags the remote follower, to kill it by name
+if REMOTE and "127.0.0.1" in (LOCAL_HOST, REMOTE_HOST):
+    sys.exit("BENCH_REMOTE needs BENCH_HOST and BENCH_REMOTE_HOST (real addresses)")
 
 
 def _cpu_quota() -> int:
@@ -141,6 +155,36 @@ def _free_pair() -> int:
     raise RuntimeError("no free port pair")
 
 
+def _remote_pair() -> int:
+    """A port pair for the remote follower, below Linux's ephemeral range (32768+), so an
+    outgoing connection there can't hold it."""
+    return random.Random().randrange(24000, 32000, 2)
+
+
+def _spawn_follower(env: dict, port: int):
+    if not REMOTE:
+        return subprocess.Popen([sys.executable, __file__, _WORKER_FLAG], env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    keys = ("_BENCH_WORKER_PORT", "TENSOR_TRANSPORT", "DEVICE", "OMP_NUM_THREADS", "TCP_NO_PINNED",
+            "BENCH_EPOCHS", "BENCH_THREADS")
+    exports = " ".join(f"{k}={shlex.quote(env[k])}" for k in keys if k in env)
+    script = f"{REMOTE_REPO}/benchmarks/transport/bench_transport.py"
+    cmd = (f"exec env WORKER_ADDRESS={REMOTE_HOST}:{port} {exports} timeout 600 "
+           f"{REMOTE_REPO}/.venv/bin/python {script} {_WORKER_FLAG} {_MARKER}")
+    return subprocess.Popen(["ssh", "-o", "BatchMode=yes", *shlex.split(REMOTE), cmd],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _stop_follower(proc) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    if REMOTE:
+        subprocess.run(["ssh", "-o", "BatchMode=yes", *shlex.split(REMOTE), f"pkill -f {_MARKER} || true"])
+
+
 def _loader(input_shape, n_classes, seed):
     g = torch.Generator().manual_seed(seed)
     x = torch.randn(*input_shape, generator=g)
@@ -164,35 +208,31 @@ def _run_once(model_fn, variant: str, seed: int) -> dict:
     cfg = _cfg(variant)
     nopin = variant == "tcp-nopin"
     _worker._TCP_NO_PINNED = nopin            # the driver's sends (activations)
-    follower_port, driver_port = _free_pair(), _free_pair()
+    follower_port = _remote_pair() if REMOTE else _free_pair()
+    driver_port = _free_pair()
     env = {**os.environ, "_BENCH_WORKER_PORT": str(follower_port),
            "TENSOR_TRANSPORT": cfg.transport.tensor, "DEVICE": DEVICE,
            "OMP_NUM_THREADS": str(THREADS), "TCP_NO_PINNED": "1" if nopin else "0"}
-    proc = subprocess.Popen([sys.executable, __file__, _WORKER_FLAG], env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = _spawn_follower(env, follower_port)
     try:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 60
         while True:
             if proc.poll() is not None:
                 raise RuntimeError(f"worker subprocess exited early (rc={proc.returncode})")
             try:
-                with socket.create_connection(("127.0.0.1", follower_port), timeout=0.1):
+                with socket.create_connection((REMOTE_HOST, follower_port), timeout=0.1):
                     break
             except OSError:
                 if time.monotonic() > deadline:
                     raise RuntimeError("worker subprocess did not open its port")
                 time.sleep(0.05)
-        driver = f"127.0.0.1:{driver_port}"
-        executor = ts.P2PExecutor(peers=[driver, f"127.0.0.1:{follower_port}"],
+        driver = f"{LOCAL_HOST}:{driver_port}"
+        executor = ts.P2PExecutor(peers=[driver, f"{REMOTE_HOST}:{follower_port}"],
                                   address=driver, bind_addr=driver, run_config=cfg)
         epochs = _Epochs()
         ts.slice(model, n=2, executor=executor).train(loader, run_config=cfg, callbacks=[epochs])
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _stop_follower(proc)
     steady = epochs.metrics[1:] or epochs.metrics
     ms = statistics.mean(m["duration_s"] for m in steady) * 1e3 / N_BATCHES
     compute = statistics.mean(sum(m["compute_s"]) for m in steady) * 1e3 / N_BATCHES
@@ -204,7 +244,7 @@ def _run_once(model_fn, variant: str, seed: int) -> dict:
 def _skip_reason(variant: str):
     if variant in ("ipc", "nccl") and DEVICE != "cuda":
         return "needs CUDA"
-    if variant == "nccl" and torch.cuda.device_count() < 2:
+    if variant == "nccl" and torch.cuda.device_count() < 2 and not REMOTE:
         return "needs one GPU per slice (NCCL refuses two ranks on one GPU)"
     return None
 
@@ -268,7 +308,8 @@ if __name__ == "__main__":
     print_table(results)
     (HERE / "results").mkdir(exist_ok=True)
     meta = {"device": DEVICE, "gpus": torch.cuda.device_count(), "threads": THREADS,
-            "repeats": REPEATS, "epochs": EPOCHS, "batches": N_BATCHES}
-    path = HERE / "results" / f"{DEVICE}.json"
+            "repeats": REPEATS, "epochs": EPOCHS, "batches": N_BATCHES,
+            **({"hosts": [LOCAL_HOST, REMOTE_HOST]} if REMOTE else {})}
+    path = HERE / "results" / f"{DEVICE}{'_2hosts' if REMOTE else ''}.json"
     path.write_text(json.dumps({"meta": meta, "results": results}, indent=1))
     print(f"\nwrote {path}")

@@ -85,3 +85,27 @@ def test_nccl_on_one_gpu_fails_fast_with_the_reason(tmp_path):
     r = _launch(tmp_path, {"DEVICE": "cuda", "TENSOR_TRANSPORT": "nccl"}, check=False)
     assert r.returncode != 0
     assert "needs one GPU per slice" in r.stdout + r.stderr
+
+
+def test_nccl_send_starts_the_metadata_call_before_isend(monkeypatch):
+    # Real NCCL connects two ranks at their first transfer: isend blocks until the peer
+    # joins, which it does when the metadata call (the shape) reaches it. gloo's isend
+    # doesn't block, so the tests above can't see the order. Here isend blocks the same way.
+    import threading
+    import torch.distributed as dist
+    from torchslicer.executors.worker import WorkerServicer
+
+    arrived = threading.Event()
+
+    class _Work:
+        def wait(self):
+            pass
+
+    def isend(tensor, dst, group=None):
+        assert arrived.wait(5), "isend ran before the metadata call: deadlock with real NCCL"
+        return _Work()
+
+    monkeypatch.setattr(dist, "isend", isend)
+    calls = []
+    WorkerServicer()._nccl_send(torch.ones(2), 1, lambda: (arrived.set(), calls.append("meta")))
+    assert calls == ["meta"]
