@@ -277,6 +277,15 @@ class RemoteSession(ClientSession):
             nodes.set(k, self.handoff(state, nodes.get(k) if k in self._trained else None, info))
         self._trained.add(k)
 
+    def snapshot(self) -> dict:
+        """The schedule's own state (not the clients'), to replay a round after recovery."""
+        return {"current": self.current, "handed": self._handed, "trained": set(self._trained),
+                "broadcast": self.broadcast}
+
+    def restore(self, snap: dict) -> None:
+        self.current, self._handed = snap["current"], snap["handed"]
+        self._trained, self.broadcast = set(snap["trained"]), snap["broadcast"]
+
     def fetch_states(self, clients=None) -> list:
         """Read the clients' states from their nodes into ``states`` (all by default)."""
         for k in (range(self.n_clients) if clients is None else clients):

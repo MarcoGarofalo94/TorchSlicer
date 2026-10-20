@@ -1359,7 +1359,7 @@ class WorkerServicer(
         to the last slice, inputs into this slice (the coordinator never sees the data)."""
         loader = self._client_data()
         with self._data_lock:
-            if request.epoch != self._data_epoch:
+            if request.epoch != self._data_epoch or request.index == 0:   # a new or retried epoch
                 self._data_epoch, self._data_iter, self._data_index = request.epoch, iter(loader), 0
             if request.index != self._data_index:
                 raise RuntimeError(f"client_step: batch {request.index} of epoch {request.epoch} "

@@ -337,6 +337,13 @@ that left and answers again (a restarted process, possibly at a new address), ge
 and joins. It starts from the last state given to every client (with
 `ts.SplitFedAlgorithm`, the latest aggregate), else from the initial weights. The history
 lists `clients_joined`.
+
+With `fault_tolerance.enabled`, a dead *server* worker is recovered as in other distributed
+runs: the server slices are split again over the surviving server workers, from the last
+epoch's checkpoint (`checkpoint.dir`, which the server workers must see). Slice 0 stays on
+the clients: each client saves its own checkpoint on its node and restarts from it, and the
+round is replayed from its start. As elsewhere, the server optimizers start fresh after a
+recovery. Per-client server copies (SplitFed V1) can't be recovered yet.
 With `ts.run`, set `sl.client_nodes: true` with `sl.clients` (and `sl.client_mode`,
 `sl.handoff`): every node runs the same script, `data_fn()` returns one loader per
 client, and a client node keeps only its own. `python -m torchslicer launch --target

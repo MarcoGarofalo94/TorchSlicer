@@ -24,6 +24,7 @@ the server, in discovery order.
 from __future__ import annotations
 
 import io
+import os
 import threading
 import time
 
@@ -35,6 +36,10 @@ from ..core.tied import find_tied_parameters
 from ..sl.clients import ClientBatch, RemoteSession
 from ..transport.grpc.worker import worker_service_pb2
 from ..monitor.process_logger import get_logger
+from ..core.split_layer import SplitLayer
+from ..sl.hooks import resolve_cut_hooks
+from ..sl.metrics import CommMeter
+from ..sl.roles import Placement
 from .distributed import DistributedExecutor, build_tied_configs, _build_layer_configs
 
 _LOG = get_logger("torchslicer.client_nodes")
@@ -104,8 +109,6 @@ class ClientNodesExecutor(DistributedExecutor):
         if cfg.transport.tensor == "nccl":
             raise ValueError("sl.client_nodes doesn't support transport.tensor=nccl: clients join "
                              "and leave, and an NCCL process group is fixed at init")
-        if cfg.fault_tolerance.enabled:
-            raise ValueError("sl.client_nodes doesn't support fault_tolerance.enabled yet")
         self._drop = bool(cfg.sl.drop_failed_clients)
         self._lost: set = set()       # client nodes that died and left the run
         self._client_info: dict = {}
@@ -114,6 +117,9 @@ class ClientNodesExecutor(DistributedExecutor):
         self._seq = 0                 # batches sent: batch ids stay unique whatever is skipped
         self._rep = None              # the client proxy standing for slice 0 in the chain
         self._joined: list = []       # clients that joined at this round's start
+        self._client_ckpt: dict = {}  # recovery: client -> its last epoch checkpoint (on its disk)
+        self._session_snap = None     # recovery: the schedule's state at that checkpoint
+        self._start_snap = None       # ... and at the run's start (no checkpoint)
         self._setting = "vanilla"    # client nodes host slice 0; this process hosts none
         self.n_clients = int(cfg.sl.clients or 1)
         self._clients: list = []     # client proxies, by client index (client 0 is also _proxies[0])
@@ -134,6 +140,9 @@ class ClientNodesExecutor(DistributedExecutor):
             from ..algorithm.registry import get as _get_algo
             algorithm = _get_algo(self._run_config.sl.algorithm)
         self._per_client = bool(algorithm is not None and algorithm.needs_per_client_server_state())
+        if self._per_client and self._run_config.fault_tolerance.enabled:
+            raise ValueError("fault_tolerance.enabled with per-client server copies (SplitFed V1) "
+                             "isn't supported on client nodes yet: the copies aren't checkpointed")
         super().setup(model_graph, partitions, optimizer_cfg, criterion_cfg,
                       mixed_precision=mixed_precision, n_micro_batches=n_micro_batches,
                       callbacks=callbacks, model_name=model_name, strategy_name=strategy_name,
@@ -334,9 +343,12 @@ class ClientNodesExecutor(DistributedExecutor):
         token = uuid.uuid4().hex
         self._slice0_args = (n, parts[0], partitions[0], tied[0], token, last)
         for i, partition in enumerate(partitions):
-            targets = [p for p in self._clients if p is not None] if i == 0 else [self._proxies[i]]
-            for proxy in targets:
+            targets = ([(k, p) for k, p in enumerate(self._clients) if p is not None and k not in self._lost]
+                       if i == 0 else [(None, self._proxies[i])])
+            for k, proxy in targets:
                 slice_cfg = self._slice_config(i, n, parts[i], partition, tied[i], token)
+                if k is not None:
+                    slice_cfg.checkpoint_path = self._client_ckpt.get(k, "")
                 if i == 0:
                     slice_cfg.label_worker = last
                 if i == 1:
@@ -390,6 +402,8 @@ class ClientNodesExecutor(DistributedExecutor):
                              f"{self.n_clients}")
         self._epoch, self._state_bytes = epoch, 0
         self._session = data_loader
+        if self._start_snap is None:            # recovery without a checkpoint replays from here
+            self._start_snap = data_loader.snapshot()
         self._joined = []
         self._admit()
         data_loader.round_deadline_s = float(self._run_config.sl.round_deadline_s or 0.0)
@@ -514,6 +528,111 @@ class ClientNodesExecutor(DistributedExecutor):
                 self._state_bytes += len(data)
             proxy.stub().set_state(worker_service_pb2.StateBlob(data=data, reset_clients=True),
                                    timeout=300.0)
+
+    # ── recovery (fault_tolerance.enabled): the server side ───────────────────────
+
+    def _save_ft_checkpoint(self, epoch: int) -> None:
+        """The server workers' checkpoints (as in every distributed run), plus each live
+        client's on its own node (``worker_<n + k>``) and the schedule's state."""
+        super()._save_ft_checkpoint(epoch)
+        n = len(self._proxies)
+        for k, proxy in enumerate(self._clients):
+            if proxy is None or k in self._lost:
+                continue
+            try:
+                proxy.stub().save_checkpoint(worker_service_pb2.ShutdownRequest(
+                    save_checkpoint=True, checkpoint_dir=self._ft_checkpoint_dir, run_id=self._run_id,
+                    epoch=epoch, worker_index=n + k), timeout=60.0)
+                self._client_ckpt[k] = os.path.join(self._ft_checkpoint_dir, f"worker_{n + k}_epoch_{epoch}.pt")
+            except grpc.RpcError as e:
+                _LOG.warning("client checkpoint failed client=%s error=%s", k, e)
+        if self._session is not None:
+            self._session_snap = self._session.snapshot()
+
+    def recover(self, last_good_epoch: int) -> None:
+        """A server worker died: re-split the server slices over the surviving server
+        workers, from their last checkpoint; slice 0 stays on the clients, each restored
+        from its own checkpoint, and the schedule replays the round from its start."""
+        self._stop_heartbeats()
+        failed = set(self._failed_workers)
+        if 0 in failed:
+            raise RuntimeError("a client node failed with an error (not a disconnect); a client "
+                               f"holds its own data, so it can't move: {self._failure_reason.get(0, '')}")
+        alive = [(i, p) for i, p in enumerate(self._proxies) if i > 0 and i not in failed]
+        if not alive:
+            raise RuntimeError("[recovery] every server worker failed: cannot continue")
+        for i in failed:
+            if i < len(self._proxies):
+                self._router.release(self._proxies[i].address)
+        cfg = self._run_config
+        all_layers = self._load_server_slices(last_good_epoch) if last_good_epoch > 0 else None
+        snap = self._session_snap
+        if all_layers is None:       # everything back to the start, so server and clients agree
+            _LOG.warning("recovery from the initial weights: no complete checkpoint")
+            all_layers = list(self._stored_layers)
+            self._client_ckpt.clear()
+            snap = self._start_snap
+        n = 1 + len(alive)
+        partitions = self._server_split(len(alive))
+        _LOG.warning("recovery: server slices %s -> %s workers %s", len(self._proxies) - 1, len(alive),
+                     [p.address for _, p in alive])
+        self._nodes = [self._nodes[0], *(self._nodes[i] for i, _ in alive)]
+        self._proxies = [self._proxies[0], *(p for _, p in alive)]
+        for i, proxy in enumerate(self._proxies):
+            proxy.worker_index = i
+        self._hooks = resolve_cut_hooks(self._cut_hooks_spec, n, cfg.sl.cut_hooks, drop_missing=True)
+        self._meter = CommMeter(n)
+        self._placement = Placement(self._setting, n)
+        self.partitions = partitions
+        self._log_plan(self._stored_model_graph, partitions)
+        self._stored_layers = all_layers
+        self._stored_partition_indices = [list(p.layer_indices) for p in partitions]
+        if self._session is not None and snap is not None:
+            self._session.restore(snap)
+        self._init_slices(all_layers, partitions, phase="recovery")
+        self._failed_workers.clear()
+        self._failure_info.clear()
+        self._failure_event.clear()
+        self._batch_done.clear()
+        ft = cfg.fault_tolerance
+        if ft.enabled or ft.detect_failures:
+            self._start_heartbeats(ft.heartbeat_interval_s, ft.ping_timeout_s)
+        _LOG.info("recovery complete server_workers=%s", len(alive))
+
+    def _load_server_slices(self, epoch: int) -> "list | None":
+        """The stored layers with the server slices' weights from ``epoch``'s checkpoints
+        (slice 0 is restored on each client from its own)."""
+        import copy as _copy
+        if not self._ft_checkpoint_dir:
+            return None
+        layers = list(self._stored_layers)
+        for i, indices in enumerate(self._stored_partition_indices):
+            if i == 0:
+                continue
+            path = os.path.join(self._ft_checkpoint_dir, f"worker_{i}_epoch_{epoch}.pt")
+            if not os.path.exists(path):
+                _LOG.warning("recovery checkpoint missing path=%s", path)
+                return None
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+            SplitLayer([layers[j] for j in indices]).load_state_dict(ckpt.get("layer_state_dict", {}), strict=False)
+        return layers
+
+    def _server_split(self, n_servers: int) -> list:
+        """Partition 0 as it is (the clients' slice); the server layers split evenly over
+        ``n_servers`` workers."""
+        from ..strategies.base import Partition
+        from ..strategies.uniform import UniformSplitter
+        graph = self._stored_model_graph
+        first = list(self._stored_partition_indices[0])
+        rest = [j for j in range(len(graph)) if j > first[-1]]
+        if len(rest) < n_servers:
+            raise RuntimeError(f"[recovery] {len(rest)} server layers can't go on {n_servers} workers")
+        groups = [first, *self._uniform_split(rest, n_servers)]
+        parts = [Partition(index=i, layer_indices=g,
+                           predecessors=UniformSplitter._intra_predecessors(graph, g))
+                 for i, g in enumerate(groups)]
+        UniformSplitter().validate(graph, parts)
+        return parts
 
     def _server_copy(self, servers: list, k: int) -> dict:
         """Client ``k``'s copy of the server slices, ``{slice: state}``, from every worker."""

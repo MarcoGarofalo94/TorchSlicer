@@ -466,7 +466,8 @@ shown in a Flower-based SplitFed baseline.
       worker RPCs, `ROLE=client`, launcher nodes; = `ClientSession` in every schedule (tests,
       OS processes, and across the two containers). Step 3 done: SplitFed V1 (per-client server
       copies on the server workers) = in-process V1. Step 4a done: a dead client leaves the run; round deadline. Step 4b done: late joiners and
-      rejoins (`sl.min_clients`, `set_peers`). Next: 4c server-side recovery (fault_tolerance.enabled).
+      rejoins (`sl.min_clients`, `set_peers`). Step 4c done: server-side recovery
+      (`fault_tolerance.enabled`; not with V1). Next: step 5 (concurrent clients + overhead benchmark).
 - **M11, data and scale simulation** (was M10):
   - **Federated partitioners:** IID; Dirichlet(α) label skew; quantity skew; per-client feature shift.
   - **Standard datasets:** MNIST, CIFAR-10/100, FEMNIST-like, a text/LLM fine-tuning set, tabular for vertical SL.

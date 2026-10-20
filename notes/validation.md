@@ -1574,3 +1574,25 @@ invisible there.
   in-process); a client killed in round 1 and restarted at the same address rejoins round 2
   from the initial weights = a twin that resets it after round 1 (losses and every client's
   weights). A fixed peer list that can't meet the counts fails at once, not after the timeout.
+
+### Step 4c: server-side recovery on client nodes (2026-10-20)
+- `fault_tolerance.enabled` now works with client nodes (refused only with per-client server
+  copies, which aren't checkpointed). Each epoch: the server workers' checkpoints as in every
+  run, plus each live client's on its own node (`worker_<n + k>_epoch_<e>.pt`) and the
+  schedule's state (`RemoteSession.snapshot`). A dead server worker → `recover()` override:
+  slice 0 stays put (the cut between clients and server can't move: every client's weights
+  belong to it); the server layers are split evenly over the surviving server workers with
+  their checkpointed weights; every client is re-initialized from its own checkpoint
+  (`SliceConfig.checkpoint_path`); the schedule is restored; the clients' loaders restart at
+  batch 0 of the retried round (`client_step` index 0 restarts the iterator). A client's
+  runtime error (not a disconnect) still stops the run.
+- **Inconsistency found in this step's first version (before commit):** when a checkpoint was
+  incomplete (a server died before saving it), recovery fell back to the *initial* server
+  weights but kept the clients and the schedule at the last checkpoint. Now the fallback puts
+  everything back to the start (initial clients, the schedule's snapshot from before round 1).
+- Checked: with SGD without momentum (no optimizer state, which recovery rebuilds), losing a
+  server worker as round 2 starts (parallel, sequential) or as round 1 starts (no
+  checkpoint) gives exactly the uninterrupted in-process run's losses and every client's
+  weights, on one server worker instead of two.
+- Limit, as in every distributed run: recovery rebuilds the server optimizers (their state
+  isn't reloaded across a re-split), so with momentum/Adam the replayed round differs.

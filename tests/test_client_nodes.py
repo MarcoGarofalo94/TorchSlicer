@@ -386,3 +386,46 @@ def test_a_client_that_died_comes_back_from_the_initial_weights():
     assert [round(x, 6) for x in got] == ref
     _same_states(states, session.states)
     assert h[0]["clients_lost"] == [1] and h[1]["clients_joined"] == [1]
+
+
+# ── step 4c: a server worker dies (fault_tolerance.enabled) ─────────────────────
+
+@pytest.mark.parametrize("mode,kill_at", [("parallel", 2), ("sequential", 2), ("parallel", 1)])
+def test_server_recovery_replays_the_round_exactly(mode, kill_at, tmp_path):
+    # kill_at 2: back to round 1's checkpoint; kill_at 1: no checkpoint yet, back to the start
+    # SGD without momentum: no optimizer state, so recovery (which rebuilds optimizers)
+    # must give exactly the uninterrupted run's losses and client weights
+    def cfg_():
+        c = _cfg()
+        c.training.epochs = 3
+        c.training.optimizer = {"name": "SGD", "params": {"lr": 0.05}}
+        return c
+    session = ts.ClientSession(_loaders(), mode=mode)
+    ref = [e["loss"] for e in ts.slice(_model(), cuts=CUTS).train(session, run_config=cfg_())]
+
+    cfg = cfg_()
+    cfg.fault_tolerance.enabled, cfg.fault_tolerance.max_retries = True, 1
+    cfg.fault_tolerance.heartbeat_interval_s = 0.5
+    cfg.checkpoint.dir = str(tmp_path)
+    offsets = cfg.transport.listen_offsets()
+    servers = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg) for _ in range(2)]
+    clients = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg, data=_loaders()[k],
+                               client_index=k) for k in range(C)]
+
+    class _KillServer(ts.TrainingCallback):          # the last server slice dies as round 2 starts
+        def on_epoch_begin(self, epoch):
+            if epoch == kill_at and servers[1] is not None:
+                servers[1].stop()
+
+    addr = f"127.0.0.1:{free_port(cfg.transport.listen_offsets(drives=True))}"
+    ex = ts.ClientNodesExecutor(discovery=StaticDiscovery(peers=[w.address for w in clients + servers]),
+                                coordinator_addr=addr, run_config=cfg)
+    remote = ts.RemoteSession(C, mode=mode)
+    try:
+        h = ts.slice(_model(), cuts=CUTS, executor=ex).train(remote, run_config=cfg, callbacks=[_KillServer()])
+    finally:
+        for w in servers + clients:
+            w.stop()
+    assert [round(e["loss"], 6) for e in h] == ref
+    _same_states(remote.states, session.states)
+    assert len(ex.partitions) == 2                    # slice 0 on the clients, one server worker left
