@@ -93,6 +93,11 @@ class _Odd(ts.Algorithm):                              # client sampling: odd ro
         return [k for k in available if not (round % 2 and k == 1)]
 
 
+class _OddV1(ts.SplitFedV1Algorithm):                  # SplitFed V1 with client sampling
+    def select_clients(self, available, round):
+        return [k for k in available if not (round % 2 and k == 1)]
+
+
 def _sl_example():
     """examples/sl/train.py, under another name: it imports run_anywhere's ``train``."""
     import importlib.util
@@ -128,6 +133,9 @@ def _same_states(a, b):
     ("parallel", "copy", None, "tcp"),
     ("parallel", "copy", ts.SplitFedAlgorithm(), "grpc"),
     ("parallel", "copy", _Odd(), "grpc"),
+    ("parallel", "copy", ts.SplitFedV1Algorithm(), "tcp"),       # per-client server copies
+    ("sequential", "keep", ts.SplitFedV1Algorithm(), "grpc"),
+    ("parallel", "copy", _OddV1(), "grpc"),
 ])
 def test_client_nodes_match_the_in_process_session(mode, handoff, algorithm, transport):
     ref, ref_states = _local(mode, handoff, algorithm)
@@ -135,16 +143,18 @@ def test_client_nodes_match_the_in_process_session(mode, handoff, algorithm, tra
     assert [round(x, 6) for x in got] == ref
     _same_states(states, ref_states)
     moved = h[-1]["bytes_state"]
-    if handoff == "keep" or (mode == "parallel" and not isinstance(algorithm, ts.SplitFedAlgorithm)):
+    aggregates = isinstance(algorithm, (ts.SplitFedAlgorithm, ts.SplitFedV1Algorithm))
+    if (handoff == "keep" or mode == "parallel") and not aggregates:
         assert moved == 0              # nothing needs a client's state elsewhere
     else:
         assert moved > 0               # a handoff or an aggregation moved states
     assert h[-1]["bytes_label"] > 0    # labels go from the clients to the last slice
 
 
-def test_client_nodes_with_gpipe_micro_batches():
-    ref, ref_states = _local("parallel", "copy", ts.SplitFedAlgorithm(), n_micro=2)
-    got, states, _ = _nodes("parallel", "copy", ts.SplitFedAlgorithm(), "tcp", n_micro=2)
+@pytest.mark.parametrize("algorithm", [ts.SplitFedAlgorithm, ts.SplitFedV1Algorithm])
+def test_client_nodes_with_gpipe_micro_batches(algorithm):
+    ref, ref_states = _local("parallel", "copy", algorithm(), n_micro=2)
+    got, states, _ = _nodes("parallel", "copy", algorithm(), "tcp", n_micro=2)
     assert [round(x, 6) for x in got] == ref
     _same_states(states, ref_states)
 

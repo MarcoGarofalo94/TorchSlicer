@@ -12,8 +12,10 @@ The server slices are today's worker chain. Slice 1 knows every client's address
 transport (gRPC, TCP, IPC, NAT tunnels) carries them unchanged. The coordinator holds no
 data and no slice; it runs the schedule (:class:`torchslicer.sl.clients.RemoteSession`),
 the client selection and the round-end hooks, moving client states only when they need
-to (sequential handoff, aggregation). One batch is in flight at a time, so the losses
-equal an in-process ``ClientSession`` on the same clients.
+to (sequential handoff, aggregation). With per-client server copies (SplitFed V1) every
+server worker keeps one copy of its slice per client and swaps it in when that client's
+batch arrives (``SliceConfig.per_client_state``). One batch is in flight at a time, so the
+losses equal an in-process ``ClientSession`` on the same clients.
 
 Client nodes register with the tags ``client`` and ``client=<k>`` (``ts.start_worker(data=,
 client_index=)``, or ``ts.run`` with ``ROLE=client``); the other registered workers are
@@ -86,6 +88,29 @@ class ClientNodesExecutor(DistributedExecutor):
         self._state_bytes = 0        # client states moved this epoch (handoffs, aggregation)
         self._epoch = 0
         self._session = None         # the RemoteSession trained on: its states are read at teardown
+        self._per_client = False     # SplitFed V1: the server workers keep one copy per client
+
+    def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict,
+              mixed_precision: bool = False, n_micro_batches: int = 1, callbacks: list = None,
+              model_name: str = "unknown", strategy_name: str = "unknown", run_config=None,
+              planner=None, cut_hooks=None, algorithm=None) -> None:
+        """As ``DistributedExecutor.setup`` (same signature: ``SlicedModel.train`` passes
+        what it names); an algorithm that needs per-client server state
+        (``needs_per_client_server_state``, SplitFed V1) makes every server worker keep one
+        copy of its slice per client."""
+        if algorithm is None and self._run_config.sl.algorithm:
+            from ..algorithm.registry import get as _get_algo
+            algorithm = _get_algo(self._run_config.sl.algorithm)
+        self._per_client = bool(algorithm is not None and algorithm.needs_per_client_server_state())
+        super().setup(model_graph, partitions, optimizer_cfg, criterion_cfg,
+                      mixed_precision=mixed_precision, n_micro_batches=n_micro_batches,
+                      callbacks=callbacks, model_name=model_name, strategy_name=strategy_name,
+                      run_config=run_config, planner=planner, cut_hooks=cut_hooks, algorithm=algorithm)
+
+    def _unsupported_hooks(self) -> dict:
+        hooks = super()._unsupported_hooks()
+        del hooks["needs_per_client_server_state"]      # server workers keep the copies
+        return hooks
 
     def _new_local_servicer(self, first_slice, tags, device=None):
         return None                  # the coordinator hosts no slice
@@ -173,6 +198,9 @@ class ClientNodesExecutor(DistributedExecutor):
             if 0 in g.members and len(g.members) > 1 and g.requires_grad:
                 raise ValueError("sl.client_nodes: a trainable parameter is tied across the client "
                                  "and the server slices; client nodes can't keep the copies equal")
+            if self._per_client and len(g.members) > 1 and g.requires_grad:
+                raise ValueError("per-client server copies (SplitFed V1) don't support a trainable "
+                                 "parameter tied across server slices")
         n = len(self._proxies)
         tied = build_tied_configs(parts, [p.address for p in self._proxies])
         clients = [p.address for p in self._clients]
@@ -188,6 +216,9 @@ class ClientNodesExecutor(DistributedExecutor):
                 if i == 1:
                     slice_cfg.prev_worker = ""
                     slice_cfg.prev_workers.extend(clients)
+                if i > 0:
+                    slice_cfg.n_clients = self.n_clients
+                    slice_cfg.per_client_state = self._per_client
                 res = self._init_worker(proxy, slice_cfg, phase=phase)
                 _LOG.info("worker %s complete slice=%s address=%s hostname=%s", phase, i,
                           proxy.address, res.hostname)
@@ -255,7 +286,32 @@ class ClientNodesExecutor(DistributedExecutor):
         if not (overridden(algo, "on_round_end") or overridden(algo, "aggregate")):
             return
         session.fetch_states(selected)
-        super()._round_end(session, adapter, selected, epoch)
+        if not self._per_client:
+            super()._round_end(session, adapter, selected, epoch)
+            return
+        from ..sl.clients import algorithm_round_end
+        servers = self._proxies[1:]
+        server_states = {k: self._server_copy(servers, k) for k in selected}
+        agg = algorithm_round_end(session, algo, adapter, selected, {}, epoch, server_states)
+        for i, proxy in enumerate(servers, start=1):    # the round's result, then a new round
+            data = b""
+            if agg is not None:
+                buf = io.BytesIO()
+                torch.save(agg[i], buf)
+                data = buf.getvalue()
+                self._state_bytes += len(data)
+            proxy.stub().set_state(worker_service_pb2.StateBlob(data=data, reset_clients=True),
+                                   timeout=300.0)
+
+    def _server_copy(self, servers: list, k: int) -> dict:
+        """Client ``k``'s copy of the server slices, ``{slice: state}``, from every worker."""
+        out = {}
+        for i, proxy in enumerate(servers, start=1):
+            blob = proxy.stub().get_state(worker_service_pb2.StateRequest(per_client=True, client=k),
+                                          timeout=300.0)
+            self._state_bytes += len(blob.data)
+            out[i] = torch.load(io.BytesIO(blob.data), weights_only=True)
+        return out
 
     def _epoch_stats(self, epoch: int) -> list:
         """The chain's stats, with slice 0's summed over every client node."""

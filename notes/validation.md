@@ -1512,3 +1512,21 @@ invisible there.
   client nodes on `10.224.0.9` (registration with the coordinator over the bridge): losses
   `[2.369131, 2.207663]`, equal to the in-process `ClientSession`; every node exited cleanly.
   First run of client nodes on two hosts (same physical machine: correctness only).
+
+### Step 3: SplitFed V1 on client nodes (2026-10-20)
+- Per-client server copies live on the server workers (`SliceConfig.n_clients`,
+  `per_client_state`): `WorkerServicer._select_client` swaps the batch's client's copy in at
+  the forward entry (`_forward`, `_forward_tensor`, on the compute pool), keeping the previous
+  client's; a client's first batch of a round starts from the slice as the round began
+  (= `LocalExecutor`'s `initial_server_state` per epoch). Round end: the coordinator reads
+  each participant's copy from every server worker (`get_state(per_client, client)`), calls
+  `algorithm_round_end(..., server_states)`, sends the aggregate and `reset_clients`.
+- Checked: `SplitFedV1Algorithm` parallel (TCP), sequential keep, with client sampling, and
+  with GPipe: losses and final client weights = in-process V1 (V1 and V2 losses differ here,
+  `[1.392442, 1.387596]` vs `[1.400225, 1.367958]`, so the copies are really exercised).
+- Gap found on the way (no bug): `SlicedModel.train` passes `setup` only the arguments its
+  signature names (`inspect.signature`), so an executor overriding `setup` with `*args,
+  **kwargs` would silently lose `planner` and `cut_hooks`. `ClientNodesExecutor.setup`
+  repeats the base signature (checked equal).
+- Cost: each round moves every participant's server copy to the coordinator and the
+  aggregate back (`bytes_state`); a server-side aggregation would avoid it (later).

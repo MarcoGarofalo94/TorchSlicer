@@ -527,12 +527,7 @@ class DistributedExecutor(BaseExecutor):
             from ..algorithm.registry import get as _get_algo
             algorithm = _get_algo(self._run_config.sl.algorithm)
         self._algorithm = algorithm if algorithm is not None else DefaultAlgorithm()
-        check_supported(self._algorithm, "distributed executor", {
-            "loss": "a custom loss",
-            "client_loss": "local-loss training",
-            "step_aux": "local-loss auxiliary optimizers",
-            "needs_per_client_server_state": "per-client server copies, e.g. SplitFed V1",
-        })
+        check_supported(self._algorithm, "distributed executor", self._unsupported_hooks())
         self._algorithm.configure(len(partitions), None, self._placement)
         self._client_store = None
         if self._run_config.sl.client_profiles:
@@ -735,6 +730,15 @@ class DistributedExecutor(BaseExecutor):
                     self._run_logger.log(**ws)
 
         return {"loss": avg, **sl_metrics}
+
+    def _unsupported_hooks(self) -> dict:
+        """``Algorithm`` hooks this executor doesn't run: {hook: what it does}."""
+        return {
+            "loss": "a custom loss",
+            "client_loss": "local-loss training",
+            "step_aux": "local-loss auxiliary optimizers",
+            "needs_per_client_server_state": "per-client server copies, e.g. SplitFed V1",
+        }
 
     def _batch_id(self, epoch: int, n_total: int, n_batches: int, client) -> int:
         """The id of an epoch's ``n_batches``-th batch (``client``: its client in a session)."""

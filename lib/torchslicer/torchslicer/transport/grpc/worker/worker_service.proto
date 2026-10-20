@@ -99,6 +99,10 @@ message SliceConfig {
     // it sends its labels.
     repeated string prev_workers   = 19;
     string  label_worker           = 20;
+    // A server slice with client nodes: the number of clients, and whether it keeps one copy
+    // of itself per client (SplitFed V1), swapped in when a client's batch arrives.
+    uint32  n_clients              = 21;
+    bool    per_client_state       = 22;
 }
 
 // A parameter reachable under several names, possibly on several workers.
@@ -215,11 +219,15 @@ message ClientStepRequest {
     uint32 index    = 3;  // the batch's index in the client's epoch (checked)
 }
 
-message StateRequest {}
+message StateRequest {
+    bool   per_client = 1;  // a server slice's copy for `client` (per_client_state)
+    uint32 client     = 2;
+}
 
 // torch.save({"model": state_dict, "optimizer": state_dict | None}); loaded weights_only
 message StateBlob {
-    bytes data = 1;
+    bytes data          = 1;  // empty: leave the weights as they are
+    bool  reset_clients = 2;  // then drop the per-client copies: a new round starts from these
 }
 
 // ── tied parameters ───────────────────────────────────────────────────────────

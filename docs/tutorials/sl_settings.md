@@ -289,7 +289,11 @@ its batch. Clients only open connections outward, so the NAT tunnels of
 group can't change after init). Client states stay on their nodes and cross the network
 only when needed: a sequential `copy` handoff (`keep` moves nothing) and the round-end
 hooks of an `Algorithm` (e.g. `ts.SplitFedAlgorithm`). The history counts those bytes
-in `bytes_state`.
+in `bytes_state`. An algorithm with per-client server copies (`ts.SplitFedV1Algorithm`,
+`needs_per_client_server_state`) makes every server worker keep one copy of its slice
+per client, swapped in when that client's batch arrives; at the end of the round the
+coordinator gathers the participants' copies for `aggregate` and every copy restarts
+from the result.
 
 One batch is in flight at a time, so a run on client nodes trains exactly like the
 `ClientSession` of section 4 on the same clients. On the coordinator,
@@ -331,8 +335,7 @@ processes|compose|baremetal` starts or renders one node per client
   process. With `sl.client_nodes` each client is its own node, but the schedule keeps
   one batch in flight: clients don't train concurrently yet.
 - **Server batches.** In `parallel` mode the server takes the clients' batches one
-  at a time and updates after each one. There is no batching across clients, and
-  per-client server copies (SplitFed V1) run only in-process.
+  at a time and updates after each one. There is no batching across clients.
 - **Labels on another party.** Every setting assumes that the data owner holds both
   the inputs and the labels. Vertical SL, where a separate party holds the labels, is
   not supported.

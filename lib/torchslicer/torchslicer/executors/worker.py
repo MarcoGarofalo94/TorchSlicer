@@ -789,6 +789,11 @@ class WorkerServicer(
         self._data_epoch = None       # a client node: the epoch its loader iterator is on
         self._data_iter = None
         self._data_index = 0
+        self._n_clients = 0           # a server slice with client nodes: how many
+        self._per_client = False      # SplitFed V1: one copy of this slice per client
+        self._client_copies: dict = {}
+        self._active_client = None    # whose copy is in the slice now
+        self._round_initial = None    # the slice at the round's start (a new client's copy)
         self._coord_stub = None
         self._fatal_error = None
 
@@ -873,6 +878,10 @@ class WorkerServicer(
             if request.label_worker:
                 self._label_stub = worker_service_pb2_grpc.WorkerServiceStub(
                     channel(request.label_worker))
+            self._n_clients = int(request.n_clients)
+            self._per_client = bool(request.per_client_state)
+            if self._per_client and not self._n_clients:
+                raise ValueError("per_client_state needs n_clients")
             if self.local_coordinator is not None:
                 self._coord_stub = self.local_coordinator
             elif self.coordinator:
@@ -1367,15 +1376,55 @@ class WorkerServicer(
                 batch_id=mbid, label=serialize_tensor(y)))
             self.submit_input(mbid, x, a)
 
+    def _read_state(self) -> dict:
+        """This slice's weights and optimizer state, as CPU copies."""
+        from ..sl.clients import _copy_optimizer_state
+        opt = self.layer.optimizer
+        return {"model": {k: v.detach().to("cpu", copy=True) for k, v in self.layer.state_dict().items()},
+                "optimizer": _copy_optimizer_state(opt.state_dict(), "cpu") if opt else None}
+
+    def _write_state(self, state: dict) -> None:
+        """Load a state (copying it: the caller may reuse it). No optimizer state means
+        a fresh one, as in-process (``SplitLayerClientState.set_state``)."""
+        from ..sl.clients import _copy_optimizer_state
+        self.layer.load_state_dict(state["model"])
+        opt = self.layer.optimizer
+        if opt is None:
+            return
+        if state.get("optimizer") is not None:
+            opt.load_state_dict(_copy_optimizer_state(state["optimizer"], self.device))
+        else:
+            opt.state.clear()
+
+    def _select_client(self, batch_id: int) -> None:
+        """SplitFed V1 (``per_client_state``): put the copy of this slice that belongs to the
+        batch's client in, keeping the previous client's. A client's first batch of a round
+        starts from the slice as the round began. Runs on the compute pool, before the
+        batch's forward; the coordinator keeps one batch in flight."""
+        if not self._per_client:
+            return
+        k = (batch_id // self._n_micro) % self._n_clients
+        if k == self._active_client:
+            return
+        if self._active_client is None:
+            self._round_initial = self._read_state()
+        else:
+            self._client_copies[self._active_client] = self._read_state()
+            self._write_state(self._client_copies.get(k, self._round_initial))
+        self._active_client = k
+
     def get_state(self, request, context):
         """This slice's weights and optimizer state (CPU copies), e.g. for a handoff or an
-        aggregation. Runs on the compute pool, so after any batch in progress."""
-        from ..sl.clients import _copy_optimizer_state
+        aggregation; with ``per_client``, its copy for ``client`` (SplitFed V1). Runs on the
+        compute pool, so after any batch in progress."""
 
         def _read():
-            opt = self.layer.optimizer
-            state = {"model": {k: v.detach().to("cpu", copy=True) for k, v in self.layer.state_dict().items()},
-                     "optimizer": _copy_optimizer_state(opt.state_dict(), "cpu") if opt else None}
+            if request.per_client and request.client != self._active_client:
+                state = self._client_copies.get(request.client, self._round_initial)
+                if state is None:
+                    raise RuntimeError(f"no copy of this slice for client {request.client}")
+            else:
+                state = self._read_state()
             buf = io.BytesIO()
             torch.save(state, buf)
             return buf.getvalue()
@@ -1384,20 +1433,16 @@ class WorkerServicer(
 
     def set_state(self, request, context):
         """Load a state from :meth:`get_state` (``weights_only``: plain tensors and
-        containers, no code). No optimizer state means a fresh one, as in-process
-        (``SplitLayerClientState.set_state``)."""
-        from ..sl.clients import _copy_optimizer_state
-        state = torch.load(io.BytesIO(request.data), weights_only=True)
+        containers, no code); with ``reset_clients``, then drop the per-client copies, so
+        the next round starts every client from this state (SplitFed V1)."""
+        state = torch.load(io.BytesIO(request.data), weights_only=True) if request.data else None
 
         def _write():
-            self.layer.load_state_dict(state["model"])
-            opt = self.layer.optimizer
-            if opt is None:
-                return
-            if state.get("optimizer") is not None:
-                opt.load_state_dict(_copy_optimizer_state(state["optimizer"], self.device))
-            else:
-                opt.state.clear()
+            if state is not None:
+                self._write_state(state)
+            if request.reset_clients:
+                self._client_copies.clear()
+                self._active_client = self._round_initial = None
 
         self._pool.submit(_write).result()
         return worker_service_pb2.Ack(batch_id=0)
@@ -1540,6 +1585,7 @@ class WorkerServicer(
             batch_id = request.batch_id
             self._ensure_generation(generation, "forward", batch_id)
             self._before_runtime_phase("forward", batch_id)
+            self._select_client(batch_id)
             self._profiler.begin_batch(batch_id)
             self._profiler.mark_idle_end("fwd")
 
@@ -1608,6 +1654,7 @@ class WorkerServicer(
         try:
             self._ensure_generation(generation, "forward_tensor", batch_id)
             self._before_runtime_phase("forward_tensor", batch_id)
+            self._select_client(batch_id)
             if not self._profiler.batch_active(batch_id):
                 self._profiler.begin_batch(batch_id)
             self._profiler.mark_idle_end("fwd")
