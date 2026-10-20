@@ -24,7 +24,9 @@ the server, in discovery order.
 from __future__ import annotations
 
 import io
+import threading
 
+import grpc
 import torch
 
 from ..algorithm.base import overridden
@@ -47,20 +49,41 @@ class _ClientNodes:
     def _stub(self, k: int):
         return self._ex._clients[k].stub()
 
-    def info(self, k: int) -> tuple:
-        r = self._stub(k).client_info(worker_service_pb2.ClientInfoRequest(), timeout=60.0)
-        return int(r.n_batches), int(r.n_samples)
+    def lost(self, k: int) -> bool:
+        return k in self._ex._lost
 
-    def get(self, k: int) -> dict:
-        blob = self._stub(k).get_state(worker_service_pb2.StateRequest(), timeout=300.0)
+    def info(self, k: int) -> tuple:
+        """``(n_batches, n_samples)``: asked once; a lost client keeps its last answer."""
+        cache = self._ex._client_info
+        if not self.lost(k):
+            r = self._call(k, "client_info", worker_service_pb2.ClientInfoRequest())
+            if r is not None:
+                cache[k] = (int(r.n_batches), int(r.n_samples))
+        return cache.get(k, (0, 0))
+
+    def _call(self, k: int, method: str, request):
+        """A call to client ``k``; ``None`` if its node turns out to be gone (it leaves)."""
+        try:
+            return getattr(self._stub(k), method)(request, timeout=300.0)
+        except grpc.RpcError:
+            if not (self._ex._drop and self._ex._gone(k)):
+                raise
+            self._ex._client_left(k)
+            return None
+
+    def get(self, k: int) -> "dict | None":
+        """Client ``k``'s state, or ``None`` when its node is gone."""
+        blob = self._call(k, "get_state", worker_service_pb2.StateRequest())
+        if blob is None:
+            return None
         self._ex._state_bytes += len(blob.data)
         return {0: torch.load(io.BytesIO(blob.data), weights_only=True)}
 
     def set(self, k: int, state: dict) -> None:
         buf = io.BytesIO()
         torch.save(state[0], buf)
-        self._ex._state_bytes += buf.tell()
-        self._stub(k).set_state(worker_service_pb2.StateBlob(data=buf.getvalue()), timeout=300.0)
+        if self._call(k, "set_state", worker_service_pb2.StateBlob(data=buf.getvalue())) is not None:
+            self._ex._state_bytes += buf.tell()
 
 
 class ClientNodesExecutor(DistributedExecutor):
@@ -82,6 +105,12 @@ class ClientNodesExecutor(DistributedExecutor):
                              "and leave, and an NCCL process group is fixed at init")
         if cfg.fault_tolerance.enabled:
             raise ValueError("sl.client_nodes doesn't support fault_tolerance.enabled yet")
+        self._drop = bool(cfg.sl.drop_failed_clients)
+        self._lost: set = set()       # client nodes that died and left the run
+        self._client_info: dict = {}
+        self._inflight = None         # the client of the batch in flight
+        self._abandoned = False       # its node died: the batch won't complete
+        self._seq = 0                 # batches sent: batch ids stay unique whatever is skipped
         self._setting = "vanilla"    # client nodes host slice 0; this process hosts none
         self.n_clients = int(cfg.sl.clients or 1)
         self._clients: list = []     # client proxies, by client index (client 0 is also _proxies[0])
@@ -179,7 +208,6 @@ class ClientNodesExecutor(DistributedExecutor):
 
     def _start_heartbeats(self, interval: float, timeout: float) -> None:
         super()._start_heartbeats(interval, timeout)
-        import threading
         n = len(self._proxies)
         for j, proxy in enumerate(self._clients[1:], start=1):
             t = threading.Thread(target=self._heartbeat_loop, args=(n + j - 1, proxy, interval, timeout),
@@ -257,17 +285,27 @@ class ClientNodesExecutor(DistributedExecutor):
                              f"{self.n_clients}")
         self._epoch, self._state_bytes = epoch, 0
         self._session = data_loader
+        data_loader.round_deadline_s = float(self._run_config.sl.round_deadline_s or 0.0)
         data_loader.bind(_ClientNodes(self))
+        if len(self._lost) == self.n_clients:
+            raise RuntimeError("every client node has left the run")
         out = super().train_epoch(data_loader, epoch, verbose, total_epochs)
         out["bytes_state"] = self._state_bytes
+        last = data_loader.last_round
+        if last["lost"]:
+            out["clients_lost"] = last["lost"]
+        if last["skipped"]:
+            out["batches_skipped"] = last["skipped"]
         return out
 
     def _session_adapter(self, n_clients: int):
         return None                  # states live on the nodes (RemoteSession moves them)
 
     def _batch_id(self, epoch: int, n_total: int, n_batches: int, client) -> int:
-        """``batch_id % n_clients`` is the batch's client: slice 1 routes the gradient by it."""
-        bid = (epoch * n_total + n_batches) * self.n_clients + int(client)
+        """``batch_id % n_clients`` is the batch's client: slice 1 routes the gradient by it.
+        Counted per batch sent, so an abandoned batch's id is never reused."""
+        self._seq += 1
+        bid = self._seq * self.n_clients + int(client)
         if bid * self._n_micro >= _MAX_BATCH_ID:
             raise OverflowError(f"batch id {bid} (x {self._n_micro} micro-batches) exceeds 32 bits: "
                                 "fewer epochs, batches or clients per run")
@@ -276,14 +314,79 @@ class ClientNodesExecutor(DistributedExecutor):
     def _send_batch(self, batch_id: int, inputs, labels) -> None:
         if not isinstance(inputs, ClientBatch):
             raise TypeError("ClientNodesExecutor sends ClientBatch items (a RemoteSession)")
-        self._clients[inputs.client].stub().client_step(worker_service_pb2.ClientStepRequest(
-            batch_id=batch_id, epoch=self._epoch, index=inputs.index), timeout=120.0)
+        k = inputs.client
+        with self._lock:
+            self._inflight, self._abandoned = k, False
+        try:
+            self._clients[k].stub().client_step(worker_service_pb2.ClientStepRequest(
+                batch_id=batch_id, epoch=self._epoch, index=inputs.index), timeout=120.0)
+        except grpc.RpcError:
+            if not (self._drop and self._gone(k)):
+                raise                    # a live client refused the batch: a real error
+            self._client_left(k)
+            return
         self._meter.batches += 1
+
+    def _batch_lost(self, batch_id: int) -> bool:
+        with self._lock:
+            lost, self._abandoned, self._inflight = self._abandoned, False, None
+        return lost
+
+    def _gone(self, k: int) -> bool:
+        """Whether client ``k``'s node is down: it doesn't answer a liveness probe."""
+        try:
+            self._clients[k].stub().get_stats(worker_service_pb2.GetStatsRequest(
+                run_id=self._run_id, epoch=-1), timeout=max(self._run_config.fault_tolerance.ping_timeout_s, 1.0))
+            return False
+        except grpc.RpcError:
+            return True
+
+    def _client_left(self, k: int) -> None:
+        """Client ``k``'s node died: it leaves the run; its batch in flight is abandoned."""
+        with self._lock:
+            if k in self._lost:
+                return
+            self._lost.add(k)
+            if self._inflight == k:
+                self._abandoned = True
+                self._batch_done.set()       # unblock the wait for its batch
+        _LOG.warning("client node lost client=%s address=%s; the run goes on without it",
+                     k, self._clients[k].address)
+
+    def _report_confirmed(self, idx: int) -> bool:
+        """Every client node reports as slice 0: a report naming slice 0 holds if a live
+        client holds a fatal error (a client's bug stops the run; a dead client is dropped
+        by the heartbeats instead)."""
+        if idx != 0 or not self._run_config.fault_tolerance.verify_reports or not self._clients:
+            return super()._report_confirmed(idx)
+        timeout = max(self._run_config.fault_tolerance.ping_timeout_s, 1.0)
+        for k, proxy in enumerate(self._clients):
+            if k in self._lost:
+                continue
+            try:
+                r = proxy.stub().get_stats(worker_service_pb2.GetStatsRequest(
+                    run_id=self._run_id, epoch=-1, verbosity=0), timeout=timeout)
+            except grpc.RpcError:
+                continue
+            if r.fatal_error:
+                return True
+        return False
+
+    def _on_worker_failure(self, idx: int, proxy) -> None:
+        """A dead client node leaves the run (``sl.drop_failed_clients``); a dead server
+        worker fails it, as in every distributed run."""
+        if self._drop and proxy in self._clients:
+            self._client_left(self._clients.index(proxy))
+            return
+        super()._on_worker_failure(idx, proxy)
 
     def _round_end(self, session, adapter, selected: list, epoch: int) -> None:
         """Move the participants' states only when an algorithm hook uses them."""
         algo = self._algorithm
         if not (overridden(algo, "on_round_end") or overridden(algo, "aggregate")):
+            return
+        selected = [k for k in selected if k not in self._lost]      # who finished the round
+        if not selected:
             return
         session.fetch_states(selected)
         if not self._per_client:
@@ -314,26 +417,24 @@ class ClientNodesExecutor(DistributedExecutor):
         return out
 
     def _epoch_stats(self, epoch: int) -> list:
-        """The chain's stats, with slice 0's summed over every client node."""
-        chain = super()._epoch_stats(epoch)
-        saved, self._proxies = self._proxies, self._clients[1:]
+        """The chain's stats, with slice 0's summed over the live client nodes."""
+        saved = self._proxies
         try:
-            extra = super()._epoch_stats(epoch)
+            self._proxies = saved[1:]
+            servers = super()._epoch_stats(epoch)
+            self._proxies = [p for k, p in enumerate(self._clients) if k not in self._lost]
+            clients = super()._epoch_stats(epoch)
         finally:
             self._proxies = saved
-        first = chain[0]
-        if first is None:
-            return chain
         merged = worker_service_pb2.WorkerStatsResponse()
-        merged.CopyFrom(first)
-        for r in extra:
+        for r in clients:
             if r is None:
                 continue
             for f in ("bytes_fwd", "bytes_bwd", "raw_bytes_fwd", "raw_bytes_bwd", "msgs_fwd",
                       "msgs_bwd", "bytes_label", "msgs_label"):
                 setattr(merged, f, getattr(merged, f) + getattr(r, f))
             merged.compute_ms += r.compute_ms
-        return [merged, *chain[1:]]
+        return [merged, *servers]
 
     def _add_worker_comm(self, stats: list) -> None:
         super()._add_worker_comm(stats)
@@ -348,7 +449,9 @@ class ClientNodesExecutor(DistributedExecutor):
                 self._session.fetch_states()
             except Exception as e:
                 _LOG.warning("final client states not read: %s", e)
-        for proxy in self._clients[1:]:
+        for k, proxy in enumerate(self._clients[1:], start=1):
+            if k in self._lost:
+                continue
             try:
                 proxy.stub().shutdown(worker_service_pb2.ShutdownRequest(run_id=self._run_id))
             except Exception as e:

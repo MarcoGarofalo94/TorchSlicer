@@ -169,6 +169,12 @@ class RemoteSession(ClientSession):
     ``on_round_end`` / ``aggregate``), which get and set the participants' states.
     ``states[k]`` holds the last state fetched from client ``k``; after training, every
     client's final state (read before the nodes shut down).
+
+    A client node that dies leaves the run (``sl.drop_failed_clients``): its remaining
+    batches are skipped, no state moves to or from it, and it takes no part in later
+    rounds. ``round_deadline_s`` (``sl.round_deadline_s``) stops scheduling a round's
+    batches after that many seconds. ``last_round`` says what happened in the last round:
+    ``{"lost": [clients], "skipped": batches not run}``.
     """
 
     def __init__(self, n_clients: int, mode: str = "sequential", handoff="copy", on_round_end=None):
@@ -176,6 +182,9 @@ class RemoteSession(ClientSession):
         self._nodes = None      # the executor's client-node adapter (get / set / info), from bind()
         self._info = None       # [(n_batches, n_samples)] per client
         self._trained: set = set()
+        self.round_deadline_s = 0.0
+        self.last_round: dict = {"lost": [], "skipped": 0}
+        self._handed = None     # sequential copy: the state the current client started from
 
     def bind(self, nodes) -> None:
         """Called by the executor before each round: ``nodes.info(k)`` gives client ``k``'s
@@ -214,46 +223,69 @@ class RemoteSession(ClientSession):
     def batches(self, adapter=None, epoch: int = 0, clients=None):
         """Yield ``(client, (ClientBatch, None))``: which client runs which of its batches.
         The executor turns each into a ``client_step`` on that node."""
+        import time
         nodes = self._nodes
         clients = list(range(self.n_clients)) if clients is None else list(clients)
-        if self._initial is None and clients:
-            self._initial = nodes.get(clients[0])     # every client starts from the same weights
+        live = [k for k in clients if not nodes.lost(k)]
+        if self._initial is None and live:
+            self._initial = nodes.get(live[0])        # every client starts from the same weights
+        t0, skipped = time.monotonic(), 0
         for k, i in self._order(clients):
+            if nodes.lost(k):
+                skipped += 1
+                continue
+            if self.round_deadline_s and time.monotonic() - t0 > self.round_deadline_s:
+                skipped += 1
+                continue
             if k != self.current:
                 self._switch_remote(k, epoch)
             yield k, (ClientBatch(k, i), None)
+        self.last_round = {"lost": sorted(k for k in clients if nodes.lost(k)), "skipped": skipped}
         if self.mode == "parallel" and self.on_round_end is not None:
-            states = [nodes.get(k) for k in range(self.n_clients)]
+            states = [None if nodes.lost(k) else nodes.get(k) for k in range(self.n_clients)]
+            states = [st if st is not None else self.states[k] for k, st in enumerate(states)]
+            states = [st if st is not None else _copy_state(self._initial) for st in states]
             out = self.on_round_end(states, {"epoch": epoch, "clients": clients})
             self.states = list(states)
             if out is not None:
                 self.replace_states(out, adapter)
 
     def _switch_remote(self, k: int, epoch: int) -> None:
+        """Hand over from the previous client to ``k`` (sequential). A lost previous client
+        hands on what it started from (``copy``: its own updates are lost with it); with
+        ``keep`` or a callable, ``k`` keeps its own state."""
         nodes, prev = self._nodes, self.current
         self.current = k
         if self.mode != "sequential" or prev is None:
             self._trained.add(k)
             return
         self._trained.add(prev)
+        if self.handoff is _handoff_keep:
+            self._trained.add(k)              # nothing moves: k keeps its own state
+            return
+        state = None if nodes.lost(prev) else nodes.get(prev)
         if self.handoff is _handoff_copy:
-            nodes.set(k, nodes.get(prev))
-        elif self.handoff is not _handoff_keep:      # a callable: it sees both states
+            state = state if state is not None else (self._handed or self._initial)
+            nodes.set(k, state)
+            self._handed = state
+        elif state is not None:                                         # a callable: both states
             info = {"from": prev, "to": k, "epoch": epoch, "initial": _copy_state(self._initial)}
-            nodes.set(k, self.handoff(nodes.get(prev), nodes.get(k) if k in self._trained else None, info))
+            nodes.set(k, self.handoff(state, nodes.get(k) if k in self._trained else None, info))
         self._trained.add(k)
 
     def fetch_states(self, clients=None) -> list:
         """Read the clients' states from their nodes into ``states`` (all by default)."""
         for k in (range(self.n_clients) if clients is None else clients):
-            self.states[k] = self._nodes.get(k)
+            if not self._nodes.lost(k):
+                state = self._nodes.get(k)
+                self.states[k] = state if state is not None else self.states[k]
         return self.states
 
     def replace_states(self, states, adapter=None) -> None:
         """Send each client whose state changed (another object than ``states[k]``) its new one."""
         states = list(states)
         for k, st in enumerate(states):
-            if st is not None and st is not self.states[k]:
+            if st is not None and st is not self.states[k] and not self._nodes.lost(k):
                 self._nodes.set(k, st)
         self.states = states
 

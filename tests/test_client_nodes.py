@@ -55,20 +55,24 @@ def _cfg(transport="grpc"):
     return c
 
 
-def _local(mode, handoff, algorithm, n_micro=1):
-    session = ts.ClientSession(_loaders(), mode=mode, handoff=handoff)
+def _local(mode, handoff, algorithm, n_micro=1, loaders=None):
+    session = ts.ClientSession(loaders or _loaders(), mode=mode, handoff=handoff)
     h = ts.slice(_model(), cuts=CUTS).train(session, run_config=_cfg(), algorithm=algorithm,
                                            n_micro_batches=n_micro)
     return [e["loss"] for e in h], session.states
 
 
-def _nodes(mode, handoff, algorithm, transport="grpc", n_micro=1):
+def _nodes(mode, handoff, algorithm, transport="grpc", n_micro=1, servicers=None, **sl):
     cfg = _cfg(transport)
+    for key, v in sl.items():
+        setattr(cfg.sl, key, v)
+    cfg.fault_tolerance.heartbeat_interval_s = 0.5
     offsets = cfg.transport.listen_offsets()
     servers = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg) for _ in range(2)]
     data = _loaders()
     clients = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg, data=data[k],
-                               client_index=k) for k in range(C)]
+                               client_index=k, servicer_class=(servicers or {}).get(k))
+               for k in range(C)]
     peers = [w.address for w in clients[::-1] + servers]      # discovery order doesn't matter
     addr = f"127.0.0.1:{free_port(cfg.transport.listen_offsets(drives=True))}"
     ex = ts.ClientNodesExecutor(discovery=StaticDiscovery(peers=peers), coordinator_addr=addr,
@@ -228,3 +232,62 @@ def test_too_few_client_nodes_fail_with_the_counts():
     finally:
         for w in workers + [client]:
             w.stop()
+
+
+# ── step 4: client nodes that die, rounds with a deadline ───────────────────────
+
+def _dies_at(epoch, index):
+    """A client node that goes down when asked for batch ``index`` of ``epoch``."""
+    class _Dies(ts.WorkerServicer):
+        def client_step(self, request, context):
+            if (request.epoch, request.index) == (epoch, index):
+                self._server.stop(0)
+                raise RuntimeError("client node killed")
+            return super().client_step(request, context)
+    return _Dies
+
+
+class _Without(ts.Algorithm):          # the in-process twin of a client that left in round 1
+    def __init__(self, k):
+        self.k = k
+
+    def select_clients(self, available, round):
+        return [c for c in available if round == 1 or c != self.k]
+
+
+@pytest.mark.parametrize("mode,dies_at", [("parallel", 1), ("sequential", 0)])
+def test_a_dead_client_leaves_and_the_others_go_on(mode, dies_at):
+    # client 1 dies when asked for its batch `dies_at` of round 1: it trained `dies_at`
+    # batches, then takes no part, so the twin is a session where it had only those
+    loaders = _loaders()
+    loaders[1] = loaders[1][:dies_at]
+    ref, ref_states = _local(mode, "copy", _Without(1), loaders=loaders)
+    got, states, h = _nodes(mode, "copy", None, servicers={1: _dies_at(1, dies_at)})
+    assert [round(x, 6) for x in got] == ref
+    _same_states([states[0], states[2]], [ref_states[0], ref_states[2]])
+    assert h[0]["clients_lost"] == [1] and h[1]["clients_lost"] == [1]
+    n1 = len(_loaders()[1])
+    assert h[0]["batches_skipped"] == n1 - dies_at - 1 and h[1]["batches_skipped"] == n1
+
+
+def test_a_dead_client_stops_the_run_without_drop_failed_clients():
+    with pytest.raises(Exception):
+        _nodes("parallel", "copy", None, servicers={1: _dies_at(1, 1)}, drop_failed_clients=False)
+
+
+def test_a_dead_client_is_left_out_of_the_aggregation():
+    got, states, h = _nodes("parallel", "copy", ts.SplitFedAlgorithm(), servicers={2: _dies_at(1, 2)})
+    assert h[-1]["clients_lost"] == [2] and len(got) == 2
+    _same_states([states[0]], [states[1]])          # the survivors hold the same aggregate
+
+
+def test_a_round_deadline_skips_the_rest_of_the_round():
+    class _Slow(ts.WorkerServicer):
+        def client_step(self, request, context):
+            import time
+            time.sleep(0.2)
+            return super().client_step(request, context)
+    got, _, h = _nodes("sequential", "copy", None, servicers={k: _Slow for k in range(C)},
+                       round_deadline_s=0.5)
+    total = sum(len(l) for l in _loaders())
+    assert all(0 < e["batches_skipped"] < total for e in h)   # it ran some, not all

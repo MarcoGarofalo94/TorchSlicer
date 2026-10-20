@@ -323,6 +323,13 @@ for w in servers + clients:
 ```
 
 After training, `remote.states[k]` is client `k`'s final state, read from its node.
+
+A client node that dies leaves the run (`sl.drop_failed_clients`, default true): its batch
+in flight is dropped, the other clients go on, and it takes no part in later rounds or
+aggregations (a dead server worker still stops the run). A node counts as dead only if it
+also fails a liveness probe, so a live client that raises an error stops the run. The
+history lists `clients_lost` and `batches_skipped`. `sl.round_deadline_s` stops scheduling
+a round's batches after that many seconds.
 With `ts.run`, set `sl.client_nodes: true` with `sl.clients` (and `sl.client_mode`,
 `sl.handoff`): every node runs the same script, `data_fn()` returns one loader per
 client, and a client node keeps only its own. `python -m torchslicer launch --target

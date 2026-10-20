@@ -634,6 +634,9 @@ class DistributedExecutor(BaseExecutor):
                             reason=self._failure_reason.get(failed_idx),
                         )
                     wait_total_ms += (time.perf_counter() - wait_t0) * 1000.0
+                    if self._batch_lost(batch_id):
+                        iter_t0 = time.perf_counter()
+                        continue
 
                     with self._lock:
                         loss = (
@@ -743,6 +746,10 @@ class DistributedExecutor(BaseExecutor):
     def _batch_id(self, epoch: int, n_total: int, n_batches: int, client) -> int:
         """The id of an epoch's ``n_batches``-th batch (``client``: its client in a session)."""
         return epoch * n_total + n_batches
+
+    def _batch_lost(self, batch_id: int) -> bool:
+        """Whether ``batch_id`` was abandoned (its node left) and must not be counted."""
+        return False
 
     def _round_end(self, session, adapter, selected: list, epoch: int) -> None:
         """A session's end of round: ``on_round_end`` / ``aggregate`` over the participants."""

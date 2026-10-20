@@ -1530,3 +1530,25 @@ invisible there.
   repeats the base signature (checked equal).
 - Cost: each round moves every participant's server copy to the coordinator and the
   aggregate back (`bytes_state`); a server-side aggregation would avoid it (later).
+
+### Step 4a: client nodes that die; round deadline (2026-10-20)
+- `sl.drop_failed_clients` (default true): a client node that dies leaves the run. Death =
+  a failed call or heartbeat **and** a failed liveness probe (`_gone`), so a live client that
+  refuses a batch (a bug) still stops the run. Its batch in flight is abandoned (new base hook
+  `_batch_lost`, default False: not counted in the loss), its later batches are skipped, no
+  state moves to or from it, and it leaves the aggregation. Sequential `copy` across a lost
+  client hands on what that client started from (its own updates are lost with it). A dead
+  *server* worker still fails the run (`WorkerFailureError`), unchanged. History:
+  `clients_lost`, `batches_skipped`. Client error reports all name slice 0, so the
+  coordinator confirms one by probing every live client for a fatal error.
+- `sl.round_deadline_s`: no batch is scheduled after that many seconds in a round.
+- Batch ids now come from a per-run counter (`_seq * n_clients + client`), so an abandoned
+  batch's id is never reused.
+- Checked: client 1 killed at its batch 1 (parallel) / batch 0 (sequential copy) of round 1
+  = an in-process session where it had only the batches it finished and then left
+  (losses and the survivors' weights); with SplitFed the survivors share the aggregate; with
+  `drop_failed_clients: false` the run stops; a 0.5 s deadline with 0.2 s client steps skips
+  part of every round. Regression found on the way (in this step's own code, before commit):
+  `keep` fetched the previous client's state for nothing.
+- Cost / limits: a batch abandoned mid-way may already have updated the server slices (the
+  server steps before it sends the gradient back); this is inherent to losing the client.
