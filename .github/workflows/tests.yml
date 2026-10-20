@@ -32,7 +32,7 @@ jobs:
       # Install the published package (lib/torchslicer/pyproject.toml), not the dev one,
       # so packaging problems surface here before a release tag.
       - name: Install torchslicer
-        run: pip install "./lib/torchslicer[grpc]" pytest
+        run: pip install "./lib/torchslicer[grpc,flower]" "flwr[simulation]>=1.40" pytest   # Ray: Flower engine test
 
       - name: Run tests
         run: python -m pytest tests/ -q

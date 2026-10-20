@@ -1,0 +1,37 @@
+# Label privacy with a DP accountant: per-sample clipped Gaussian noise on the returned
+# gradient (ClipNoise, clip C = 1e-2 = about the 90th percentile of the cut-gradient norms of
+# this run measured without noise), noise multiplier z swept, vs the unclipped absolute
+# noise of std 1e-3 (GaussianNoise, = z 0.1). Task: CIFAR-10 "is it an airplane?" (10 %
+# positives), harder than MNIST, so the gradients do not vanish. epsilon at delta = 1e-5
+# covers each sample's own gradient row over the epochs (see DPAccountant).
+dataset: npz
+dataset_params: {path: data/cifar10_train.npz, test_path: data/cifar10_test.npz,
+                 mean: [0.4914, 0.4822, 0.4465], std: [0.2470, 0.2435, 0.2616]}
+binary_positive: 0
+train_subset: 20000
+test_subset: 5000
+batch_size: 64
+epochs: 3
+model: cnn
+cut: 2
+device: cuda
+seeds: [0, 1, 2]
+attacks:
+  - {name: label_norm, cut: 0}
+  - {name: label_direction, cut: 0}
+runs:
+  - {label: none}
+  - {label: gauss_1e-3, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 1.0e-3, grad: true}}]}
+  - {label: clip_only, cut_hooks: [{cut: 0, name: clip_noise, params: {clip: 1.0e-2, noise_multiplier: 0.0, forward: false, grad: true}}]}
+  - {label: clip_z0.01, attacks: [{name: label_norm, cut: 0}, {name: label_direction, cut: 0}, {name: dp, cut: 0}],
+     cut_hooks: [{cut: 0, name: clip_noise, params: {clip: 1.0e-2, noise_multiplier: 0.01, forward: false, grad: true}}]}
+  - {label: clip_z0.03, attacks: [{name: label_norm, cut: 0}, {name: label_direction, cut: 0}, {name: dp, cut: 0}],
+     cut_hooks: [{cut: 0, name: clip_noise, params: {clip: 1.0e-2, noise_multiplier: 0.03, forward: false, grad: true}}]}
+  - {label: clip_z0.1, attacks: [{name: label_norm, cut: 0}, {name: label_direction, cut: 0}, {name: dp, cut: 0}],
+     cut_hooks: [{cut: 0, name: clip_noise, params: {clip: 1.0e-2, noise_multiplier: 0.1, forward: false, grad: true}}]}
+  - {label: clip_z0.3, attacks: [{name: label_norm, cut: 0}, {name: label_direction, cut: 0}, {name: dp, cut: 0}],
+     cut_hooks: [{cut: 0, name: clip_noise, params: {clip: 1.0e-2, noise_multiplier: 0.3, forward: false, grad: true}}]}
+  - {label: clip_z1.0, attacks: [{name: label_norm, cut: 0}, {name: label_direction, cut: 0}, {name: dp, cut: 0}],
+     cut_hooks: [{cut: 0, name: clip_noise, params: {clip: 1.0e-2, noise_multiplier: 1.0, forward: false, grad: true}}]}
+  - {label: clip_z3.0, attacks: [{name: label_norm, cut: 0}, {name: label_direction, cut: 0}, {name: dp, cut: 0}],
+     cut_hooks: [{cut: 0, name: clip_noise, params: {clip: 1.0e-2, noise_multiplier: 3.0, forward: false, grad: true}}]}

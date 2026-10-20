@@ -1,0 +1,609 @@
+{
+ "config": {
+  "dataset": "mnist",
+  "train_subset": 15000,
+  "test_subset": 2000,
+  "batch_size": 64,
+  "epochs": 2,
+  "model": "cnn",
+  "cut": 1,
+  "device": "cuda",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "attacks": [
+   {
+    "name": "unsplit",
+    "cut": 0,
+    "params": {
+     "n_invert": 8,
+     "rounds": 30,
+     "input_steps": 20,
+     "model_steps": 20,
+     "lr": 0.01,
+     "tv": 0.1,
+     "every": 50
+    }
+   }
+  ],
+  "runs": [
+   {
+    "label": "cut0_conv",
+    "cut": 0
+   },
+   {
+    "label": "cut1_relu",
+    "cut": 1
+   },
+   {
+    "label": "cut2_pool",
+    "cut": 2
+   },
+   {
+    "label": "cut4_conv2",
+    "cut": 4
+   },
+   {
+    "label": "cut5_pool2",
+    "cut": 5
+   },
+   {
+    "label": "cut1_act_noise0.5",
+    "cut": 1,
+    "cut_hooks": [
+     {
+      "cut": 0,
+      "name": "gaussian_noise",
+      "params": {
+       "std": 0.5
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "results": [
+  {
+   "run": "cut0_conv",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.097428,
+     0.002231164718258156
+    ],
+    "leak_unsplit_mse": [
+     0.9800206666666667,
+     0.1871886621628921
+    ],
+    "leak_unsplit_psnr": [
+     10.598766666666666,
+     0.7702678386985484
+    ],
+    "leak_unsplit_clone_mse": [
+     93.455575,
+     17.643329897395756
+    ],
+    "leak_unsplit_ssim": [
+     0.028633333333333334,
+     0.026474579002003663
+    ],
+    "test_loss": [
+     0.08157933333333334,
+     0.004787871586971958
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9735,
+     0.0010000000000000009
+    ],
+    "time_s": [
+     21.643333333333334,
+     11.241842968718846
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.099948,
+     "leak_unsplit_mse": 0.872649,
+     "leak_unsplit_psnr": 10.9826,
+     "leak_unsplit_clone_mse": 92.796448,
+     "leak_unsplit_ssim": 0.0452,
+     "test_loss": 0.083202,
+     "test_samples": 2000,
+     "test_accuracy": 0.9725,
+     "time_s": 12.18,
+     "bytes_fwd": [
+      752640000
+     ]
+    },
+    {
+     "loss": 0.095704,
+     "leak_unsplit_mse": 0.871247,
+     "leak_unsplit_psnr": 11.1017,
+     "leak_unsplit_clone_mse": 76.151045,
+     "leak_unsplit_ssim": 0.0426,
+     "test_loss": 0.076191,
+     "test_samples": 2000,
+     "test_accuracy": 0.9745,
+     "time_s": 18.68,
+     "bytes_fwd": [
+      752640000
+     ]
+    },
+    {
+     "loss": 0.096632,
+     "leak_unsplit_mse": 1.196166,
+     "leak_unsplit_psnr": 9.712,
+     "leak_unsplit_clone_mse": 111.419232,
+     "leak_unsplit_ssim": -0.0019,
+     "test_loss": 0.085345,
+     "test_samples": 2000,
+     "test_accuracy": 0.9735,
+     "time_s": 34.07,
+     "bytes_fwd": [
+      752640000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut1_relu",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.09757133333333334,
+     0.002153298941933827
+    ],
+    "leak_unsplit_mse": [
+     0.9819463333333334,
+     0.153520865071603
+    ],
+    "leak_unsplit_psnr": [
+     10.572466666666667,
+     0.6146328361984363
+    ],
+    "leak_unsplit_clone_mse": [
+     53.372619,
+     24.634596301338735
+    ],
+    "leak_unsplit_ssim": [
+     0.0225,
+     0.020631044568804557
+    ],
+    "test_loss": [
+     0.08221366666666667,
+     0.004473547846322128
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9725,
+     0.0018027756377319655
+    ],
+    "time_s": [
+     20.486666666666665,
+     6.436927320805583
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.100029,
+     "leak_unsplit_mse": 0.895443,
+     "leak_unsplit_psnr": 10.866,
+     "leak_unsplit_clone_mse": 68.173945,
+     "leak_unsplit_ssim": 0.0335,
+     "test_loss": 0.085008,
+     "test_samples": 2000,
+     "test_accuracy": 0.9705,
+     "time_s": 18.83,
+     "bytes_fwd": [
+      752640000
+     ]
+    },
+    {
+     "loss": 0.096016,
+     "leak_unsplit_mse": 1.1592,
+     "leak_unsplit_psnr": 9.8661,
+     "leak_unsplit_clone_mse": 24.934991,
+     "leak_unsplit_ssim": -0.0013,
+     "test_loss": 0.077054,
+     "test_samples": 2000,
+     "test_accuracy": 0.974,
+     "time_s": 15.04,
+     "bytes_fwd": [
+      752640000
+     ]
+    },
+    {
+     "loss": 0.096669,
+     "leak_unsplit_mse": 0.891196,
+     "leak_unsplit_psnr": 10.9853,
+     "leak_unsplit_clone_mse": 67.008921,
+     "leak_unsplit_ssim": 0.0353,
+     "test_loss": 0.084579,
+     "test_samples": 2000,
+     "test_accuracy": 0.973,
+     "time_s": 27.59,
+     "bytes_fwd": [
+      752640000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut2_pool",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.09731733333333334,
+     0.002283725319151436
+    ],
+    "leak_unsplit_mse": [
+     0.9704533333333333,
+     0.1806385476755538
+    ],
+    "leak_unsplit_psnr": [
+     10.639533333333333,
+     0.7358302136589213
+    ],
+    "leak_unsplit_clone_mse": [
+     70.35545366666666,
+     25.602608169012964
+    ],
+    "leak_unsplit_ssim": [
+     0.032966666666666665,
+     0.029594988314465227
+    ],
+    "test_loss": [
+     0.082166,
+     0.005382047101243167
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9733333333333334,
+     0.001607275126832149
+    ],
+    "time_s": [
+     35.526666666666664,
+     0.6913995468130828
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.099816,
+     "leak_unsplit_mse": 0.862611,
+     "leak_unsplit_psnr": 11.0335,
+     "leak_unsplit_clone_mse": 86.341563,
+     "leak_unsplit_ssim": 0.0532,
+     "test_loss": 0.085195,
+     "test_samples": 2000,
+     "test_accuracy": 0.9715,
+     "time_s": 34.73,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.095338,
+     "leak_unsplit_mse": 1.178996,
+     "leak_unsplit_psnr": 9.7906,
+     "leak_unsplit_clone_mse": 40.825761,
+     "leak_unsplit_ssim": -0.001,
+     "test_loss": 0.075952,
+     "test_samples": 2000,
+     "test_accuracy": 0.9745,
+     "time_s": 35.97,
+     "bytes_fwd": [
+      188160000
+     ]
+    },
+    {
+     "loss": 0.096798,
+     "leak_unsplit_mse": 0.869753,
+     "leak_unsplit_psnr": 11.0945,
+     "leak_unsplit_clone_mse": 83.899037,
+     "leak_unsplit_ssim": 0.0467,
+     "test_loss": 0.085351,
+     "test_samples": 2000,
+     "test_accuracy": 0.974,
+     "time_s": 35.88,
+     "bytes_fwd": [
+      188160000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut4_conv2",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.097389,
+     0.0019474693835847543
+    ],
+    "leak_unsplit_mse": [
+     0.9978873333333333,
+     0.047812521480605184
+    ],
+    "leak_unsplit_psnr": [
+     10.4694,
+     0.24499161210131284
+    ],
+    "leak_unsplit_clone_mse": [
+     210.59202666666667,
+     27.011228636809285
+    ],
+    "leak_unsplit_ssim": [
+     0.005033333333333333,
+     0.00689951689129995
+    ],
+    "test_loss": [
+     0.08156966666666667,
+     0.005739874679235894
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9726666666666667,
+     0.0020207259421636875
+    ],
+    "time_s": [
+     44.47666666666667,
+     2.5672228834546735
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.099618,
+     "leak_unsplit_mse": 1.031998,
+     "leak_unsplit_psnr": 10.2499,
+     "leak_unsplit_clone_mse": 183.803244,
+     "leak_unsplit_ssim": 0.001,
+     "test_loss": 0.083701,
+     "test_samples": 2000,
+     "test_accuracy": 0.9705,
+     "time_s": 41.52,
+     "bytes_fwd": [
+      376320000
+     ]
+    },
+    {
+     "loss": 0.096017,
+     "leak_unsplit_mse": 1.018427,
+     "leak_unsplit_psnr": 10.4246,
+     "leak_unsplit_clone_mse": 237.820337,
+     "leak_unsplit_ssim": 0.0011,
+     "test_loss": 0.075069,
+     "test_samples": 2000,
+     "test_accuracy": 0.9745,
+     "time_s": 45.77,
+     "bytes_fwd": [
+      376320000
+     ]
+    },
+    {
+     "loss": 0.096532,
+     "leak_unsplit_mse": 0.943237,
+     "leak_unsplit_psnr": 10.7337,
+     "leak_unsplit_clone_mse": 210.152499,
+     "leak_unsplit_ssim": 0.013,
+     "test_loss": 0.085939,
+     "test_samples": 2000,
+     "test_accuracy": 0.973,
+     "time_s": 46.14,
+     "bytes_fwd": [
+      376320000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut5_pool2",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.09752366666666668,
+     0.002103424905560771
+    ],
+    "leak_unsplit_mse": [
+     1.0257013333333334,
+     0.00683811994142639
+    ],
+    "leak_unsplit_psnr": [
+     10.349133333333333,
+     0.08974220486110919
+    ],
+    "leak_unsplit_clone_mse": [
+     328.927358,
+     163.7024619703272
+    ],
+    "leak_unsplit_ssim": [
+     0.0010333333333333334,
+     5.7735026918962605e-05
+    ],
+    "test_loss": [
+     0.082237,
+     0.005332998031126584
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9725,
+     0.0013228756555323175
+    ],
+    "time_s": [
+     44.33,
+     3.49678423698117
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.099888,
+     "leak_unsplit_mse": 1.031998,
+     "leak_unsplit_psnr": 10.2499,
+     "leak_unsplit_clone_mse": 452.449542,
+     "leak_unsplit_ssim": 0.001,
+     "test_loss": 0.083293,
+     "test_samples": 2000,
+     "test_accuracy": 0.971,
+     "time_s": 47.58,
+     "bytes_fwd": [
+      94080000
+     ]
+    },
+    {
+     "loss": 0.09586,
+     "leak_unsplit_mse": 1.018427,
+     "leak_unsplit_psnr": 10.4246,
+     "leak_unsplit_clone_mse": 143.250171,
+     "leak_unsplit_ssim": 0.0011,
+     "test_loss": 0.076455,
+     "test_samples": 2000,
+     "test_accuracy": 0.9735,
+     "time_s": 44.78,
+     "bytes_fwd": [
+      94080000
+     ]
+    },
+    {
+     "loss": 0.096823,
+     "leak_unsplit_mse": 1.026679,
+     "leak_unsplit_psnr": 10.3729,
+     "leak_unsplit_clone_mse": 391.082361,
+     "leak_unsplit_ssim": 0.001,
+     "test_loss": 0.086963,
+     "test_samples": 2000,
+     "test_accuracy": 0.973,
+     "time_s": 40.63,
+     "bytes_fwd": [
+      94080000
+     ]
+    }
+   ]
+  },
+  {
+   "run": "cut1_act_noise0.5",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "mean_std": {
+    "loss": [
+     0.13442433333333334,
+     0.005078380089490476
+    ],
+    "leak_unsplit_mse": [
+     0.9734566666666666,
+     0.16541905623093536
+    ],
+    "leak_unsplit_psnr": [
+     10.62,
+     0.6741618870864775
+    ],
+    "leak_unsplit_clone_mse": [
+     134.971805,
+     39.8335617225902
+    ],
+    "leak_unsplit_ssim": [
+     0.031933333333333334,
+     0.029051735461643826
+    ],
+    "test_loss": [
+     0.115679,
+     0.013759750252093968
+    ],
+    "test_samples": [
+     2000,
+     0.0
+    ],
+    "test_accuracy": [
+     0.9631666666666666,
+     0.004536885862938733
+    ],
+    "time_s": [
+     51.623333333333335,
+     15.55787367648077
+    ]
+   },
+   "per_seed": [
+    {
+     "loss": 0.128677,
+     "leak_unsplit_mse": 0.878524,
+     "leak_unsplit_psnr": 10.9545,
+     "leak_unsplit_clone_mse": 118.280396,
+     "leak_unsplit_ssim": 0.0479,
+     "test_loss": 0.100442,
+     "test_samples": 2000,
+     "test_accuracy": 0.968,
+     "time_s": 53.53,
+     "bytes_fwd": [
+      752648460
+     ]
+    },
+    {
+     "loss": 0.138306,
+     "leak_unsplit_mse": 1.164465,
+     "leak_unsplit_psnr": 9.844,
+     "leak_unsplit_clone_mse": 180.435703,
+     "leak_unsplit_ssim": -0.0016,
+     "test_loss": 0.127197,
+     "test_samples": 2000,
+     "test_accuracy": 0.959,
+     "time_s": 66.14,
+     "bytes_fwd": [
+      752648460
+     ]
+    },
+    {
+     "loss": 0.13629,
+     "leak_unsplit_mse": 0.877381,
+     "leak_unsplit_psnr": 11.0615,
+     "leak_unsplit_clone_mse": 106.199316,
+     "leak_unsplit_ssim": 0.0495,
+     "test_loss": 0.119398,
+     "test_samples": 2000,
+     "test_accuracy": 0.9625,
+     "time_s": 35.2,
+     "bytes_fwd": [
+      752648460
+     ]
+    }
+   ]
+  }
+ ]
+}

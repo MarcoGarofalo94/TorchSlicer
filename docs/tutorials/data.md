@@ -66,6 +66,11 @@ session = ts.ClientSession(loaders, mode="parallel")
 Add your own with `ts.data.register_partitioner(name, fn)`, where
 `fn(labels, n_clients, rng, **params)` returns the index arrays.
 
+A dataset of your own works the same way: `ts.data.register_dataset(name, fn)`, with
+`fn(train, root, download, seed, **params)` returning a `Dataset` of `(input, label)` pairs.
+`data.dataset: name` then loads it, `data.params` are passed to `fn`, and the partitioners
+split it by its `targets` (or `groups`).
+
 ## Evaluation
 
 `sliced.train(..., eval_data=test_loader, eval_every=1)`, or `data.eval_every` with a

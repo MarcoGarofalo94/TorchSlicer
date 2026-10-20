@@ -1,0 +1,46 @@
+# SplitFed (Thapa et al., AAAI 2022), Table 5, FMNIST + LeNet: SL, SFL-V1, SFL-V2 with 5
+# clients (IID, equal), 200 global epochs of one local epoch, batch 1024, lr 0.004; the
+# number is the best test accuracy over the 200 epochs. The optimizer (Adam), the sequential
+# client order and the SFL-V2 round structure are from the authors' code
+# (github.com/chandra2thapa/SplitFed-When-Federated-Learning-Meets-Split-Learning, the
+# ResNet18/HAM10000 scripts: only those are public); the LeNet definition is not, SLPerf's is
+# used. See README.md for the deviations.
+training:
+  epochs: 200
+  optimizer: {name: Adam, params: {lr: 0.004}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+network: {device: auto}
+data:
+  dataset: fashion_mnist
+  root: data
+  partition: iid
+  batch_size: 1024
+  eval_every: 1
+sl:
+  setting: vanilla
+  clients: 5
+  client_mode: sequential
+  handoff: copy
+baseline:
+  paper:
+    title: "SplitFed: When Federated Learning Meets Split Learning"
+    url: https://arxiv.org/abs/2004.12088
+    table: "Table 5, FMNIST LeNet (normal 92.7 %)"
+  model: {name: lenet, params: {in_ch: 1, n_classes: 10, side: 28}}
+  metric: test_accuracy
+  report: best
+  seeds: [0, 1, 2]
+  smoke: {training: {epochs: 2}, data: {train_subset: 2048, test_subset: 512, batch_size: 256}}
+  synthetic: {shape: [1, 28, 28], classes: 10}
+  runs:
+    - label: sl
+      cuts: [2]
+      expected: {value: 0.904, tol: 0.01}
+    - label: sfl_v1
+      cuts: [2]
+      config: {sl: {handoff: keep, algorithm: splitfed_v1}}
+      expected: {value: 0.896, tol: 0.01}
+    - label: sfl_v2
+      cuts: [2]
+      config: {sl: {handoff: keep, algorithm: splitfed}}
+      expected: {value: 0.904, tol: 0.01}

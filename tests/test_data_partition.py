@@ -157,3 +157,20 @@ def test_feature_shift_rotate_and_loaders():
     l0, l1 = split.loaders(ds, 8, feature_shift=FeatureShift("noise", 1.0))
     assert torch.equal(next(iter(l0))[0], torch.zeros(8, 1, 4, 4))
     assert next(iter(l1))[0].abs().sum() > 0
+def test_register_dataset_is_used_by_build_data():
+    import torch
+    from torch.utils.data import TensorDataset
+    import torchslicer as ts
+
+    def toy(train, root, download, seed, n=12):
+        g = torch.Generator().manual_seed(seed + int(train))
+        ds = TensorDataset(torch.randn(n, 3, generator=g), torch.arange(n) % 2)
+        ds.targets = torch.arange(n) % 2
+        return ds
+    ts.data.register_dataset("toy_reg", toy)
+    assert "toy_reg" in ts.data.available_datasets()
+    cfg = ts.RunConfig()
+    cfg.data.dataset, cfg.data.params, cfg.data.batch_size = "toy_reg", {"n": 12}, 4
+    cfg.sl.clients = 2
+    train, test, split = ts.data.build_data(cfg)
+    assert len(train) == 2 and sum(len(i) for i in split.indices) == 12

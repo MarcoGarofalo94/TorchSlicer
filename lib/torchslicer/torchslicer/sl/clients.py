@@ -78,6 +78,14 @@ class ClientSession:
     def __len__(self) -> int:
         return sum(len(l) for l in self.loaders)
 
+    def n_samples(self, k: int) -> int:
+        """Client ``k``'s training samples (its loader's dataset size; else its batches)."""
+        loader = self.loaders[k]
+        try:
+            return len(loader.dataset)
+        except (AttributeError, TypeError):
+            return len(loader)
+
     def _order(self, clients):
         if self.mode == "sequential":
             for k in clients:
@@ -310,6 +318,7 @@ def algorithm_round_end(session, algorithm, adapter, clients: list, metrics: dic
     ``on_round_end``'s states go back to those clients; ``aggregate``'s client state is
     the new global model, given to every client (non-participants get it too, as in
     FedAvg). Returns ``aggregate``'s server state (``None``: unchanged)."""
+    metrics = {**metrics, "client_samples": [session.n_samples(k) for k in clients]}
     new = algorithm.on_round_end([session.states[k] for k in clients], metrics, round)
     if new is not None:
         new = list(new)

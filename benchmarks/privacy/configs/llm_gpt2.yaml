@@ -1,0 +1,25 @@
+# Embedding Recovery (Dong et al., USENIX Security 2025, white-box) on pretrained GPT-2
+# fine-tuned on Shakespeare (next-token prediction, 32-token sequences). The server knows the
+# client layers' weights (public pretrained model) and inverts the hidden states it
+# receives. Cut k = after the embedding + k blocks (stage 0 = embeddings). Budget per batch of
+# 4 sequences, 3 batches per run: 1000 AdamW steps, lr 1e-2 (paper: 5e4 steps, lr 5e-4).
+dataset: shakespeare
+model: gpt2
+seq_len: 32
+train_subset: 800
+test_subset: 128
+batch_size: 8
+epochs: 1
+optimizer: {name: AdamW, params: {lr: 5.0e-5}}
+cut: 1
+device: cuda
+seeds: [0, 1, 2]
+attacks:
+  - {name: embedding_recovery, cut: 0, params: {steps: 1000, lr: 0.01, n_invert: 4, every: 34}}
+runs:
+  - {label: cut1, cut: 1}
+  - {label: cut3, cut: 3}
+  - {label: cut6, cut: 6}
+  - {label: cut9, cut: 9}
+  - {label: cut1_act_noise0.1, cut: 1, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 0.1}}]}
+  - {label: cut1_act_noise1, cut: 1, cut_hooks: [{cut: 0, name: gaussian_noise, params: {std: 1.0}}]}

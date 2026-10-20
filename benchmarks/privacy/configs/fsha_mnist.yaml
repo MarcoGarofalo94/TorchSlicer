@@ -1,0 +1,28 @@
+# Feature-space hijacking (Pasquini et al., CCS 2021) vs passive attackers on MNIST.
+# The malicious server holds X_pub = the test set (disjoint from the clients' data, as in
+# the paper's setup). Controls at the same cut: the same networks without forging
+# (fsha forge=false) and the black-box inverse network (inversion, needs queries).
+# Same client optimizer and data for every run. The default pilot ends in a ReLU (the cut
+# activations are non-negative). Deviations from the paper: Adam 1e-3 for the
+# client (the run's task optimizer) instead of 1e-5, pilot/decoder lr 1e-4 instead of 1e-5,
+# ~1.4k setup iterations (3 epochs of 30k samples; the paper: MNIST reconstructs within 1e3).
+dataset: mnist
+train_subset: 30000
+test_subset: 2000
+batch_size: 64
+epochs: 3
+model: cnn
+cut: 2
+device: cuda
+seeds: [0, 1, 2]
+runs:
+  - {label: inversion_cut2, cut: 2, attacks: [{name: inversion, cut: 0, params: {n_aux: 2000}}]}
+  - {label: honest_cut2, cut: 2, attacks: [{name: fsha, cut: 0, params: {n_aux: 2000, forge: false}}]}
+  - {label: fsha_cut2, cut: 2, attacks: [{name: fsha, cut: 0, params: {n_aux: 2000}}]}
+  - {label: inversion_cut5, cut: 5, attacks: [{name: inversion, cut: 0, params: {n_aux: 2000}}]}
+  - {label: honest_cut5, cut: 5, attacks: [{name: fsha, cut: 0, params: {n_aux: 2000, forge: false}}]}
+  - {label: fsha_cut5, cut: 5, attacks: [{name: fsha, cut: 0, params: {n_aux: 2000}}]}
+  - label: fsha_cut5_nopeek10
+    cut: 5
+    attacks: [{name: fsha, cut: 0, params: {n_aux: 2000}}, {name: dcor, cut: 0}]
+    defences: [{name: nopeek, cut: 0, params: {alpha: 10.0}}]
