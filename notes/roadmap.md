@@ -484,10 +484,10 @@ shown in a Flower-based SplitFed baseline.
     SplitLoRA GPT2-S E2E **not reproduced** (BLEU 0.566 vs 0.694, 1 seed; split = centralized), plus
     `training.scheduler`, `ts.data.register_dataset`, frozen ties allowed in sessions. Owner 2026-10-19: stop
     spending time on it. Part 3 (7add05e, dc9d48d, 2026-10-19): `ts.CircularConv` (C3-SL hook) + C3-SL
-    VGG-16/CIFAR-10 baseline (runs in progress); `ts.SplitServer`/`ts.SplitClient` + Flower
+    VGG-16/CIFAR-10 baseline, **reproduced** (all 5 runs within 0.01, 3 seeds; e60a31d); `ts.SplitServer`/`ts.SplitClient` + Flower
     `split_client_app` (TorchSlicer clients in Flower's engine, 1 node = SplitFedAlgorithm exactly);
     fedavg single-client optimizer fix (#37); version 0.13.0. **Skipped (owner, 2026-10-19):**
-    local-loss/async. **Left:** C3-SL results + README, contributor guide check, merge.
+    local-loss/async. Contributor guide checked (docs/baselines.md, no change needed). **Left:** merge (owner's call).
 - **M14, real environment and testbed** (was M13; deferred from M3 on 2026-10-15, owner decision).
   - **Containers.** This container has no Docker or kubectl, so this runs in a fresh clone on a machine that
     has them:
