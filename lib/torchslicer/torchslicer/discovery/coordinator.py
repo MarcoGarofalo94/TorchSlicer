@@ -158,6 +158,11 @@ class CoordinatorDiscovery(BaseDiscovery):
             return list(self._nodes)
         return [n for n in self._nodes if all(t in n.tags for t in tag_filter)]
 
+    def known_nodes(self) -> list:
+        """Every node that has registered so far, in registration order (some may be down)."""
+        with self._cond:
+            return list(self._nodes)
+
     def idle_nodes(self) -> list:
         """Return nodes that registered but were not selected (index >= expected)."""
         with self._cond:

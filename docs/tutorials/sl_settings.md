@@ -330,6 +330,13 @@ aggregations (a dead server worker still stops the run). A node counts as dead o
 also fails a liveness probe, so a live client that raises an error stops the run. The
 history lists `clients_lost` and `batches_skipped`. `sl.round_deadline_s` stops scheduling
 a round's batches after that many seconds.
+
+Clients may also arrive late: with `sl.min_clients: m` the run starts once the server
+workers and `m` clients are up. At every round's start, a client that wasn't there, or
+that left and answers again (a restarted process, possibly at a new address), gets slice 0
+and joins. It starts from the last state given to every client (with
+`ts.SplitFedAlgorithm`, the latest aggregate), else from the initial weights. The history
+lists `clients_joined`.
 With `ts.run`, set `sl.client_nodes: true` with `sl.clients` (and `sl.client_mode`,
 `sl.handoff`): every node runs the same script, `data_fn()` returns one loader per
 client, and a client node keeps only its own. `python -m torchslicer launch --target

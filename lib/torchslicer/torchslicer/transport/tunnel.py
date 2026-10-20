@@ -451,6 +451,16 @@ class Router:
         except grpc.FutureTimeoutError:
             return False
 
+    def reset(self, address: str) -> None:
+        """Forget the direct channel to ``address`` (a node that died and came back): a
+        channel in reconnect backoff would wait out the backoff before dialing the new one."""
+        with self._lock:
+            ch = self._channels.pop(address, None)
+            for key in [k for k in self._calls if k[0] == address]:
+                del self._calls[key]
+        if ch is not None:
+            ch.close()
+
     def _direct(self, address: str):
         with self._lock:
             ch = self._channels.get(address)

@@ -291,3 +291,98 @@ def test_a_round_deadline_skips_the_rest_of_the_round():
                        round_deadline_s=0.5)
     total = sum(len(l) for l in _loaders())
     assert all(0 < e["batches_skipped"] < total for e in h)   # it ran some, not all
+
+
+# ── step 4b: clients that join late or come back ─────────────────────────────────
+
+class _PerRound:
+    """A client's data that differs per round (an in-process twin of a node restarted with
+    its full loader): round r iterates ``rounds[min(r, last)]``."""
+
+    def __init__(self, rounds):
+        self.rounds, self.r = rounds, -1
+
+    def __iter__(self):
+        self.r += 1
+        return iter(self.rounds[min(self.r, len(self.rounds) - 1)])
+
+    def __len__(self):
+        return len(self.rounds[-1])
+
+
+class _Join(ts.Algorithm):
+    """Twin: client ``k`` is absent in round 1; with ``reset``, it restarts round 2 from the
+    session's initial state (``reset`` = the session); ``base`` adds an aggregation."""
+
+    def __init__(self, k, reset=None, base=None):
+        self.k, self.reset, self.base = k, reset, base
+
+    def select_clients(self, available, round):
+        return [c for c in available if round != 1 or c != self.k or self.reset is not None]
+
+    def on_round_end(self, states, metrics, round):
+        out = self.base.on_round_end(states, metrics, round) if self.base else None
+        if self.reset is not None and round == 1:
+            out = list(out or states)
+            out[self.k] = self.reset._initial
+        return out
+
+    def aggregate(self, client_states, server_states, round):
+        return self.base.aggregate(client_states, server_states, round) if self.base else (None, None)
+
+
+def _late_run(algorithm, k, servicer=None, **sl):
+    """Client nodes where client ``k`` starts (again) at the end of round 1."""
+    cfg = _cfg()
+    for key, v in sl.items():
+        setattr(cfg.sl, key, v)
+    cfg.fault_tolerance.heartbeat_interval_s = 0.5
+    offsets = cfg.transport.listen_offsets()
+    servers = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg) for _ in range(2)]
+    ports = [free_port(offsets) for _ in range(C)]
+    start = lambda c, cls=None: ts.start_worker(ports[c], host="127.0.0.1", run_config=cfg,
+                                                data=_loaders()[c], client_index=c, servicer_class=cls)
+    workers = [start(c, servicer if c == k else None) if servicer or c != k else None for c in range(C)]
+
+    class _Restart(ts.TrainingCallback):
+        def on_epoch_end(self, epoch, metrics):
+            if epoch == 1:
+                if workers[k] is not None:
+                    workers[k].stop()
+                workers[k] = start(k)
+            return metrics
+
+    peers = [w.address for w in servers] + [f"127.0.0.1:{p}" for p in ports]
+    addr = f"127.0.0.1:{free_port(cfg.transport.listen_offsets(drives=True))}"
+    ex = ts.ClientNodesExecutor(discovery=StaticDiscovery(peers=peers), coordinator_addr=addr, run_config=cfg)
+    session = ts.RemoteSession(C, mode="parallel")
+    try:
+        h = ts.slice(_model(), cuts=CUTS, executor=ex).train(session, run_config=cfg, algorithm=algorithm,
+                                                            callbacks=[_Restart()])
+    finally:
+        for w in servers + workers:
+            if w is not None:
+                w.stop()
+    return [e["loss"] for e in h], session.states, h
+
+
+@pytest.mark.parametrize("aggregate", [False, True])
+def test_a_late_client_joins_at_the_next_round(aggregate):
+    base = ts.SplitFedAlgorithm if aggregate else None
+    ref, ref_states = _local("parallel", "copy", _Join(2, base=base() if base else None))
+    got, states, h = _nodes_late = _late_run(base() if base else None, 2, min_clients=2)
+    assert [round(x, 6) for x in got] == ref
+    _same_states(states, ref_states)
+    assert h[0]["clients_lost"] == [2] and h[1]["clients_joined"] == [2] and "clients_lost" not in h[1]
+
+
+def test_a_client_that_died_comes_back_from_the_initial_weights():
+    loaders = _loaders()
+    loaders[1] = _PerRound([loaders[1][:1], loaders[1]])   # 1 batch in round 1, all in round 2
+    session = ts.ClientSession(loaders, mode="parallel")
+    ref = [e["loss"] for e in ts.slice(_model(), cuts=CUTS).train(
+        session, run_config=_cfg(), algorithm=_Join(1, reset=session))]
+    got, states, h = _late_run(None, 1, servicer=_dies_at(1, 1))
+    assert [round(x, 6) for x in got] == ref
+    _same_states(states, session.states)
+    assert h[0]["clients_lost"] == [1] and h[1]["clients_joined"] == [1]

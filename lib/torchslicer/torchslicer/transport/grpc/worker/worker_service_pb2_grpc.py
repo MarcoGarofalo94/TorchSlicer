@@ -114,6 +114,11 @@ class WorkerServiceStub(object):
                 request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.StateBlob.SerializeToString,
                 response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
                 _registered_method=True)
+        self.set_peers = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/set_peers',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.PeersRequest.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+                _registered_method=True)
 
 
 class WorkerServiceServicer(object):
@@ -219,6 +224,13 @@ class WorkerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def set_peers(self, request, context):
+        """slice 1: the clients' addresses now
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -295,6 +307,11 @@ def add_WorkerServiceServicer_to_server(servicer, server):
             'set_state': grpc.unary_unary_rpc_method_handler(
                     servicer.set_state,
                     request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.StateBlob.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
+            ),
+            'set_peers': grpc.unary_unary_rpc_method_handler(
+                    servicer.set_peers,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.PeersRequest.FromString,
                     response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
             ),
     }
@@ -702,6 +719,33 @@ class WorkerService(object):
             target,
             '/torchslicer.worker.WorkerService/set_state',
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.StateBlob.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def set_peers(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/set_peers',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.PeersRequest.SerializeToString,
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
             options,
             channel_credentials,

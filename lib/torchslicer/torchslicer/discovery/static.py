@@ -49,6 +49,10 @@ class StaticDiscovery(BaseDiscovery):
             )
         return self._nodes[:expected]
 
+    def known_nodes(self) -> List[NodeInfo]:
+        """The configured peers (whether or not they are up)."""
+        return list(self._nodes)
+
     def watch(
         self,
         on_join:  Callable[[NodeInfo], None],

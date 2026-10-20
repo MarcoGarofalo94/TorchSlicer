@@ -1552,3 +1552,25 @@ invisible there.
   `keep` fetched the previous client's state for nothing.
 - Cost / limits: a batch abandoned mid-way may already have updated the server slices (the
   server steps before it sends the gradient back); this is inherent to losing the client.
+
+### Step 4b: clients that join late or come back (2026-10-20)
+- `sl.min_clients` (0 = all): the run starts with the server workers and at least that many
+  client nodes. The coordinator scans the discovery's `known_nodes()` (new on
+  `CoordinatorDiscovery` and `StaticDiscovery`; a node is up if `describe` answers in 1 s).
+  At each round's start (`_admit`), a missing or lost client that answers gets slice 0
+  (`_slice0()`), starts from `RemoteSession.broadcast` (the last state given to every client,
+  e.g. a SplitFed aggregate) or else the initial weights, and slice 1 learns its address
+  (new RPC `set_peers`; `""` = no client there). History: `clients_joined`.
+- **Bug found (in this step, before commit): a restarted client was admitted only half the
+  time.** Symptom: 2 of 4 identical runs left client 1 out of round 2 (`clients_lost` again,
+  loss 1.357295 instead of 1.375115). Root cause: the coordinator's `Router` caches one gRPC
+  channel per address; the channel to the dead client was in reconnect backoff, so the 1 s
+  readiness probe expired before it redialed, although the new process was up. Fix:
+  `Router.reset(address)` drops the cached channel (and its call objects); `_admit` resets
+  every candidate address before probing. Cost: one new channel per absent client per round.
+  After: 6/6 runs identical, and the late-join / rejoin tests pass 3/3 repeats.
+- Checked: a client absent in round 1 joins round 2 = an in-process twin that leaves it out
+  of round 1 (with and without SplitFed: it gets the aggregate, as non-participants do
+  in-process); a client killed in round 1 and restarted at the same address rejoins round 2
+  from the initial weights = a twin that resets it after round 1 (losses and every client's
+  weights). A fixed peer list that can't meet the counts fails at once, not after the timeout.

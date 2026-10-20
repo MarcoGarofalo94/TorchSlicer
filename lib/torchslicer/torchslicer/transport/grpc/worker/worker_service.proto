@@ -19,6 +19,7 @@ service WorkerService {
     rpc client_step      (ClientStepRequest) returns (Ack);             // run its next batch as batch_id
     rpc get_state        (StateRequest)     returns (StateBlob);        // slice weights + optimizer state
     rpc set_state        (StateBlob)        returns (Ack);
+    rpc set_peers        (PeersRequest)     returns (Ack);              // slice 1: the clients' addresses now
 }
 
 // NAT traversal (torchslicer/transport/tunnel.py). A node that accepts no connections
@@ -217,6 +218,11 @@ message ClientStepRequest {
     uint32 batch_id = 1;
     uint32 epoch    = 2;  // a new epoch restarts the loader
     uint32 index    = 3;  // the batch's index in the client's epoch (checked)
+}
+
+// Slice 1 with client nodes: every client's address, by client index ("" = none yet).
+message PeersRequest {
+    repeated string prev_workers = 1;
 }
 
 message StateRequest {

@@ -172,7 +172,9 @@ class RemoteSession(ClientSession):
 
     A client node that dies leaves the run (``sl.drop_failed_clients``): its remaining
     batches are skipped, no state moves to or from it, and it takes no part in later
-    rounds. ``round_deadline_s`` (``sl.round_deadline_s``) stops scheduling a round's
+    rounds, unless it comes back: a client that wasn't up at the start (``sl.min_clients``)
+    or that left and answers again joins at a round's start, from ``broadcast`` (the last
+    state given to every client, e.g. an aggregate) or else the initial weights. ``round_deadline_s`` (``sl.round_deadline_s``) stops scheduling a round's
     batches after that many seconds. ``last_round`` says what happened in the last round:
     ``{"lost": [clients], "skipped": batches not run}``.
     """
@@ -185,6 +187,8 @@ class RemoteSession(ClientSession):
         self.round_deadline_s = 0.0
         self.last_round: dict = {"lost": [], "skipped": 0}
         self._handed = None     # sequential copy: the state the current client started from
+        self.broadcast = None   # the last state given to every client (e.g. an aggregate):
+                                # a client that joins later starts from it
 
     def bind(self, nodes) -> None:
         """Called by the executor before each round: ``nodes.info(k)`` gives client ``k``'s
@@ -287,6 +291,8 @@ class RemoteSession(ClientSession):
         for k, st in enumerate(states):
             if st is not None and st is not self.states[k] and not self._nodes.lost(k):
                 self._nodes.set(k, st)
+        if states and states[0] is not None and all(st is states[0] for st in states):
+            self.broadcast = states[0]
         self.states = states
 
     def finish(self, adapter=None) -> None:

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import threading
+import time
 
 import grpc
 import torch
@@ -111,6 +112,8 @@ class ClientNodesExecutor(DistributedExecutor):
         self._inflight = None         # the client of the batch in flight
         self._abandoned = False       # its node died: the batch won't complete
         self._seq = 0                 # batches sent: batch ids stay unique whatever is skipped
+        self._rep = None              # the client proxy standing for slice 0 in the chain
+        self._joined: list = []       # clients that joined at this round's start
         self._setting = "vanilla"    # client nodes host slice 0; this process hosts none
         self.n_clients = int(cfg.sl.clients or 1)
         self._clients: list = []     # client proxies, by client index (client 0 is also _proxies[0])
@@ -150,46 +153,82 @@ class ClientNodesExecutor(DistributedExecutor):
     # ── nodes ────────────────────────────────────────────────────────────────────
 
     def _discover(self, n: int) -> list:
-        """``n - 1`` server workers plus ``n_clients`` client nodes. Returns the slice
-        chain ``[client 0, server 1, ..., server n-1]``; every client is in ``_clients``."""
-        nodes = self._discover_remote(n - 1 + self.n_clients)
+        """``n - 1`` server workers plus the client nodes up now (all of them, or at least
+        ``sl.min_clients``; the others may join at a round's start). Returns the slice chain
+        ``[a client, server 1, ..., server n-1]``: the first client present stands for slice
+        0 in the plan; every client is in ``_clients`` (``None`` = not there yet)."""
+        need = int(self._run_config.sl.min_clients or 0) or self.n_clients
+        if not hasattr(self._discovery, "known_nodes"):     # a custom backend: all, as listed
+            servers, clients = self._classify(self._discover_remote(n - 1 + self.n_clients),
+                                              timeout=float(self._run_config.discovery.timeout))
+        else:
+            from ..discovery import StaticDiscovery
+            fixed = isinstance(self._discovery, StaticDiscovery)     # no node will register later
+            deadline = time.monotonic() + float(self._run_config.discovery.timeout)
+            while True:
+                known = self._discovery.known_nodes()
+                servers, clients = self._classify(known, timeout=1.0)
+                enough = len(servers) >= n - 1 and len(clients) >= need
+                all_up = len(servers) + len(clients) == len(known)
+                if enough or (fixed and all_up) or time.monotonic() > deadline:
+                    break
+                time.sleep(0.5)
+        if len(clients) < need or len(servers) < n - 1:
+            raise ValueError(f"sl.client_nodes with {n} slices and {self.n_clients} clients needs "
+                             f"{need} client nodes and {n - 1} server workers; got "
+                             f"{len(clients)} and {len(servers)}")
+        servers = servers[:n - 1]
+        cfg = self._run_config
+        self._clients = [None] * self.n_clients
+        for k, nd in clients.items():
+            proxy = super()._make_proxy(0, nd)
+            proxy.connect(self._router, tensor_transport=cfg.transport.tensor,
+                          tensor_port_offset=cfg.transport.tensor_port_offset)
+            self._clients[k] = proxy
+        self._lost |= {k for k in range(self.n_clients) if self._clients[k] is None}
+        if self._lost:
+            _LOG.info("starting without clients %s: they may join at a round's start", sorted(self._lost))
+        first = min(clients)
+        self._rep = self._clients[first]
+        return [clients[first], *servers]
+
+    def _classify(self, nodes: list, timeout: float) -> tuple:
+        """``(servers, {client index: node})`` among ``nodes``; a node whose tags can't be
+        read within ``timeout`` (not up) is left out."""
         clients, servers = {}, []
         for nd in nodes:
-            tags = list(nd.tags) or self._describe_tags(nd.address)
+            try:
+                tags = list(nd.tags) or self._describe_tags(nd.address, timeout)
+            except (TimeoutError, grpc.RpcError):
+                continue
             if "client" not in tags:
                 servers.append(nd)
                 continue
             k = next((int(t.split("=", 1)[1]) for t in tags if t.startswith("client=")), None)
-            if k is None or not 0 <= k < self.n_clients or k in clients:
+            if k is None or not 0 <= k < self.n_clients or (k in clients and clients[k].address != nd.address):
                 raise ValueError(f"client node {nd.address}: client index {k} is missing, out of "
                                  f"range for sl.clients={self.n_clients}, or taken")
             clients[k] = nd
-        if len(clients) != self.n_clients or len(servers) != n - 1:
-            raise ValueError(f"sl.client_nodes with {n} slices and {self.n_clients} clients needs "
-                             f"{self.n_clients} client nodes and {n - 1} server workers; got "
-                             f"{len(clients)} and {len(servers)}")
-        self._client_nodes = [clients[k] for k in range(self.n_clients)]
-        self._clients = [self._make_proxy(0, nd) for nd in self._client_nodes]
-        cfg = self._run_config
-        for proxy in self._clients[1:]:
-            proxy.connect(self._router, tensor_transport=cfg.transport.tensor,
-                          tensor_port_offset=cfg.transport.tensor_port_offset)
-        return [self._client_nodes[0], *servers]
+        return servers, clients
 
-    def _describe_tags(self, address: str) -> list:
+    def _describe_tags(self, address: str, timeout: float) -> list:
         """A node's declared tags from the node itself (static discovery has none)."""
         from ..transport.grpc.worker import worker_service_pb2_grpc
-        self._router.wait_ready(address, float(self._run_config.discovery.timeout))
+        self._router.wait_ready(address, timeout)
         stub = worker_service_pb2_grpc.WorkerServiceStub(self._router.channel(address))
-        return list(stub.describe(worker_service_pb2.DescribeRequest(), timeout=120.0).tags)
+        return list(stub.describe(worker_service_pb2.DescribeRequest(), timeout=max(timeout, 5.0)).tags)
 
     def _make_proxy(self, i: int, node):
-        if i == 0 and self._clients and node is self._client_nodes[0]:
-            return self._clients[0]  # client 0 is slice 0 of the chain
+        if i == 0 and self._clients:
+            return self._rep         # the first client present is slice 0 of the chain
         return super()._make_proxy(i, node)
 
+    def _other_clients(self) -> list:
+        """The client proxies besides the one standing for slice 0 in the chain."""
+        return [p for p in self._clients if p is not None and p is not self._rep]
+
     def _open_tunnels(self) -> None:
-        extra = self._clients[1:]
+        extra = self._other_clients()
         self._proxies.extend(extra)  # the base opens tunnels to every proxy
         try:
             super()._open_tunnels()
@@ -199,21 +238,79 @@ class ClientNodesExecutor(DistributedExecutor):
     def _probe_nodes(self) -> None:
         super()._probe_nodes()
         timeout = float(self._run_config.discovery.timeout)
-        for proxy in self._clients[1:]:
+        for proxy in self._other_clients():
             self._router.wait_ready(proxy.address, timeout)
 
     def _order_nodes(self) -> None:
-        """Slice 0 is the clients' (client 0 stands for them in the plan); the server
+        """Slice 0 is the clients' (one of them stands for them in the plan); the server
         keeps discovery order."""
 
     def _start_heartbeats(self, interval: float, timeout: float) -> None:
         super()._start_heartbeats(interval, timeout)
-        n = len(self._proxies)
-        for j, proxy in enumerate(self._clients[1:], start=1):
-            t = threading.Thread(target=self._heartbeat_loop, args=(n + j - 1, proxy, interval, timeout),
-                                 daemon=True, name=f"heartbeat-client-{j}")
-            self._heartbeat_threads.append(t)
-            t.start()
+        self._hb = (interval, timeout)
+        for proxy in self._other_clients():
+            self._watch_client(proxy)
+
+    def _watch_client(self, proxy) -> None:
+        k = self._clients.index(proxy)
+        interval, timeout = self._hb
+        t = threading.Thread(target=self._heartbeat_loop, args=(len(self._proxies) + k, proxy, interval, timeout),
+                             daemon=True, name=f"heartbeat-client-{k}")
+        self._heartbeat_threads.append(t)
+        t.start()
+
+    def _admit(self) -> None:
+        """At a round's start: a client node that wasn't there, or that left, and now
+        answers, gets slice 0 and joins (from the last broadcast client state, e.g. an
+        aggregate, else the initial weights); slice 1 learns its address."""
+        missing = sorted(self._lost)
+        if not missing or not hasattr(self._discovery, "known_nodes"):
+            return
+        live = {p.address for p in self._proxies} | {p.address for p in self._other_clients()
+                                                     if self._clients.index(p) not in self._lost}
+        candidates = [nd for nd in self._discovery.known_nodes() if nd.address not in live]
+        for nd in candidates:
+            self._router.reset(nd.address)     # dial afresh: it may be a new process there
+        _, found = self._classify(candidates, timeout=1.0)
+        joined = []
+        for k in missing:
+            nd = found.get(k)
+            if nd is None:
+                continue
+            try:
+                self._join(k, nd)
+                joined.append(k)
+            except grpc.RpcError as e:
+                _LOG.warning("client %s at %s didn't join: %s", k, nd.address, e)
+        if joined:
+            self._proxies[1].stub().set_peers(worker_service_pb2.PeersRequest(
+                prev_workers=[p.address if p is not None and k not in self._lost else ""
+                              for k, p in enumerate(self._clients)]), timeout=60.0)
+            _LOG.info("clients joined %s", joined)
+        self._joined = joined
+
+    def _join(self, k: int, node) -> None:
+        cfg = self._run_config
+        proxy = super()._make_proxy(0, node)
+        proxy.connect(self._router, tensor_transport=cfg.transport.tensor,
+                      tensor_port_offset=cfg.transport.tensor_port_offset)
+        self._router.wait_ready(proxy.address, 10.0)
+        self._init_worker(proxy, self._slice0(), phase="join")
+        state = getattr(self._session, "broadcast", None)
+        if state is not None:
+            buf = io.BytesIO()
+            torch.save(state[0], buf)
+            proxy.stub().set_state(worker_service_pb2.StateBlob(data=buf.getvalue()), timeout=300.0)
+            self._state_bytes += buf.tell()
+        old = self._clients[k]
+        self._clients[k] = proxy
+        if old is self._rep:         # the chain's slice 0 stand-in left: this one takes its place
+            self._rep = self._proxies[0] = proxy
+        with self._lock:
+            self._lost.discard(k)
+        self._client_info.pop(k, None)
+        if getattr(self, "_hb", None):
+            self._watch_client(proxy)
 
     # ── slices ───────────────────────────────────────────────────────────────────
 
@@ -231,12 +328,13 @@ class ClientNodesExecutor(DistributedExecutor):
                                  "parameter tied across server slices")
         n = len(self._proxies)
         tied = build_tied_configs(parts, [p.address for p in self._proxies])
-        clients = [p.address for p in self._clients]
+        clients = [p.address if p is not None else "" for p in self._clients]
         last = self._proxies[-1].address
         import uuid
         token = uuid.uuid4().hex
+        self._slice0_args = (n, parts[0], partitions[0], tied[0], token, last)
         for i, partition in enumerate(partitions):
-            targets = self._clients if i == 0 else [self._proxies[i]]
+            targets = [p for p in self._clients if p is not None] if i == 0 else [self._proxies[i]]
             for proxy in targets:
                 slice_cfg = self._slice_config(i, n, parts[i], partition, tied[i], token)
                 if i == 0:
@@ -250,6 +348,13 @@ class ClientNodesExecutor(DistributedExecutor):
                 res = self._init_worker(proxy, slice_cfg, phase=phase)
                 _LOG.info("worker %s complete slice=%s address=%s hostname=%s", phase, i,
                           proxy.address, res.hostname)
+
+    def _slice0(self):
+        """The ``SliceConfig`` every client node gets (also a client joining later)."""
+        n, layers, partition, tied, token, last = self._slice0_args
+        slice_cfg = self._slice_config(0, n, layers, partition, tied, token)
+        slice_cfg.label_worker = last
+        return slice_cfg
 
     def _slice_config(self, i: int, n: int, partition_layers: list, partition, tied, token: str):
         cfg = self._run_config
@@ -271,7 +376,7 @@ class ClientNodesExecutor(DistributedExecutor):
     def _log_plan(self, model_graph, partitions) -> None:
         super()._log_plan(model_graph, partitions)
         _LOG.info("client nodes count=%s addresses=%s", len(self._clients),
-                  [p.address for p in self._clients])
+                  [p.address if p is not None else None for p in self._clients])
 
     # ── training ─────────────────────────────────────────────────────────────────
 
@@ -285,6 +390,8 @@ class ClientNodesExecutor(DistributedExecutor):
                              f"{self.n_clients}")
         self._epoch, self._state_bytes = epoch, 0
         self._session = data_loader
+        self._joined = []
+        self._admit()
         data_loader.round_deadline_s = float(self._run_config.sl.round_deadline_s or 0.0)
         data_loader.bind(_ClientNodes(self))
         if len(self._lost) == self.n_clients:
@@ -292,6 +399,8 @@ class ClientNodesExecutor(DistributedExecutor):
         out = super().train_epoch(data_loader, epoch, verbose, total_epochs)
         out["bytes_state"] = self._state_bytes
         last = data_loader.last_round
+        if self._joined:
+            out["clients_joined"] = self._joined
         if last["lost"]:
             out["clients_lost"] = last["lost"]
         if last["skipped"]:
@@ -449,8 +558,8 @@ class ClientNodesExecutor(DistributedExecutor):
                 self._session.fetch_states()
             except Exception as e:
                 _LOG.warning("final client states not read: %s", e)
-        for k, proxy in enumerate(self._clients[1:], start=1):
-            if k in self._lost:
+        for k, proxy in enumerate(self._clients):
+            if k in self._lost or proxy is None or proxy is self._rep:   # the base shuts _rep down
                 continue
             try:
                 proxy.stub().shutdown(worker_service_pb2.ShutdownRequest(run_id=self._run_id))

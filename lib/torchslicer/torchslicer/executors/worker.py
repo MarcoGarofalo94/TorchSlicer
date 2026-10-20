@@ -874,7 +874,7 @@ class WorkerServicer(
                 if self._tensor_transport == "nccl":
                     raise ValueError("client nodes (sl.client_nodes) don't support "
                                      "transport.tensor=nccl: its process group is fixed at init")
-                self._prev_peers = [(a, *self._peer_links(a)) for a in request.prev_workers]
+                self._prev_peers = self._client_links(request.prev_workers)
             if request.label_worker:
                 self._label_stub = worker_service_pb2_grpc.WorkerServiceStub(
                     channel(request.label_worker))
@@ -965,6 +965,26 @@ class WorkerServicer(
         if self._tensor_transport == "ipc" and _is_same_machine(address):
             return stub, _IpcPeerClient(_tensor_addr(address, self._tensor_port_offset), tcp_client)
         return stub, tcp_client
+
+    def _client_links(self, addresses) -> list:
+        """``[(address, stub, tensor client)]`` per client; ``""`` = no client node there yet."""
+        return [(a, *self._peer_links(a)) if a else ("", None, None) for a in addresses]
+
+    def set_peers(self, request, context):
+        """Slice 1 with client nodes: the clients' addresses now (a client joined, or came
+        back at another address). Runs on the compute pool, between batches."""
+        def _update():
+            old = self._prev_peers
+            self._prev_peers = self._client_links(request.prev_workers)
+            for _, _, t in old:          # a client back at the same address is a new process
+                if t is not None:
+                    t.close()
+            if self.nat and not self.router.relay:
+                for a in request.prev_workers:
+                    if a:
+                        self.router.keep(a)
+        self._pool.submit(_update).result()
+        return worker_service_pb2.Ack(batch_id=0)
 
     def _prev_for(self, batch_id: int) -> tuple:
         """``(address, stub, tensor client)`` of the slice the gradient of ``batch_id`` goes
