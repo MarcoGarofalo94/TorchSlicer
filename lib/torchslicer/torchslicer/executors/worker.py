@@ -685,6 +685,7 @@ class WorkerServicer(
 
         self._tied_cond = threading.Condition()
         self._data_lock = threading.Lock()
+        self._round_done: dict = {}   # client_round: batch -> Event, set when its backward is done
         self._dist_group  = None  # torch.distributed ProcessGroup for NCCL transport; None otherwise
         self._nccl_future = None  # pending rendezvous Future; waited on before first NCCL transfer
         self._nccl_meta   = futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="nccl-meta")
@@ -767,10 +768,8 @@ class WorkerServicer(
                     batch_id, tensor, ctx_bytes = _read_tensor_frame_rest(conn, recv_buf)
                     with _tracer.extract_context(ctx_bytes):
                         if kind == b"F":
-                            self._pool.submit(
-                                _tracer.propagate_to_thread(self._forward_tensor),
-                                batch_id, tensor, generation,
-                            )
+                            self._submit_forward(batch_id, self._forward_tensor,
+                                                 batch_id, tensor, generation)
                         else:
                             self._pool.submit(
                                 _tracer.propagate_to_thread(self._backward_tensor),
@@ -781,10 +780,8 @@ class WorkerServicer(
                     batch_id, tensor, ctx_bytes = _read_ipc_frame_rest(conn)
                     with _tracer.extract_context(ctx_bytes):
                         if kind == b"f":
-                            self._pool.submit(
-                                _tracer.propagate_to_thread(self._forward_tensor),
-                                batch_id, tensor, generation,
-                            )
+                            self._submit_forward(batch_id, self._forward_tensor,
+                                                 batch_id, tensor, generation)
                         else:
                             self._pool.submit(
                                 _tracer.propagate_to_thread(self._backward_tensor),
@@ -819,6 +816,8 @@ class WorkerServicer(
         self._next_tensor = None
         self._prev_tensor = None
         self._prev_peers: list = []   # [(address, stub, tensor client)] by client index (M10)
+        self._gate_batch = None       # _gated(): the batch in flight on this slice
+        self._gate_parked: list = []  # ... and forwards of later batches, in arrival order
         self._label_stub = None       # a client node: the last slice, for its labels
         self._data_epoch = None       # a client node: the epoch its loader iterator is on
         self._data_iter = None
@@ -1405,6 +1404,29 @@ class WorkerServicer(
         self._drive_batch(request.batch_id, inputs, labels)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
 
+    def client_round(self, request, context):
+        """``sl.client_schedule: concurrent``: run this round's batches of the loader (from
+        its start) as ``batch_ids``, one in flight: each batch's labels and input go out,
+        then the next waits for this slice's backward of the previous. Returns when the last
+        is done; a fatal error here, or a re-init / shutdown (new generation), ends it."""
+        loader = self._client_data()
+        generation = self._generation
+        with self._data_lock:
+            self._data_epoch, self._data_iter, self._data_index = request.epoch, iter(loader), 0
+            for batch_id in request.batch_ids:
+                inputs, labels = next(self._data_iter)
+                self._data_index += 1
+                done = threading.Event()
+                with self._lock:
+                    self._round_done[batch_id] = done
+                self._drive_batch(batch_id, inputs, labels)
+                while not done.wait(timeout=1.0):
+                    if self._fatal_error is not None:
+                        raise RuntimeError(f"client_round: {self._fatal_error['message']}")
+                    if self._generation != generation:
+                        raise RuntimeError("client_round: the slice was re-initialized or shut down")
+        return worker_service_pb2.Ack(batch_id=request.batch_ids[-1] if request.batch_ids else 0)
+
     def _client_data(self):
         if self.data is None:
             raise RuntimeError("this worker is not a client node: it has no data (start it "
@@ -1513,8 +1535,46 @@ class WorkerServicer(
 
     def forward(self, request, context):
         generation = self._generation
-        self._pool.submit(_tracer.propagate_to_thread(self._forward), request, generation)
+        if request.label.data:
+            self._pool.submit(_tracer.propagate_to_thread(self._forward), request, generation)
+        else:
+            self._submit_forward(request.batch_id, self._forward, request, generation)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
+
+    def _gated(self) -> bool:
+        """Slice 1 of a server of several slices, serving client nodes: with clients
+        running at once (``sl.client_schedule: concurrent``) its batches would interleave
+        forward and backward, and a step would change weights a pending backward still
+        needs. So it takes one batch at a time (all its micro-batches), end to end."""
+        return bool(self._prev_peers) and not self.is_last
+
+    def _submit_forward(self, batch_id: int, fn, *args) -> None:
+        """Queue a forward on the compute pool; on a gated slice, park it while another
+        batch is in flight (never block the pool: that batch's backward runs there)."""
+        if self._gated():
+            b = batch_id // self._n_micro
+            with self._lock:
+                if self._gate_batch is not None and self._gate_batch != b:
+                    self._gate_parked.append((batch_id, fn, args))
+                    return
+                self._gate_batch = b
+        self._pool.submit(_tracer.propagate_to_thread(fn), *args)
+
+    def _gate_release(self, batch_id: int) -> None:
+        """The gated slice finished ``batch_id``'s backward: admit the next parked batch."""
+        if not self._gated():
+            return
+        with self._lock:
+            if self._gate_batch != batch_id // self._n_micro:
+                return
+            self._gate_batch, admit = None, []
+            if self._gate_parked:
+                nxt = self._gate_parked[0][0] // self._n_micro
+                admit = [p for p in self._gate_parked if p[0] // self._n_micro == nxt]
+                self._gate_parked = [p for p in self._gate_parked if p[0] // self._n_micro != nxt]
+                self._gate_batch = nxt
+        for _, fn, args in admit:
+            self._pool.submit(_tracer.propagate_to_thread(fn), *args)
 
     def backward(self, request, context):
         generation = self._generation
@@ -2031,7 +2091,11 @@ class WorkerServicer(
         self._compute_s += self._clock() - t0
 
         del out
-        self._send_backward(batch_id, grad, is_last_micro, generation)
+        try:
+            self._send_backward(batch_id, grad, is_last_micro, generation)
+        finally:
+            if is_last_micro:
+                self._gate_release(batch_id)
 
     def _run_backward_last(self, batch_id: int, out: torch.Tensor,
                            x_ref: torch.Tensor, label: torch.Tensor, generation: int):
@@ -2157,6 +2221,10 @@ class WorkerServicer(
                 batch_id=batch_id,
                 run_id=self._run_id,
             ))
+            with self._lock:
+                done = self._round_done.pop(batch_id // self._n_micro, None)
+            if done is not None:
+                done.set()
             self._profiler.mark_idle_start("fwd")
             self._profiler.end_batch()
 

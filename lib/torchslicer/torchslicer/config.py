@@ -308,6 +308,13 @@ class SLConfig:
                    (env: SL_MIN_CLIENTS)
         round_deadline_s: client nodes: a round schedules no batch after this many seconds;
                    the rest of the round is skipped (0 = no deadline)  (env: SL_ROUND_DEADLINE_S)
+        client_schedule: client nodes: "lockstep" (one batch in flight, the coordinator
+                   drives each one: = the in-process session) | "concurrent" (each client runs
+                   its round's batches itself, many clients at once; the server takes batches
+                   as they arrive, so losses differ from the in-process session)
+                   (env: SL_CLIENT_SCHEDULE)
+        max_concurrent_clients: concurrent schedule: clients running at once (0 = every
+                   selected client)  (env: SL_MAX_CONCURRENT_CLIENTS)
         client_states: where a session keeps the clients' states: "cpu" | "gpu" |
                    "cuda:i" | "auto" (the slices' GPU if they fit, else host RAM). A run
                    whose states don't fit in 80 % of the free memory stops before
@@ -331,6 +338,8 @@ class SLConfig:
     drop_failed_clients: bool  = True
     min_clients:         int   = 0
     round_deadline_s:    float = 0.0
+    client_schedule:     str   = "lockstep"
+    max_concurrent_clients: int = 0
     algorithm:           str   = ""
     client_states:       str   = "cpu"
     client_profiles:     list  = field(default_factory=list)
@@ -702,6 +711,8 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("CLIENT_INDEX",           lambda cfg, v: setattr(cfg.sl, "client_index",        int(v))),
     ("SL_DROP_FAILED_CLIENTS", lambda cfg, v: setattr(cfg.sl, "drop_failed_clients", _parse_bool(v))),
     ("SL_MIN_CLIENTS",         lambda cfg, v: setattr(cfg.sl, "min_clients",         int(v))),
+    ("SL_CLIENT_SCHEDULE",     lambda cfg, v: setattr(cfg.sl, "client_schedule",     v.strip().lower())),
+    ("SL_MAX_CONCURRENT_CLIENTS", lambda cfg, v: setattr(cfg.sl, "max_concurrent_clients", int(v))),
     ("SL_ROUND_DEADLINE_S",    lambda cfg, v: setattr(cfg.sl, "round_deadline_s",    float(v))),
 )
 

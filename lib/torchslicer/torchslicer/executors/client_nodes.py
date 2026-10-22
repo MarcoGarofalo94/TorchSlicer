@@ -23,6 +23,7 @@ the server, in discovery order.
 """
 from __future__ import annotations
 
+import concurrent.futures as cf
 import io
 import os
 import threading
@@ -33,14 +34,15 @@ import torch
 
 from ..algorithm.base import overridden
 from ..core.tied import find_tied_parameters
-from ..sl.clients import ClientBatch, RemoteSession
+from ..sl.clients import ClientBatch, RemoteSession, select_clients
 from ..transport.grpc.worker import worker_service_pb2
 from ..monitor.process_logger import get_logger
 from ..core.split_layer import SplitLayer
 from ..sl.hooks import resolve_cut_hooks
 from ..sl.metrics import CommMeter
 from ..sl.roles import Placement
-from .distributed import DistributedExecutor, build_tied_configs, _build_layer_configs, _PHASES
+from .distributed import (DistributedExecutor, WorkerFailureError, build_tied_configs,
+                          _build_layer_configs, _PHASES)
 
 _LOG = get_logger("torchslicer.client_nodes")
 _MAX_BATCH_ID = 2 ** 32
@@ -127,6 +129,19 @@ class ClientNodesExecutor(DistributedExecutor):
         self._epoch = 0
         self._session = None         # the RemoteSession trained on: its states are read at teardown
         self._per_client = False     # SplitFed V1: the server workers keep one copy per client
+        schedule = (cfg.sl.client_schedule or "lockstep").strip().lower()
+        if schedule not in ("lockstep", "concurrent"):
+            raise ValueError(f"sl.client_schedule: 'lockstep' or 'concurrent', not {schedule!r}")
+        self._concurrent = schedule == "concurrent"
+        if self._concurrent:
+            # a sequential session is refused when its round is planned (RemoteSession.plan_round)
+            refused = {"fault_tolerance.enabled (recovery replays a lockstep round)":
+                           cfg.fault_tolerance.enabled,
+                       "sl.round_deadline_s (clients run their rounds by themselves)":
+                           bool(cfg.sl.round_deadline_s)}
+            for what, bad in refused.items():
+                if bad:
+                    raise ValueError(f"sl.client_schedule concurrent doesn't support {what} yet")
 
     def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict,
               mixed_precision: bool = False, n_micro_batches: int = 1, callbacks: list = None,
@@ -140,6 +155,9 @@ class ClientNodesExecutor(DistributedExecutor):
             from ..algorithm.registry import get as _get_algo
             algorithm = _get_algo(self._run_config.sl.algorithm)
         self._per_client = bool(algorithm is not None and algorithm.needs_per_client_server_state())
+        if self._per_client and self._concurrent:
+            raise ValueError("sl.client_schedule concurrent doesn't support per-client server copies "
+                             "(SplitFed V1) yet: the server swaps a client's copy in at its forward")
         if self._per_client and self._run_config.fault_tolerance.enabled:
             raise ValueError("fault_tolerance.enabled with per-client server copies (SplitFed V1) "
                              "isn't supported on client nodes yet: the copies aren't checkpointed")
@@ -411,7 +429,10 @@ class ClientNodesExecutor(DistributedExecutor):
         data_loader.bind(_ClientNodes(self))
         if len(self._lost) == self.n_clients:
             raise RuntimeError("every client node has left the run")
-        out = super().train_epoch(data_loader, epoch, verbose, total_epochs)
+        if self._concurrent:
+            out = self._concurrent_epoch(data_loader, epoch, verbose, total_epochs)
+        else:
+            out = super().train_epoch(data_loader, epoch, verbose, total_epochs)
         out["bytes_state"] = self._state_bytes
         last = data_loader.last_round
         if self._joined:
@@ -421,6 +442,88 @@ class ClientNodesExecutor(DistributedExecutor):
         if last["skipped"]:
             out["batches_skipped"] = last["skipped"]
         return out
+
+    def _concurrent_epoch(self, session, epoch: int, verbose: bool, total_epochs: int) -> dict:
+        """``sl.client_schedule: concurrent``: every selected client runs its own batches
+        (``client_round``, one in flight each), up to ``sl.max_concurrent_clients`` at once;
+        the server takes their batches as they arrive. A dead client leaves the round (its
+        unfinished batches are skipped); a dead server worker fails it, as in lockstep."""
+        self._meter.reset()
+        for cb in self._callbacks:
+            try:
+                cb.on_epoch_begin(epoch)
+            except Exception as e:
+                _LOG.warning("callback on_epoch_begin failed: %s", e)
+        epoch_t0 = time.perf_counter()
+        selected = select_clients(self._algorithm, session.n_clients, epoch)
+        ids: dict = {}
+        for k, _ in session.plan_round(epoch, selected):
+            ids.setdefault(k, []).append(self._batch_id(epoch, 0, 0, k))
+        with self._lock:
+            self._round_losses = {}
+        done = []
+        width = int(self._run_config.sl.max_concurrent_clients or 0) or len(ids) or 1
+        pool = cf.ThreadPoolExecutor(max_workers=width, thread_name_prefix="client-round")
+        try:
+            futures = {pool.submit(self._client_round, k, epoch, b): k for k, b in ids.items()}
+            pending = set(futures)
+            while pending:
+                finished, pending = cf.wait(pending, timeout=1.0)
+                for f in finished:
+                    k = futures[f]
+                    try:
+                        f.result()
+                        done.append(k)
+                    except grpc.RpcError:
+                        if not (self._drop and self._gone(k)):
+                            raise
+                        self._client_left(k)
+                if self._failure_event.is_set():
+                    idx = next(iter(self._failed_workers))
+                    raise WorkerFailureError(idx, self._failure_info.get(idx, "unknown"), epoch,
+                                             reason=self._failure_reason.get(idx))
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        losses = self._collect_round_losses({b for k in done for b in ids[k]})
+        planned = sum(session._bound()[k][0] for k in selected)   # a lost client's too, as lockstep
+        session.end_round(None, epoch, selected, planned - len(losses))
+        self._meter.batches += len(losses)
+        if self._run_logger:
+            for b, loss in sorted(losses.items()):
+                self._run_logger.log(step=b, epoch=epoch, loss=round(loss, 6), phase="batch",
+                                     client=b % self.n_clients)
+        if verbose:
+            _LOG.info("concurrent round epoch=%s clients=%s batches=%s/%s", epoch, len(done),
+                      len(losses), planned)
+        round_ms = (time.perf_counter() - epoch_t0) * 1e3
+        return self._finish_epoch(epoch, epoch_t0, sum(losses.values()), len(losses), session, None,
+                                  selected, verbose, total_epochs, 0.0, round_ms, 0.0)
+
+    def _client_round(self, k: int, epoch: int, batch_ids: list) -> None:
+        self._clients[k].stub().client_round(worker_service_pb2.ClientRoundRequest(
+            epoch=epoch, batch_ids=batch_ids), timeout=None)
+
+    def _collect_round_losses(self, finished: set, timeout: float = 30.0) -> dict:
+        """``{batch id: loss}`` of the round: every finished batch's, waited for (the last
+        slice reports a loss from a thread, so it can trail its batch), plus whatever a lost
+        client's batches reported. Micro-batch losses (GPipe) are averaged per batch."""
+        m = self._n_micro
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                got = dict(self._round_losses)
+            have = {}
+            for mb, loss in got.items():
+                have.setdefault(mb // m, []).append(loss)
+            missing = [b for b in finished if len(have.get(b, ())) < m]
+            if not missing or time.monotonic() > deadline:
+                break
+            time.sleep(0.01)
+        if missing:
+            _LOG.warning("concurrent round: %s batches finished without a reported loss", len(missing))
+        with self._lock:
+            self._round_losses = None
+        return {b: sum(v) / len(v) for b, v in have.items()}
 
     def _session_adapter(self, n_clients: int):
         return None                  # states live on the nodes (RemoteSession moves them)

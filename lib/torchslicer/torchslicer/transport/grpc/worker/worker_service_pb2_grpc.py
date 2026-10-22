@@ -104,6 +104,11 @@ class WorkerServiceStub(object):
                 request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ClientStepRequest.SerializeToString,
                 response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
                 _registered_method=True)
+        self.client_round = channel.unary_unary(
+                '/torchslicer.worker.WorkerService/client_round',
+                request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ClientRoundRequest.SerializeToString,
+                response_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+                _registered_method=True)
         self.get_state = channel.unary_unary(
                 '/torchslicer.worker.WorkerService/get_state',
                 request_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.StateRequest.SerializeToString,
@@ -211,6 +216,13 @@ class WorkerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def client_round(self, request, context):
+        """run a round's batches itself
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def get_state(self, request, context):
         """slice weights + optimizer state
         """
@@ -297,6 +309,11 @@ def add_WorkerServiceServicer_to_server(servicer, server):
             'client_step': grpc.unary_unary_rpc_method_handler(
                     servicer.client_step,
                     request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ClientStepRequest.FromString,
+                    response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
+            ),
+            'client_round': grpc.unary_unary_rpc_method_handler(
+                    servicer.client_round,
+                    request_deserializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ClientRoundRequest.FromString,
                     response_serializer=torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.SerializeToString,
             ),
             'get_state': grpc.unary_unary_rpc_method_handler(
@@ -665,6 +682,33 @@ class WorkerService(object):
             target,
             '/torchslicer.worker.WorkerService/client_step',
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ClientStepRequest.SerializeToString,
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def client_round(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/torchslicer.worker.WorkerService/client_round',
+            torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.ClientRoundRequest.SerializeToString,
             torchslicer_dot_transport_dot_grpc_dot_worker_dot_worker__service__pb2.Ack.FromString,
             options,
             channel_credentials,

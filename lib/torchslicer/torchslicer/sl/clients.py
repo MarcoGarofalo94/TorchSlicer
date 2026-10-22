@@ -229,10 +229,7 @@ class RemoteSession(ClientSession):
         The executor turns each into a ``client_step`` on that node."""
         import time
         nodes = self._nodes
-        clients = list(range(self.n_clients)) if clients is None else list(clients)
-        live = [k for k in clients if not nodes.lost(k)]
-        if self._initial is None and live:
-            self._initial = nodes.get(live[0])        # every client starts from the same weights
+        clients = self._start_round(clients)
         t0, skipped = time.monotonic(), 0
         for k, i in self._order(clients):
             if nodes.lost(k):
@@ -244,6 +241,35 @@ class RemoteSession(ClientSession):
             if k != self.current:
                 self._switch_remote(k, epoch)
             yield k, (ClientBatch(k, i), None)
+        self._end_round(adapter, epoch, clients, skipped)
+
+    def plan_round(self, epoch: int = 0, clients=None) -> list:
+        """``sl.client_schedule: concurrent`` (parallel mode): the round's ``(client, batch
+        index)`` in this session's order, lost clients left out. The executor runs them
+        (each client its own, many clients at once), then calls :meth:`end_round`."""
+        if self.mode != "parallel":
+            raise ValueError("a concurrent schedule runs client_mode parallel (a sequential "
+                             "session hands each client's state to the next)")
+        clients = self._start_round(clients)
+        for k in clients:
+            self._trained.add(k)
+        return [(k, i) for k, i in self._order(clients) if not self._nodes.lost(k)]
+
+    def end_round(self, adapter=None, epoch: int = 0, clients=None, skipped: int = 0) -> None:
+        """After a concurrent round: ``last_round`` and the round-end hook."""
+        clients = list(range(self.n_clients)) if clients is None else list(clients)
+        self._end_round(adapter, epoch, clients, skipped)
+
+    def _start_round(self, clients) -> list:
+        nodes = self._nodes
+        clients = list(range(self.n_clients)) if clients is None else list(clients)
+        live = [k for k in clients if not nodes.lost(k)]
+        if self._initial is None and live:
+            self._initial = nodes.get(live[0])        # every client starts from the same weights
+        return clients
+
+    def _end_round(self, adapter, epoch: int, clients: list, skipped: int) -> None:
+        nodes = self._nodes
         self.last_round = {"lost": sorted(k for k in clients if nodes.lost(k)), "skipped": skipped}
         if self.mode == "parallel" and self.on_round_end is not None:
             states = [None if nodes.lost(k) else nodes.get(k) for k in range(self.n_clients)]

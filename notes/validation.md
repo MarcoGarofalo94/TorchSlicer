@@ -1826,3 +1826,48 @@ FLOPs), not time/CPU/energy. Done:
   keys (`sim_comm_s`, `sim_client_comm_s`, `sim_client_time_s`, `sim_round_s`) warn
   (`DeprecationWarning`), still work, and go before 1.0. Docs: sl_settings.md section 3,
   data.md "Heterogeneous clients".
+
+## M10 step 5: concurrent clients (2026-10-22, branch `feat/m10-multi-client`)
+
+- **`sl.client_schedule: concurrent`** (default `lockstep`, unchanged), `sl.max_concurrent_clients`
+  (0 = all). The coordinator gives each selected client its round's batch ids once
+  (`client_round`, new RPC); the client runs them itself, one in flight (labels + input out,
+  wait for its own backward via a per-batch event set where it reports `batch_done`), many
+  clients at once. Losses are tracked by batch id (`_round_losses`, from `report_metrics`)
+  and waited for at the round's end: the last slice reports a loss from a fire-and-forget
+  thread, so it can trail its batch's `batch_done`. `RemoteSession.batches` was split into
+  `_start_round` / `plan_round` / `end_round`; `DistributedExecutor.train_epoch`'s tail into
+  `_finish_epoch`, shared by both schedules. Refused for now (with the reason): sequential
+  sessions (at `plan_round`), SplitFed V1, `fault_tolerance.enabled`, `sl.round_deadline_s`.
+- **Bug found on the way (would have been #43, caught by the new tests before commit):** with
+  a server split over several workers, slice 1 ran batch B's forward before batch A's
+  backward; A's step then changed weights B's graph had saved ("modified by an inplace
+  operation ... version 2; expected version 1"). Lockstep never shows it (one batch in
+  flight). Fix: slice 1 of a multi-slice server serving client nodes takes one batch (all
+  its micro-batches) at a time end to end: `_submit_forward` parks later batches' forwards
+  (never blocking the single compute thread, where the pending backward must run) and
+  `_gate_release` admits the next when the backward is done. A single server worker needs
+  no gate (its forward and backward run back to back).
+- **Correctness:** `test_concurrent_equals_the_session_in_the_servers_order` (plain and
+  GPipe, multi-worker server): the order the server actually stepped in, replayed in one
+  process, gives identical losses and client weights. So concurrency changes the order of
+  the server's updates and nothing else. Also: one client at a time = in-process sequential
+  `keep`; rounds really overlap (timed); a dead client leaves the round; refusals.
+- **Testbed (8 Orin Nano clients, AGX server, CIFAR-10 npz, SplitFed, 3 epochs, stock clocks,
+  seeds 0–2):**
+
+  | | lockstep | concurrent |
+  |---|---|---|
+  | steady epoch | 25.80 ± 0.21 s | **6.29 ± 0.09 s (4.1×)** |
+  | server idle per batch | 57.0 ms | 2.4 ms (the server is now the bottleneck) |
+  | bytes | 524 MB | 524 MB |
+  | client dynamic energy / run | 19.8 ± 1.3 J | 18.9 ± 1.2 J (same work in 1/4 of the time: +0.39 vs +0.19 W) |
+  | final training loss | 1.928 ± 0.048 | 2.038 ± 0.033 |
+
+  The loss gap comes from the server's update order alone (the replay test), measured on
+  training loss only (distributed runs have no eval yet), 3 seeds × 3 epochs: suggestive,
+  not a claim. Next: evaluate test accuracy over more epochs before saying anything.
+- Full suite after step 5: 428 passed / 1 skipped, but over 5 full runs 1 failed unnamed (no
+  `-rf` that time) and 1 hung (output filtered, dump lost); a hang inside `test_nat.py` was
+  also seen once earlier the same day, before step 5. Flaky, not yet pinned down: being
+  repeated per file.

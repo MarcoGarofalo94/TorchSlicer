@@ -213,6 +213,8 @@ class _CoordinatorServicer(
     def report_metrics(self, request, context):
         with self._executor._lock:
             self._executor._batch_losses.append(request.loss)
+            if self._executor._round_losses is not None:
+                self._executor._round_losses.setdefault(request.batch_id, request.loss)
         return coordinator_service_pb2.Empty()
 
     def register(self, request, context):
@@ -357,6 +359,7 @@ class DistributedExecutor(BaseExecutor):
         # Synchronisation between gRPC callbacks and train_epoch loop
         self._batch_done   = threading.Event()
         self._batch_losses: list[float] = []
+        self._round_losses: dict | None = None   # concurrent client rounds: batch id -> loss
         self._lock = threading.Lock()
 
         # Logging / callback state — populated in setup()
@@ -679,6 +682,17 @@ class DistributedExecutor(BaseExecutor):
 
                 iter_t0 = time.perf_counter()
 
+        return self._finish_epoch(epoch, epoch_t0, total_loss, n_batches, session,
+                                  adapter if session is not None else None,
+                                  selected if session is not None else None, verbose, total_epochs,
+                                  data_load_total_ms, send_total_ms, wait_total_ms)
+
+
+    def _finish_epoch(self, epoch: int, epoch_t0: float, total_loss: float, n_batches: int,
+                      session, adapter, selected, verbose: bool, total_epochs: int,
+                      data_load_total_ms: float, send_total_ms: float, wait_total_ms: float) -> dict:
+        """The end of an epoch, whichever schedule ran it: round end, worker stats, the
+        history entry, callbacks, checkpoint, run log."""
         epoch_duration_s = time.perf_counter() - epoch_t0
         avg = total_loss / n_batches if n_batches > 0 else 0.0
         if session is not None:

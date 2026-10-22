@@ -17,6 +17,7 @@ service WorkerService {
     // client nodes (sl.client_nodes, M10): a worker holding slice 0 and its own data
     rpc client_info      (ClientInfoRequest) returns (ClientInfo);      // its data, for the schedule
     rpc client_step      (ClientStepRequest) returns (Ack);             // run its next batch as batch_id
+    rpc client_round     (ClientRoundRequest) returns (Ack);            // run a round's batches itself
     rpc get_state        (StateRequest)     returns (StateBlob);        // slice weights + optimizer state
     rpc set_state        (StateBlob)        returns (Ack);
     rpc set_peers        (PeersRequest)     returns (Ack);              // slice 1: the clients' addresses now
@@ -220,6 +221,13 @@ message ClientStepRequest {
     uint32 batch_id = 1;
     uint32 epoch    = 2;  // a new epoch restarts the loader
     uint32 index    = 3;  // the batch's index in the client's epoch (checked)
+}
+
+// sl.client_schedule concurrent: the client runs these batches of its loader from the
+// start, one in flight, and returns when the last one's backward is done.
+message ClientRoundRequest {
+    uint32          epoch     = 1;
+    repeated uint32 batch_ids = 2;  // one per batch, in order
 }
 
 // Slice 1 with client nodes: every client's address, by client index ("" = none yet).

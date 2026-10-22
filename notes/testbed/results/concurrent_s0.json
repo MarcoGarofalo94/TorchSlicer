@@ -1,0 +1,279 @@
+{
+ "name": "concurrent_s0",
+ "exit": "0",
+ "wall_s": 59.6,
+ "history": "[2.22311392147094, 2.152585227508098, 2.0662536486051977]",
+ "containers": {
+  "ts-concurrent_s0-client-0": {
+   "node": "jon-001",
+   "started": "2026-10-22T17:24:01.073572564Z",
+   "finished": "2026-10-22T17:24:58.609967835Z"
+  },
+  "ts-concurrent_s0-client-1": {
+   "node": "jon-003",
+   "started": "2026-10-22T17:24:03.411081391Z",
+   "finished": "2026-10-22T17:24:59.692048968Z"
+  },
+  "ts-concurrent_s0-client-2": {
+   "node": "jon-004",
+   "started": "2026-10-22T17:24:05.730725597Z",
+   "finished": "2026-10-22T17:24:59.715538619Z"
+  },
+  "ts-concurrent_s0-client-3": {
+   "node": "jon-005",
+   "started": "2026-10-22T17:24:07.99825962Z",
+   "finished": "2026-10-22T17:24:59.731006006Z"
+  },
+  "ts-concurrent_s0-client-4": {
+   "node": "jon-006",
+   "started": "2026-10-22T17:24:10.232404643Z",
+   "finished": "2026-10-22T17:24:59.704777671Z"
+  },
+  "ts-concurrent_s0-client-5": {
+   "node": "jon-007",
+   "started": "2026-10-22T17:24:12.809854649Z",
+   "finished": "2026-10-22T17:24:58.795912515Z"
+  },
+  "ts-concurrent_s0-client-6": {
+   "node": "jon-008",
+   "started": "2026-10-22T17:24:15.184458692Z",
+   "finished": "2026-10-22T17:24:59.70936178Z"
+  },
+  "ts-concurrent_s0-client-7": {
+   "node": "jon-009",
+   "started": "2026-10-22T17:24:17.458228022Z",
+   "finished": "2026-10-22T17:24:59.735232291Z"
+  },
+  "ts-concurrent_s0-worker-0": {
+   "node": "jor-001",
+   "started": "2026-10-22T17:24:19.399777075Z",
+   "finished": "2026-10-22T17:24:59.814629555Z"
+  },
+  "ts-concurrent_s0-coordinator": {
+   "node": "jor-001",
+   "started": "2026-10-22T17:24:20.729145596Z",
+   "finished": "2026-10-22T17:24:59.670388845Z"
+  }
+ },
+ "clients": {
+  "ts-concurrent_s0-client-0": {
+   "node": "jon-001",
+   "idle_w": 4.672,
+   "mean_w": 4.9041547169811315,
+   "seconds": 57.53639531135559,
+   "energy_j": 281.3501990754604,
+   "dynamic_j": 12.540160180807106
+  },
+  "ts-concurrent_s0-client-1": {
+   "node": "jon-003",
+   "idle_w": 2.822,
+   "mean_w": 3.191167330677291,
+   "seconds": 56.280967712402344,
+   "energy_j": 178.42724999260903,
+   "dynamic_j": 19.602359108209612
+  },
+  "ts-concurrent_s0-client-2": {
+   "node": "jon-004",
+   "idle_w": 2.943,
+   "mean_w": 3.2989166666666665,
+   "seconds": 53.98481297492981,
+   "energy_j": 176.97224961972236,
+   "dynamic_j": 18.094945034503922
+  },
+  "ts-concurrent_s0-client-3": {
+   "node": "jon-005",
+   "idle_w": 2.934,
+   "mean_w": 3.324918103448276,
+   "seconds": 51.73274636268616,
+   "energy_j": 170.98209937214853,
+   "dynamic_j": 19.19822154402732
+  },
+  "ts-concurrent_s0-client-4": {
+   "node": "jon-006",
+   "idle_w": 2.871,
+   "mean_w": 3.2972045454545453,
+   "seconds": 49.47237300872803,
+   "energy_j": 162.3976996397972,
+   "dynamic_j": 20.36251673173902
+  },
+  "ts-concurrent_s0-client-5": {
+   "node": "jon-007",
+   "idle_w": 2.993,
+   "mean_w": 3.411931707317073,
+   "seconds": 45.9860577583313,
+   "energy_j": 155.97985012030603,
+   "dynamic_j": 18.34357924962046
+  },
+  "ts-concurrent_s0-client-6": {
+   "node": "jon-008",
+   "idle_w": 2.921,
+   "mean_w": 3.354010101010101,
+   "seconds": 44.52490305900574,
+   "energy_j": 148.21880009818076,
+   "dynamic_j": 18.161558262825025
+  },
+  "ts-concurrent_s0-client-7": {
+   "node": "jon-009",
+   "idle_w": 3.028,
+   "mean_w": 3.51325,
+   "seconds": 42.27700424194336,
+   "energy_j": 147.23640007638932,
+   "dynamic_j": 19.221631231784812
+  }
+ },
+ "results": [
+  {
+   "step": 1,
+   "epoch": 1,
+   "loss": 2.223114,
+   "duration_s": 6.538,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    8.92696,
+    4.545414
+   ],
+   "client_compute_s": 8.92696,
+   "server_compute_s": 4.545414,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 2480.291,
+     "backward": 2481.815,
+     "optimizer": 1167.846,
+     "send_fwd": 1027.085,
+     "send_bwd": 0.0,
+     "idle_fwd": 2099.081,
+     "idle_bwd": 36195.457
+    },
+    {
+     "forward": 1323.103,
+     "backward": 1779.767,
+     "optimizer": 691.508,
+     "send_fwd": 0.0,
+     "send_bwd": 907.38,
+     "idle_fwd": 120.77,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 0.0,
+    "send": 6538.427,
+    "wait": 0.0
+   }
+  },
+  {
+   "step": 2,
+   "epoch": 2,
+   "loss": 2.152585,
+   "duration_s": 6.306,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    5.889981,
+    4.73646
+   ],
+   "client_compute_s": 5.889981,
+   "server_compute_s": 4.73646,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 603.693,
+     "backward": 1495.667,
+     "optimizer": 809.497,
+     "send_fwd": 751.299,
+     "send_bwd": 0.0,
+     "idle_fwd": 7351.266,
+     "idle_bwd": 38010.023
+    },
+    {
+     "forward": 1180.33,
+     "backward": 1957.81,
+     "optimizer": 749.594,
+     "send_fwd": 0.0,
+     "send_bwd": 696.151,
+     "idle_fwd": 696.437,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 0.0,
+    "send": 6306.354,
+    "wait": 0.0
+   }
+  },
+  {
+   "step": 3,
+   "epoch": 3,
+   "loss": 2.066254,
+   "duration_s": 6.376,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    5.902452,
+    4.744779
+   ],
+   "client_compute_s": 5.902452,
+   "server_compute_s": 4.744779,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 591.892,
+     "backward": 1472.998,
+     "optimizer": 798.054,
+     "send_fwd": 757.05,
+     "send_bwd": 0.0,
+     "idle_fwd": 6432.735,
+     "idle_bwd": 38320.867
+    },
+    {
+     "forward": 1196.274,
+     "backward": 1993.925,
+     "optimizer": 738.485,
+     "send_fwd": 0.0,
+     "send_bwd": 722.864,
+     "idle_fwd": 593.573,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 0.0,
+    "send": 6375.826,
+    "wait": 0.0
+   }
+  }
+ ]
+}

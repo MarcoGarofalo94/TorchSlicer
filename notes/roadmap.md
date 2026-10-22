@@ -467,7 +467,7 @@ shown in a Flower-based SplitFed baseline.
       OS processes, and across the two containers). Step 3 done: SplitFed V1 (per-client server
       copies on the server workers) = in-process V1. Step 4a done: a dead client leaves the run; round deadline. Step 4b done: late joiners and
       rejoins (`sl.min_clients`, `set_peers`). Step 4c done: server-side recovery
-      (`fault_tolerance.enabled`; not with V1). Next: step 5 (concurrent clients + overhead benchmark).
+      (`fault_tolerance.enabled`; not with V1). Step 5 done 2026-10-22: `sl.client_schedule: concurrent` (`client_round`, `sl.max_concurrent_clients`; multi-slice server gated to one batch at a time; = the in-process session in the server's order), 4.1x per epoch on 8 Orin Nano clients (validation.md). Not yet with it: V1, recovery, round deadline. Next: test accuracy under concurrency over more epochs; then U-shaped clients, vertical SL.
 - **M11, data and scale simulation** (was M10):
   - **Federated partitioners:** IID; Dirichlet(α) label skew; quantity skew; per-client feature shift.
   - **Standard datasets:** MNIST, CIFAR-10/100, FEMNIST-like, a text/LLM fine-tuning set, tabular for vertical SL.

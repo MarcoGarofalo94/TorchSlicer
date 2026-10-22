@@ -1,0 +1,279 @@
+{
+ "name": "concurrent_s2",
+ "exit": "0",
+ "wall_s": 61.9,
+ "history": "[2.209460466168821, 2.188638722524047, 2.002371291164309]",
+ "containers": {
+  "ts-concurrent_s2-client-0": {
+   "node": "jon-001",
+   "started": "2026-10-22T17:32:25.042582517Z",
+   "finished": "2026-10-22T17:33:26.175393689Z"
+  },
+  "ts-concurrent_s2-client-1": {
+   "node": "jon-003",
+   "started": "2026-10-22T17:32:27.359126016Z",
+   "finished": "2026-10-22T17:33:26.244123525Z"
+  },
+  "ts-concurrent_s2-client-2": {
+   "node": "jon-004",
+   "started": "2026-10-22T17:32:29.73744651Z",
+   "finished": "2026-10-22T17:33:26.232182898Z"
+  },
+  "ts-concurrent_s2-client-3": {
+   "node": "jon-005",
+   "started": "2026-10-22T17:32:31.951803131Z",
+   "finished": "2026-10-22T17:33:25.172671117Z"
+  },
+  "ts-concurrent_s2-client-4": {
+   "node": "jon-006",
+   "started": "2026-10-22T17:32:34.298207165Z",
+   "finished": "2026-10-22T17:33:25.140909106Z"
+  },
+  "ts-concurrent_s2-client-5": {
+   "node": "jon-007",
+   "started": "2026-10-22T17:32:36.758301049Z",
+   "finished": "2026-10-22T17:33:26.264420121Z"
+  },
+  "ts-concurrent_s2-client-6": {
+   "node": "jon-008",
+   "started": "2026-10-22T17:32:39.133350345Z",
+   "finished": "2026-10-22T17:33:26.263742789Z"
+  },
+  "ts-concurrent_s2-client-7": {
+   "node": "jon-009",
+   "started": "2026-10-22T17:32:41.363702608Z",
+   "finished": "2026-10-22T17:33:26.264078393Z"
+  },
+  "ts-concurrent_s2-worker-0": {
+   "node": "jor-001",
+   "started": "2026-10-22T17:32:43.320078243Z",
+   "finished": "2026-10-22T17:33:26.325074696Z"
+  },
+  "ts-concurrent_s2-coordinator": {
+   "node": "jor-001",
+   "started": "2026-10-22T17:32:44.669038758Z",
+   "finished": "2026-10-22T17:33:25.985064848Z"
+  }
+ },
+ "clients": {
+  "ts-concurrent_s2-client-0": {
+   "node": "jon-001",
+   "idle_w": 4.672,
+   "mean_w": 4.904508896797153,
+   "seconds": 61.132811069488525,
+   "energy_j": 298.08664970946313,
+   "dynamic_j": 12.474156392812745
+  },
+  "ts-concurrent_s2-client-1": {
+   "node": "jon-003",
+   "idle_w": 2.862,
+   "mean_w": 3.1799847908745247,
+   "seconds": 58.88499736785889,
+   "energy_j": 185.36220010828973,
+   "dynamic_j": 16.833337641477584
+  },
+  "ts-concurrent_s2-client-2": {
+   "node": "jon-004",
+   "idle_w": 2.943,
+   "mean_w": 3.284984126984127,
+   "seconds": 56.494736433029175,
+   "energy_j": 184.35200012278557,
+   "dynamic_j": 18.08799080038071
+  },
+  "ts-concurrent_s2-client-3": {
+   "node": "jon-005",
+   "idle_w": 2.934,
+   "mean_w": 3.287372881355932,
+   "seconds": 53.22086787223816,
+   "energy_j": 173.8740999290943,
+   "dynamic_j": 17.72407359194756
+  },
+  "ts-concurrent_s2-client-4": {
+   "node": "jon-006",
+   "idle_w": 2.871,
+   "mean_w": 3.2616491228070177,
+   "seconds": 50.84270191192627,
+   "energy_j": 164.2034001326561,
+   "dynamic_j": 18.234002943515776
+  },
+  "ts-concurrent_s2-client-5": {
+   "node": "jon-007",
+   "idle_w": 2.993,
+   "mean_w": 3.39565,
+   "seconds": 49.50611901283264,
+   "energy_j": 167.51261710953713,
+   "dynamic_j": 19.34080290412905
+  },
+  "ts-concurrent_s2-client-6": {
+   "node": "jon-008",
+   "idle_w": 2.921,
+   "mean_w": 3.3382085308056872,
+   "seconds": 47.13039231300354,
+   "energy_j": 156.38635003113745,
+   "dynamic_j": 18.71847408485411
+  },
+  "ts-concurrent_s2-client-7": {
+   "node": "jon-009",
+   "idle_w": 3.028,
+   "mean_w": 3.4906138613861386,
+   "seconds": 44.900375843048096,
+   "energy_j": 156.1173996372223,
+   "dynamic_j": 20.159061584472653
+  }
+ },
+ "results": [
+  {
+   "step": 1,
+   "epoch": 1,
+   "loss": 2.20946,
+   "duration_s": 6.674,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    9.054004,
+    4.720736
+   ],
+   "client_compute_s": 9.054004,
+   "server_compute_s": 4.720736,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 2492.386,
+     "backward": 2591.953,
+     "optimizer": 1235.741,
+     "send_fwd": 1099.736,
+     "send_bwd": 0.0,
+     "idle_fwd": 2097.716,
+     "idle_bwd": 36598.586
+    },
+    {
+     "forward": 1404.046,
+     "backward": 1841.858,
+     "optimizer": 684.249,
+     "send_fwd": 0.0,
+     "send_bwd": 853.032,
+     "idle_fwd": 125.64,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 0.0,
+    "send": 6674.36,
+    "wait": 0.0
+   }
+  },
+  {
+   "step": 2,
+   "epoch": 2,
+   "loss": 2.188639,
+   "duration_s": 6.345,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    5.865081,
+    4.511351
+   ],
+   "client_compute_s": 5.865081,
+   "server_compute_s": 4.511351,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 600.575,
+     "backward": 1521.727,
+     "optimizer": 812.559,
+     "send_fwd": 728.535,
+     "send_bwd": 0.0,
+     "idle_fwd": 7972.683,
+     "idle_bwd": 38334.848
+    },
+    {
+     "forward": 1176.961,
+     "backward": 1835.405,
+     "optimizer": 729.8,
+     "send_fwd": 0.0,
+     "send_bwd": 870.814,
+     "idle_fwd": 749.63,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 0.0,
+    "send": 6345.127,
+    "wait": 0.0
+   }
+  },
+  {
+   "step": 3,
+   "epoch": 3,
+   "loss": 2.002371,
+   "duration_s": 6.282,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    5.957578,
+    4.57297
+   ],
+   "client_compute_s": 5.957578,
+   "server_compute_s": 4.57297,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 615.015,
+     "backward": 1497.406,
+     "optimizer": 797.21,
+     "send_fwd": 764.388,
+     "send_bwd": 0.0,
+     "idle_fwd": 6606.362,
+     "idle_bwd": 37628.711
+    },
+    {
+     "forward": 1161.581,
+     "backward": 1892.659,
+     "optimizer": 725.556,
+     "send_fwd": 0.0,
+     "send_bwd": 815.567,
+     "idle_fwd": 604.288,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 0.0,
+    "send": 6281.852,
+    "wait": 0.0
+   }
+  }
+ ]
+}

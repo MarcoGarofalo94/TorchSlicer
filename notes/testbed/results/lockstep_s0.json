@@ -1,0 +1,279 @@
+{
+ "name": "lockstep_s0",
+ "exit": "0",
+ "wall_s": 120.2,
+ "history": "[2.1721883709542453, 2.115541552193463, 1.9751465595327318]",
+ "containers": {
+  "ts-lockstep_s0-client-0": {
+   "node": "jon-001",
+   "started": "2026-10-22T17:21:27.257857456Z",
+   "finished": "2026-10-22T17:23:26.795346663Z"
+  },
+  "ts-lockstep_s0-client-1": {
+   "node": "jon-003",
+   "started": "2026-10-22T17:21:29.828873413Z",
+   "finished": "2026-10-22T17:23:26.89385274Z"
+  },
+  "ts-lockstep_s0-client-2": {
+   "node": "jon-004",
+   "started": "2026-10-22T17:21:32.200790562Z",
+   "finished": "2026-10-22T17:23:26.881525162Z"
+  },
+  "ts-lockstep_s0-client-3": {
+   "node": "jon-005",
+   "started": "2026-10-22T17:21:34.607176294Z",
+   "finished": "2026-10-22T17:23:26.890449221Z"
+  },
+  "ts-lockstep_s0-client-4": {
+   "node": "jon-006",
+   "started": "2026-10-22T17:21:36.953304913Z",
+   "finished": "2026-10-22T17:23:25.801580828Z"
+  },
+  "ts-lockstep_s0-client-5": {
+   "node": "jon-007",
+   "started": "2026-10-22T17:21:39.324459762Z",
+   "finished": "2026-10-22T17:23:26.861970635Z"
+  },
+  "ts-lockstep_s0-client-6": {
+   "node": "jon-008",
+   "started": "2026-10-22T17:21:41.740750282Z",
+   "finished": "2026-10-22T17:23:26.900496316Z"
+  },
+  "ts-lockstep_s0-client-7": {
+   "node": "jon-009",
+   "started": "2026-10-22T17:21:44.005831525Z",
+   "finished": "2026-10-22T17:23:26.893642531Z"
+  },
+  "ts-lockstep_s0-worker-0": {
+   "node": "jor-001",
+   "started": "2026-10-22T17:21:45.950893267Z",
+   "finished": "2026-10-22T17:23:26.783070383Z"
+  },
+  "ts-lockstep_s0-coordinator": {
+   "node": "jor-001",
+   "started": "2026-10-22T17:21:47.289964056Z",
+   "finished": "2026-10-22T17:23:26.600656982Z"
+  }
+ },
+ "clients": {
+  "ts-lockstep_s0-client-0": {
+   "node": "jon-001",
+   "idle_w": 4.672,
+   "mean_w": 4.808974591651542,
+   "seconds": 119.53748917579651,
+   "energy_j": 573.0012489459515,
+   "dynamic_j": 14.522099516630192
+  },
+  "ts-lockstep_s0-client-1": {
+   "node": "jon-003",
+   "idle_w": 2.822,
+   "mean_w": 3.01051051625239,
+   "seconds": 117.06497931480408,
+   "energy_j": 350.8985500423908,
+   "dynamic_j": 20.54117841601368
+  },
+  "ts-lockstep_s0-client-2": {
+   "node": "jon-004",
+   "idle_w": 2.943,
+   "mean_w": 3.115721247563353,
+   "seconds": 114.68073463439941,
+   "energy_j": 356.3690500533581,
+   "dynamic_j": 18.863648024320582
+  },
+  "ts-lockstep_s0-client-3": {
+   "node": "jon-005",
+   "idle_w": 2.934,
+   "mean_w": 3.1174442231075696,
+   "seconds": 112.28327298164368,
+   "energy_j": 348.7224998178482,
+   "dynamic_j": 19.283376889705607
+  },
+  "ts-lockstep_s0-client-4": {
+   "node": "jon-006",
+   "idle_w": 2.871,
+   "mean_w": 3.0549014373716634,
+   "seconds": 108.84827589988708,
+   "energy_j": 331.7165498929024,
+   "dynamic_j": 19.21314978432656
+  },
+  "ts-lockstep_s0-client-5": {
+   "node": "jon-007",
+   "idle_w": 2.993,
+   "mean_w": 3.197807053941909,
+   "seconds": 107.5375108718872,
+   "energy_j": 342.59304982781407,
+   "dynamic_j": 20.733279788255686
+  },
+  "ts-lockstep_s0-client-6": {
+   "node": "jon-008",
+   "idle_w": 2.921,
+   "mean_w": 3.114356687898089,
+   "seconds": 105.15974593162537,
+   "energy_j": 326.61584977173806,
+   "dynamic_j": 19.444231905460356
+  },
+  "ts-lockstep_s0-client-7": {
+   "node": "jon-009",
+   "idle_w": 3.028,
+   "mean_w": 3.2423747276688455,
+   "seconds": 102.88781094551086,
+   "energy_j": 332.06379986763,
+   "dynamic_j": 20.519508324623075
+  }
+ },
+ "results": [
+  {
+   "step": 1,
+   "epoch": 1,
+   "loss": 2.172188,
+   "duration_s": 30.015,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    9.422291,
+    5.562656
+   ],
+   "client_compute_s": 9.422291,
+   "server_compute_s": 5.562656,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 2820.071,
+     "backward": 2619.868,
+     "optimizer": 1214.506,
+     "send_fwd": 1381.408,
+     "send_bwd": 0.0,
+     "idle_fwd": 196534.266,
+     "idle_bwd": 12777.866
+    },
+    {
+     "forward": 1840.56,
+     "backward": 2049.883,
+     "optimizer": 720.095,
+     "send_fwd": 0.0,
+     "send_bwd": 973.119,
+     "idle_fwd": 15241.003,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 34.852,
+    "send": 5947.377,
+    "wait": 23696.516
+   }
+  },
+  {
+   "step": 2,
+   "epoch": 2,
+   "loss": 2.115542,
+   "duration_s": 26.08,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    6.405132,
+    5.267287
+   ],
+   "client_compute_s": 6.405132,
+   "server_compute_s": 5.267287,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 977.526,
+     "backward": 1588.263,
+     "optimizer": 839.174,
+     "send_fwd": 943.264,
+     "send_bwd": 0.0,
+     "idle_fwd": 191463.094,
+     "idle_bwd": 12531.607
+    },
+    {
+     "forward": 1619.236,
+     "backward": 2043.752,
+     "optimizer": 703.998,
+     "send_fwd": 0.0,
+     "send_bwd": 596.364,
+     "idle_fwd": 14442.55,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 23.04,
+    "send": 5796.061,
+    "wait": 19913.566
+   }
+  },
+  {
+   "step": 3,
+   "epoch": 3,
+   "loss": 1.975147,
+   "duration_s": 25.745,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    6.408012,
+    5.073348
+   ],
+   "client_compute_s": 6.408012,
+   "server_compute_s": 5.073348,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 932.223,
+     "backward": 1624.921,
+     "optimizer": 833.979,
+     "send_fwd": 940.099,
+     "send_bwd": 0.0,
+     "idle_fwd": 186780.422,
+     "idle_bwd": 12273.322
+    },
+    {
+     "forward": 1544.483,
+     "backward": 1924.452,
+     "optimizer": 678.015,
+     "send_fwd": 0.0,
+     "send_bwd": 649.377,
+     "idle_fwd": 14253.689,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 21.217,
+    "send": 5899.437,
+    "wait": 19511.568
+   }
+  }
+ ]
+}

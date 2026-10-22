@@ -62,13 +62,15 @@ def _local(mode, handoff, algorithm, n_micro=1, loaders=None):
     return [e["loss"] for e in h], session.states
 
 
-def _nodes(mode, handoff, algorithm, transport="grpc", n_micro=1, servicers=None, **sl):
+def _nodes(mode, handoff, algorithm, transport="grpc", n_micro=1, servicers=None, server_servicer=None,
+           **sl):
     cfg = _cfg(transport)
     for key, v in sl.items():
         setattr(cfg.sl, key, v)
     cfg.fault_tolerance.heartbeat_interval_s = 0.5
     offsets = cfg.transport.listen_offsets()
-    servers = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg) for _ in range(2)]
+    servers = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg,
+                               servicer_class=server_servicer) for _ in range(2)]
     data = _loaders()
     clients = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg, data=data[k],
                                client_index=k, servicer_class=(servicers or {}).get(k))
@@ -451,3 +453,129 @@ def test_profile_breakdown_sums_every_client(monkeypatch):
     monkeypatch.setattr(sys.modules[__name__], "_cfg", plain)
     _, _, h = _nodes("parallel", "copy", None)
     assert "profile_ms" not in h[0]          # without profiling the history has no such fields
+
+
+# ── step 5: concurrent clients ────────────────────────────────────────────────────
+
+def test_concurrent_one_client_at_a_time_is_the_client_by_client_session():
+    # one client running at a time: client 0's whole round, then client 1's... each on
+    # its own weights, as an in-process sequential session that hands nothing on
+    ref, ref_states = _local("sequential", "keep", None)
+    got, states, h = _nodes("parallel", "copy", None, client_schedule="concurrent",
+                            max_concurrent_clients=1)
+    assert [round(x, 6) for x in got] == ref
+    _same_states(states, ref_states)
+    assert "batches_skipped" not in h[0]
+
+
+class _Timed(ts.WorkerServicer):
+    """Records each round's (start, end) and stretches every batch a little, so rounds that
+    run at once overlap for sure."""
+    spans: list = []
+
+    def client_round(self, request, context):
+        import time
+        t0 = time.monotonic()
+        try:
+            return super().client_round(request, context)
+        finally:
+            _Timed.spans.append((t0, time.monotonic()))
+
+    def _drive_batch(self, batch_id, inputs, labels):
+        import time
+        time.sleep(0.02)
+        super()._drive_batch(batch_id, inputs, labels)
+
+
+@pytest.mark.parametrize("n_micro", [1, 2])
+def test_concurrent_clients_run_at_once_and_aggregate(n_micro):
+    _Timed.spans = []
+    got, states, h = _nodes("parallel", "copy", ts.SplitFedAlgorithm(), n_micro=n_micro,
+                            servicers={k: _Timed for k in range(C)}, client_schedule="concurrent")
+    assert len(got) == 2 and all(0 < x < 10 for x in got)
+    spans = sorted(_Timed.spans)
+    for r in range(2):                                   # each round: every client was running
+        rnd = spans[r * C:(r + 1) * C]                   # at the same moment
+        assert max(a for a, _ in rnd) < min(b for _, b in rnd)
+    _same_states([states[0], states[0]], [states[1], states[2]])    # FedAvg: one aggregate
+    assert "batches_skipped" not in h[-1] and h[-1]["bytes_label"] > 0
+
+
+def _dies_in_round(epoch):
+    class _Dies(ts.WorkerServicer):
+        def client_round(self, request, context):
+            if request.epoch == epoch:
+                self._server.stop(0)
+                raise RuntimeError("client node killed")
+            return super().client_round(request, context)
+    return _Dies
+
+
+def test_concurrent_a_dead_client_leaves_and_the_others_go_on():
+    got, states, h = _nodes("parallel", "copy", ts.SplitFedAlgorithm(), client_schedule="concurrent",
+                            servicers={1: _dies_in_round(1)})
+    assert len(got) == 2 and h[0]["clients_lost"] == [1] and h[1]["clients_lost"] == [1]
+    n1 = len(_loaders()[1])
+    assert h[0]["batches_skipped"] == n1 and h[1]["batches_skipped"] == n1
+    _same_states([states[0]], [states[2]])
+
+
+def test_concurrent_refuses_a_sequential_session():
+    with pytest.raises(ValueError, match="client_mode parallel"):
+        _nodes("sequential", "copy", None, client_schedule="concurrent")
+
+
+@pytest.mark.parametrize("sl,match", [
+    ({"round_deadline_s": 1.0}, "round_deadline_s"),
+    ({"client_schedule": "fast"}, "lockstep' or 'concurrent"),
+])
+def test_concurrent_refuses_what_it_cant_run(sl, match):
+    cfg = _cfg()
+    cfg.sl.client_nodes, cfg.sl.client_schedule = True, "concurrent"
+    for k, v in sl.items():
+        setattr(cfg.sl, k, v)
+    with pytest.raises(ValueError, match=match):
+        ts.ClientNodesExecutor(discovery=StaticDiscovery(peers=[]), coordinator_addr="127.0.0.1:1",
+                               run_config=cfg)
+
+
+class _ServerOrder(ts.WorkerServicer):
+    """The batches the last slice stepped on, in the order it stepped (once per batch)."""
+    order: list = []
+
+    def _optimize(self, batch_id):
+        if self.is_last:
+            _ServerOrder.order.append(batch_id // self._n_micro)
+        return super()._optimize(batch_id)
+
+
+class _Replay(ts.ClientSession):
+    """A parallel session whose rounds take the clients' batches in a given order."""
+    def __init__(self, loaders, rounds):
+        super().__init__(loaders, mode="parallel")
+        self._rounds = iter(rounds)
+
+    def _order(self, clients):
+        its = {k: iter(self.loaders[k]) for k in clients}
+        for k in next(self._rounds):
+            yield k, next(its[k])
+
+
+@pytest.mark.parametrize("n_micro", [1, 2])
+def test_concurrent_equals_the_session_in_the_servers_order(n_micro):
+    # what the server ran, replayed in one process, gives the same losses and weights: the
+    # concurrent schedule changes the order of the server's updates and nothing else
+    _ServerOrder.order, _Timed.spans = [], []
+    got, states, _ = _nodes("parallel", "copy", ts.SplitFedAlgorithm(), n_micro=n_micro,
+                            servicers={k: _Timed for k in range(C)}, server_servicer=_ServerOrder,
+                            client_schedule="concurrent")
+    per_round = sum(len(l) for l in _loaders())
+    batches = list(_ServerOrder.order)
+    rounds = [[b % C for b in batches[r * per_round:(r + 1) * per_round]] for r in range(2)]
+    assert len(batches) == 2 * per_round
+    assert any(r != sorted(r) for r in rounds)          # the clients really interleaved
+    session = _Replay(_loaders(), rounds)
+    ref = ts.slice(_model(), cuts=CUTS).train(session, run_config=_cfg(), algorithm=ts.SplitFedAlgorithm(),
+                                              n_micro_batches=n_micro)
+    assert [round(x, 6) for x in got] == [e["loss"] for e in ref]
+    _same_states(states, session.states)

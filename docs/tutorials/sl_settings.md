@@ -352,6 +352,25 @@ epoch's checkpoint (`checkpoint.dir`, which the server workers must see). Slice 
 the clients: each client saves its own checkpoint on its node and restarts from it, and the
 round is replayed from its start. As elsewhere, the server optimizers start fresh after a
 recovery. Per-client server copies (SplitFed V1) can't be recovered yet.
+
+### Concurrent clients: `sl.client_schedule: concurrent`
+
+By default (`lockstep`) the coordinator drives every batch and keeps one in flight, which
+is what makes a run equal the in-process session. With `sl.client_schedule: concurrent`
+(parallel sessions), each selected client gets its round's batch ids once
+(`client_round`) and runs them itself, one in flight per client, while the other clients
+run theirs: up to `sl.max_concurrent_clients` at once (0 = all). The server takes the
+batches as they arrive, so losses differ from the in-process session (the order of the
+server's updates depends on timing). It still takes one batch at a time end to end: a
+server split over several workers parks a new batch at slice 1 until the previous one's
+backward is done there, because its step changes weights a pending backward needs. What
+runs concurrently is everything outside the server: the clients' compute, their data
+loading and the network. Round-end aggregation (`ts.SplitFedAlgorithm`) is unchanged, a
+dead client leaves the round as above, and `max_concurrent_clients: 1` runs the clients
+one after the other (= an in-process `sequential` session with `handoff="keep"`). Not yet
+with it: sequential sessions, per-client server copies (SplitFed V1),
+`fault_tolerance.enabled` and `sl.round_deadline_s` (each refused with the reason).
+
 With `ts.run`, set `sl.client_nodes: true` with `sl.clients` (and `sl.client_mode`,
 `sl.handoff`): every node runs the same script, `data_fn()` returns one loader per
 client, and a client node keeps only its own. `python -m torchslicer launch --target
@@ -361,8 +380,8 @@ processes|compose|baremetal` starts or renders one node per client
 ## Limits
 
 - **Where clients run.** With a `ClientSession`, all clients run in the data owner's
-  process. With `sl.client_nodes` each client is its own node, but the schedule keeps
-  one batch in flight: clients don't train concurrently yet.
+  process. With `sl.client_nodes` each client is its own node; they train concurrently
+  with `sl.client_schedule: concurrent`, but the server takes one batch at a time.
 - **Server batches.** In `parallel` mode the server takes the clients' batches one
   at a time and updates after each one. There is no batching across clients.
 - **Labels on another party.** Every setting assumes that the data owner holds both
