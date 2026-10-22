@@ -1797,3 +1797,32 @@ x 3.9 ms for all of it.
   still fails the step. Testbed: steady epoch 27.13 → 25.62 s (−5.6 %, 108.5 → 102.5 ms per
   batch; seed-to-seed spread was ±0.22 s), losses identical. The router's `_RoutedCall` has
   no `.future` (tunnel calls), hence a pool rather than `stub.forward.future`.
+
+## Hardware-independent costs; simulated time deprecated (2026-10-22, owner decision)
+
+Owner: the simulator must report what doesn't depend on hardware (accuracy, bytes, memory,
+FLOPs), not time/CPU/energy. Done:
+- **`sl/costs.py`, every in-process epoch** (`LocalExecutor`; offload skips it: its slices
+  are paged): `mem_bytes` per slice (params + buffers, grads, optimizer state = state tensors
+  x trainable bytes, activations saved for backward on one batch, via
+  `saved_tensors_hooks`), `flops` per slice over the epoch (3 x forward from
+  `torch.utils.flop_counter`, scaled per sample, so a short last batch counts right),
+  `client_mem_bytes` / `client_flops`, `costs_batch_size`. Measured once on the run's first
+  batch with a side-effect-free forward (forked RNG, buffers restored, no backward), never
+  by peeking at the loader (that would advance a shuffled loader's RNG and change training).
+  A failure to measure logs a warning and leaves the fields out; it never stops a run.
+  Check on the testbed config: client conv1 = 1.77 MFLOP/sample forward x 3 x 8000 samples =
+  42.5 GFLOP = the reported `client_flops`.
+  Tests: `tests/test_costs.py` (exact values on an MLP with SGD / momentum / AdamW, a short
+  last batch, a client session, an in-place first layer, training unchanged incl. BatchNorm
+  running stats: that test failed as written at first, because train-mode BatchNorm ignores
+  running stats, so it now also compares the final state dict, and it fails 1/1 with the
+  buffer restore removed).
+- **Bug found by `test_docs` (before commit):** the first version fed each slice a leaf
+  tensor, and a model starting with `ReLU(inplace=True)` raised "a leaf Variable that requires
+  grad is being used in an in-place operation". The input is now cloned as in
+  `SplitLayer.forward`.
+- **Deprecated:** `sl.link_bandwidth_mbps` / `sl.link_latency_ms` and the profiles' timing
+  keys (`sim_comm_s`, `sim_client_comm_s`, `sim_client_time_s`, `sim_round_s`) warn
+  (`DeprecationWarning`), still work, and go before 1.0. Docs: sl_settings.md section 3,
+  data.md "Heterogeneous clients".

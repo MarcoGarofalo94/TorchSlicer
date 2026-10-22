@@ -7,7 +7,20 @@ Every executor fills one ``CommMeter`` per epoch; ``summary`` turns it into the
 fields added to the epoch's history entry and ``metrics.jsonl`` row.
 """
 
+import warnings
+
 from .roles import Placement
+
+_SIM_TIME = ("simulated time (sl.link_bandwidth_mbps / sl.link_latency_ms, client profiles' "
+             "compute_scale / bandwidth_mbps / latency_ms -> sim_comm_s, sim_client_comm_s, "
+             "sim_client_time_s, sim_round_s) is deprecated and will be removed before 1.0: it "
+             "depends on hardware a simulation doesn't have (on Jetsons, clock scaling alone "
+             "changes a step 2-7x). In-process runs report hardware-independent costs instead "
+             "(bytes_*, mem_bytes, flops); measure time on real nodes.")
+
+
+def _warn_sim_time() -> None:
+    warnings.warn(_SIM_TIME, DeprecationWarning, stacklevel=3)
 
 
 class CommMeter:
@@ -94,6 +107,8 @@ class CommMeter:
             "sl_setting":      p.setting,
         }
         if bandwidth_mbps > 0 or latency_ms > 0:
+            _warn_sim_time()
+
             def _t(nbytes, msgs):
                 bw = nbytes * 8 / (bandwidth_mbps * 1e6) if bandwidth_mbps > 0 else 0.0
                 return bw + msgs * latency_ms / 1e3
@@ -133,6 +148,7 @@ def client_times(meter: CommMeter, placement: Placement, profiles: list, tiers: 
     A client's time = its client-slice compute x ``compute_scale`` + its bytes and
     messages across the data owner's boundary over its link. The round: the slowest
     client plus the server's compute when clients run in parallel, else the sum."""
+    _warn_sim_time()
     times = {}
     for k, sub in sorted(meter.clients.items()):
         prof = profiles[tiers[k]]

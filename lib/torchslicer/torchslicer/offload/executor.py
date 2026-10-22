@@ -395,6 +395,9 @@ class OffloadExecutor(LocalExecutor):
         return super().train_epoch(data_loader, epoch=epoch, verbose=verbose,
                                    total_epochs=total_epochs)
 
+    def _measure_costs(self, inputs) -> list:
+        return []           # the slices are paged in and out: no plain forward to measure on
+
     def _epoch_extras(self, duration_s: float) -> dict:
         h2d = self.pager.bytes_h2d - self._epoch_bytes[0]
         d2h = self.pager.bytes_d2h - self._epoch_bytes[1]

@@ -127,7 +127,11 @@ one batch of 16 per client):
 Clients with a small client slice (a conv layer or two) are cheap anywhere: 1000 clients of
 the example CNN take 2 s per round and 1.2 GB.
 
-## Heterogeneous clients (simulated)
+## Heterogeneous clients (simulated; deprecated)
+
+**Deprecated, removed before 1.0** (a `DeprecationWarning` says so): simulated time depends
+on hardware a simulation doesn't have. Use the hardware-independent `bytes_*`, `mem_bytes`
+and `flops` of every in-process epoch, and measure time on real nodes.
 
 Real SL clients differ in speed and network. In the simulator, give the clients profiles;
 nothing is slowed down, the history just reports what the round would have cost:

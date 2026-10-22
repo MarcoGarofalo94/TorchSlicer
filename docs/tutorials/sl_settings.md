@@ -207,20 +207,28 @@ executor:
 | `bytes_total`, `bytes_per_batch`, `raw_bytes_total` | all of the above; before hooks for `raw_` |
 | `bytes_client` | what crosses the data owner's boundary |
 | `compute_s`, `client_compute_s`, `server_compute_s` | forward + backward + optimizer wall time per slice, and summed by owner |
-| `sim_comm_s`, `sim_client_comm_s` | with `sl.link_bandwidth_mbps` / `sl.link_latency_ms`: the time those bytes would take on that link (per message: latency + bytes / bandwidth, no overlap), for every message and for the client's only |
+| `mem_bytes`, `client_mem_bytes` | in-process runs: per slice, the memory one training step needs (parameters + buffers, gradients, optimizer state, activations saved for backward on one batch); summed over the client slices = what one client needs |
+| `flops`, `client_flops` | in-process runs: per slice, training FLOPs over the epoch (3 × forward, counted with `torch.utils.flop_counter`); summed over the client slices (every client's batches) |
+| `costs_batch_size` | the batch size `mem_bytes` was measured at (the run's first batch) |
+| `sim_comm_s`, `sim_client_comm_s` | **deprecated** (removed before 1.0; a `DeprecationWarning` says so): with `sl.link_bandwidth_mbps` / `sl.link_latency_ms`, the time those bytes would take on that link (latency + bytes / bandwidth per message) |
 | `sl_setting` | the setting in effect |
 
 The bytes are tensor payload bytes, without gRPC/TCP framing. They are identical
 whether `LocalExecutor` counts them or the workers do (the tests check this). So a
-local run predicts a distributed run's traffic exactly. Compute time is wall time; on
-CUDA it is measured with a synchronize at the end of each phase.
+local run predicts a distributed run's traffic exactly. Memory and FLOPs depend only on
+the model, the batch shape, the dtype and the optimizer, so they too carry over from a
+simulation to real nodes. Compute time is wall time on the machine that ran it; on CUDA
+it is measured with a synchronize at the end of each phase.
+
+Time on another machine or network isn't simulated: it depends on the hardware (on a
+Jetson, clock scaling alone changes a step 2–7× between bursty and steady work). Measure
+it on the real nodes (`deploy/`).
 
 ```python
-h = ts.run(build_model, get_data, run_config=config("vanilla", link_bandwidth_mbps=10,
-           link_latency_ms=20), cuts=["1", "3"], verbose=False)
+h = ts.run(build_model, get_data, run_config=config("vanilla"), cuts=["1", "3"], verbose=False)
 e = h[0]
-print(f"client compute {e['client_compute_s'] * 1e3:.2f} ms, server {e['server_compute_s'] * 1e3:.2f} ms, "
-      f"client link time on 10 Mbit/s + 20 ms: {e['sim_client_comm_s']:.3f} s")
+print(f"client: {e['client_mem_bytes'] / 2**20:.2f} MiB, {e['client_flops'] / 1e9:.3f} GFLOP per epoch, "
+      f"{e['bytes_client'] / 2**20:.2f} MiB sent and received")
 ```
 
 ## 4. Several clients: `ts.ClientSession`

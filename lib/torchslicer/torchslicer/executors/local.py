@@ -18,6 +18,7 @@ from ..monitor.callback import TrainingCallback
 from ..sl.hooks import CutContext, resolve_cut_hooks, payload_nbytes, tensor_nbytes
 from ..sl.roles import Placement, resolve_setting
 from ..sl.metrics import CommMeter, assign_profiles, client_times
+from ..sl.costs import cost_fields, slice_costs
 from ..sl.clients import (ClientSession, SplitLayerClientState, algorithm_round_end,
                           resolve_client_store, select_clients)
 from ..algorithm.base import Algorithm, AlgorithmContext, BackwardPolicy
@@ -145,6 +146,8 @@ class LocalExecutor(BaseExecutor):
         ``privacy``: ``ts.privacy`` attacks and defences, added to the config's ``privacy``."""
         self._eval_loader = eval_data
         self._eval_every = int(eval_every or 0) if eval_data is not None else 0
+        self._optimizer_cfg = optimizer_cfg
+        self._costs = None          # slice_costs on the run's first batch (sl/costs.py)
         layers = model_graph.get_layers()
         n = len(partitions)
         self.split_layers = []
@@ -290,6 +293,7 @@ class LocalExecutor(BaseExecutor):
             except Exception as e:
                 _LOG.warning("callback on_epoch_begin failed: %s", e)
 
+        n_samples = 0
         epoch_t0 = time.perf_counter()
 
         with tracer.span("torchslicer.epoch", epoch=epoch) as epoch_span:
@@ -305,6 +309,10 @@ class LocalExecutor(BaseExecutor):
                     prev_client_for_server = client
 
                 batch_id = epoch * n_total + n_batches
+                if self._costs is None:
+                    self._costs = self._measure_costs(inputs)
+                if self._costs:
+                    n_samples += int(inputs.shape[0])
                 if self._profiles:
                     self._meter.client = client if client is not None else 0
                 _shape = (str(tuple(inputs.shape)) if isinstance(inputs, torch.Tensor)
@@ -373,6 +381,9 @@ class LocalExecutor(BaseExecutor):
             **self._meter.summary(self._placement, *self._link),
             **self._epoch_extras(epoch_duration_s),
         }
+        if self._costs:
+            epoch_metrics.update(cost_fields(self._costs, self._costs_batch, n_samples,
+                                             self._placement.client_slices))
         for a in self._attacks:
             epoch_metrics.update({f"leak_{a.key}_{k}": v for k, v in a.metrics().items()})
         if self._profiles:
@@ -506,6 +517,18 @@ class LocalExecutor(BaseExecutor):
                     out[f"{key}_clients"] = vals
         out["test_samples"] = results[0].get("test_samples", 0)
         return out
+
+    def _measure_costs(self, inputs) -> list:
+        """Hardware-independent memory and FLOPs per slice on this first batch, or ``[]``
+        when they can't be measured here (inputs that aren't one tensor)."""
+        if not isinstance(inputs, torch.Tensor):
+            return []
+        self._costs_batch = int(inputs.shape[0])
+        try:
+            return slice_costs(self.split_layers, inputs, self._optimizer_cfg)
+        except Exception as e:               # never stop a run over its cost report
+            _LOG.warning("mem_bytes / flops not measured: %s", e)
+            return []
 
     def _epoch_extras(self, duration_s: float) -> dict:
         """Executor-specific fields for the epoch's history entry."""
