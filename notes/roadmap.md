@@ -565,6 +565,11 @@ shown in a Flower-based SplitFed baseline.
        capability-aware planning vs uniform on heterogeneous nodes; NAT/relay and TLS cost; recovery time
        after a node loss; out-of-core training vs FSDP/DeepSpeed offload.
     5. *Reality.* The same experiment in simulation and on the M13 testbed, and how far they differ.
+       **Owner decision 2026-10-22:** the simulator reports only hardware-independent results
+       (accuracy/loss, bytes and messages, memory, FLOPs); time, CPU and energy are measured on the
+       testbed only, not simulated. So this claim compares *those* metrics (losses are already
+       identical on the testbed, validation.md M14) and reports testbed time/energy as measured.
+       Why: on the Jetsons DVFS alone changes a step's time 2-7x (validation.md, jetson_clocks A/B).
   - **Related work:** SplitBud, SLPerf, Flower, FedML, PySyft, pipeline-parallel systems (GPipe, Oobleck),
     from `notes/sota.md`, only papers actually retrieved.
   - **Artifact:** packaged for artifact evaluation, reproducing every figure from configs + seeds.
@@ -592,6 +597,20 @@ shown in a Flower-based SplitFed baseline.
     export tracer gives the same partitions as fx on every model fx handles today, and traces at least one
     model that currently needs `pack=` (record which ones still don't). Benchmark eager vs compiled step time
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
+- **M18, multi-tensor cuts** (added 2026-10-22, owner decision; after the FGCS special-issue paper, not placed in the
+  order yet). Today exactly one tensor crosses each cut (`BaseSplitter.validate()`), so U-Net-style encoder-decoder
+  CNNs (skips at every level: only cuts near the ends are valid), encoder-decoder transformers (T5, Whisper, BART:
+  decoder layers cross-attend to the encoder output) and models with skips from the raw input can't be split usefully.
+  Decoder-only LLMs don't need it (masks/positions are rebuilt inside the stages), so the paper's work doesn't.
+  - **Step 0, cheap, any time:** when `validate()` refuses a cut, name the tensors that cross it and point to the
+    workaround; ship a small tested pack/unpack stage helper (cat at the sending side, split at the receiving side,
+    gradients flow through both) so users don't hand-write it.
+  - **The milestone:** a cut carries a tuple of tensors. Touches: boundary validation and `Partition.predecessors`;
+    transport (gRPC, raw TCP frame, IPC, NCCL send/recv; `pack_payload` already packs hooked payloads into one uint8
+    tensor); the `CutHook` API (per tensor or per tuple); GPipe micro-batching; offload stash/recompute; what privacy
+    attacks observe at a cut; byte metrics per cut.
+  - **Test:** equivalence matrix in every mode with a U-Net and a small T5 added, cut through the skips; every existing
+    cell unchanged; bytes per cut equal the sum of the crossing tensors.
 
 ## Handoff (read this first if you are a new session)
 Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-20: M13 done and merged to `main` (PR #5, 665a519), version 0.13.0; see M13 Status. Next by the milestone order: M10 multi-client engine, branch `feat/m10-*` forked from `feat/m13-baselines` (`ts.SplitServer`/`ts.SplitClient` are a start on it).** NCCL validated across two containers 2026-10-20 (validation #38–39). M7 deferred.
