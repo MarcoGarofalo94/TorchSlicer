@@ -1722,3 +1722,30 @@ container's lifetime, minus the median idle power of the 10 s before it
   32), mean power 3.0–3.2 W vs idle 2.9–3.0 W: one batch in flight across 8 clients keeps each
   client busy ~1/8 of the time. jon-001 idles at 4.7 W (another container runs there) and is
   left out of the mean.
+
+#### Why the simulator is short: edge devices slow down when work is bursty (2026-10-22)
+
+- Not GPU clock or CPU clock as tegrastats reports them: on the AGX, GR3D sat at its minimum
+  305 MHz (of 1300) in both the in-process twin and the testbed (`nvhost_podgov` never scales
+  up for this load), and busy cores ran ~1.4–1.5 GHz in both.
+- `benchmarks/testbed/idle_gap.py`: one slice's forward + backward + SGD step (synchronized),
+  with a sleep of GAP ms between steps (median of 60):
+
+  | device | slice | gap 0 | gap 60–100 ms | slowdown |
+  |---|---|---|---|---|
+  | Orin Nano | server | 5.7 ms | 15.5 ms | 2.7× |
+  | Orin Nano | client (conv1) | 2.8 ms | 13.0–13.6 ms (60–800 ms) | 4.8× |
+  | AGX Orin | server | 5.9–6.2 ms | 9.3–10.3 ms | 1.6–1.7× |
+  | GTX 1050 | server | 1.6 ms | 4.6 ms | 2.9× |
+  | A100 (shared with another tenant) | server | 2.1–3.7 ms, no trend | | — |
+
+  Split learning is bursty by nature (a client waits for the server, the server for the
+  next client), so **profiling compute in-process, always busy, underestimates edge devices
+  by 1.6–4.8×**. Mechanism not pinned down (GPU power gating / clock ramp below tegrastats'
+  200 ms sampling, CPU idle states delaying launches); the effect is measured.
+- Even the gap profiles (client 13.6 + server 10 ms) cover only half of the testbed's measured
+  compute (25 + 20 ms per batch): in the run the client's forward and backward are separate
+  bursts with ~50 ms of network wait between them, so the device goes cold twice per batch.
+  Next: a per-phase breakdown on the testbed (the worker profiler's phases reach the run
+  logger only; client nodes don't log them yet), and a duty-cycle-aware compute profile for
+  the simulator (`compute_scale` measured at the run's gaps, per phase).
