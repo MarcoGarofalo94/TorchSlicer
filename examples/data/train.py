@@ -59,6 +59,15 @@ class CharLM(nn.Module):
         return self.head(h)
 
 
+def npz_shape(path):
+    """(channels, classes, side) of an npz dataset (x: N, H, W[, C]; y: N)."""
+    import numpy as np
+    z = np.load(path)
+    x = z["x"]
+    in_ch = 1 if x.ndim == 3 else (x.shape[-1] if x.shape[-1] in (1, 3) else x.shape[1])
+    return in_ch, int(z["y"].max()) + 1, x.shape[1] if x.shape[1] not in (1, 3) else x.shape[2]
+
+
 SHAPES = {"mnist": (1, 10, 28), "fashion_mnist": (1, 10, 28), "cifar10": (3, 10, 32),
           "cifar100": (3, 100, 32), "synthetic": (3, 10, 32)}
 
@@ -70,7 +79,7 @@ if __name__ == "__main__":
     if cfg.data.dataset == "shakespeare":
         history = ts.run(lambda: CharLM(), run_config=cfg, cuts=["relu1"])
     else:
-        in_ch, n_classes, side = SHAPES[cfg.data.dataset]
+        in_ch, n_classes, side = SHAPES.get(cfg.data.dataset) or npz_shape(cfg.data.params["path"])
         history = ts.run(lambda: SmallCNN(in_ch, n_classes, side), run_config=cfg, cuts=["pool1"])
     for h in history:
         print(f"epoch {h['epoch']}: loss {h['loss']:.4f}  test_acc {h.get('test_accuracy', float('nan')):.4f}  "

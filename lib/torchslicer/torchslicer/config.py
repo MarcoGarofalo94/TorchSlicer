@@ -54,6 +54,7 @@ class TrainingConfig:
     })
     scheduler:        dict = None   # {name: linear, params: {warmup_steps, total_steps}}, local only
     mixed_precision:  bool = False
+    deterministic:    bool = False  # deterministic GPU kernels in every process (core/determinism.py)
 
 
 @dataclass
@@ -609,6 +610,7 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     # ── training ───────────────────────────────────────────────────────────────
     ("EPOCHS",            lambda cfg, v: setattr(cfg.training, "epochs",           int(v))),
     ("MIXED_PRECISION",   lambda cfg, v: setattr(cfg.training, "mixed_precision",  _parse_bool(v))),
+    ("DETERMINISTIC",     lambda cfg, v: setattr(cfg.training, "deterministic",    _parse_bool(v))),
     # ── pipeline ───────────────────────────────────────────────────────────────
     ("USE_GPIPE",         lambda cfg, v: setattr(cfg.pipeline, "use_gpipe",        _parse_bool(v))),
     ("N_MICRO",           lambda cfg, v: setattr(cfg.pipeline, "n_micro",          int(v))),

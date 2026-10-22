@@ -121,6 +121,9 @@ def run(model_fn, data_fn=None, *, run_config: RunConfig | None = None, role: st
         cfg = copy.deepcopy(cfg)
         cfg.deploy.role = role
     configure_process_logging(cfg.logging.level)
+    if cfg.training.deterministic:     # before model_fn or a loader touches the GPU
+        from ..core.determinism import set_deterministic
+        set_deterministic()
     topology, role = resolve_role(cfg)
     n = int(cfg.discovery.n_workers)
     _LOG.info("run topology=%s role=%s n=%s run_id=%s", topology, role, n, cfg.run_id)

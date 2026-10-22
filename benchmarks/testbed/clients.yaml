@@ -1,0 +1,48 @@
+# Client nodes on the physical testbed: every client its own node (slice 0 + its own shard),
+# one server worker (slice 1), a coordinator with no data. SplitFed (V2: the server is
+# shared, the clients' slices are averaged each round). Model: examples/data/train.py's
+# SmallCNN cut at pool1. Data: CIFAR-10 from an npz (x uint8 NHWC, y), IID, 1000 per client.
+# Same file runs in one process (deploy.topology: local / sl.client_nodes: false) for the
+# simulated twin. Launch: python -m torchslicer launch examples/data/train.py -c <this> ...
+run_id: testbed_clients
+
+training:
+  epochs: 3
+  deterministic: true   # GPU runs repeat exactly (cuDNN), so the testbed and its twin compare
+  optimizer: {name: SGD, params: {lr: 0.05, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+
+discovery:
+  n_workers: 2          # slice 0 on every client, slice 1 on the server
+
+logging:
+  enabled: false
+
+deploy:
+  topology: centralized
+
+network:
+  device: cuda
+
+transport:
+  tensor: tcp
+
+data:
+  dataset: npz
+  params:
+    path: data/cifar10_train.npz
+    test_path: data/cifar10_test.npz
+    mean: [0.4914, 0.4822, 0.4465]
+    std: [0.2470, 0.2435, 0.2616]
+  partition: iid
+  batch_size: 32
+  seed: 0
+  train_subset: 8000
+  eval_every: 0
+
+sl:
+  setting: vanilla
+  clients: 8
+  client_nodes: true
+  client_mode: parallel
+  algorithm: splitfed

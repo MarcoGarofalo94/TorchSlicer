@@ -1677,3 +1677,48 @@ slices, both on the GPU, 16 batches × 4 timed epochs; results and link fits in
   is why its ping is ~0.8 ms above a Nano's. Changing it needs the interface down (driver:
   "Coalesce parameters can be changed only if interface is down"), and eno1 is the only way
   in, so it wasn't tuned; the testbed runs on stock JetPack settings.
+
+### M14: 8 client nodes on the testbed, energy, simulator vs reality (2026-10-22)
+
+Setup: `benchmarks/testbed/clients.py` + `clients.yaml` (examples/data's SmallCNN cut at pool1,
+CIFAR-10 npz, IID, 1000 samples per client, batch 32, SplitFed V2 parallel, 3 epochs, tcp, GPU),
+coordinator + server worker on the AGX, one client node per Nano (8), baremetal target.
+Energy: `tegrastats --interval 200` on every Nano, VDD_IN integrated over each client
+container's lifetime, minus the median idle power of the 10 s before it
+(`notes/testbed/clients_exp.py`, raw runs in `notes/testbed/results/`, twins in `results/twin_agx.txt`). Seeds 0, 1, 2.
+
+- **42. GPU runs weren't reproducible, so nothing on GPU could be compared exactly**
+  (framework gap, not a regression). Two in-process runs of this config on the A100 from one
+  seed differed by up to 0.1 in loss within 3 epochs: cuDNN's default convolution backward
+  uses atomics, and SGD with momentum amplifies the noise. CPU runs were identical. Fix:
+  `training.deterministic` (env `DETERMINISTIC`, `core/determinism.py`): cuDNN deterministic,
+  no autotuning, `use_deterministic_algorithms(warn_only=True)`, `CUBLAS_WORKSPACE_CONFIG`;
+  applied by `ts.run` first thing (before CUDA is used), by `SlicedModel.train`, and on every
+  worker through `SliceConfig.deterministic` (field 23), so workers started without `ts.run`
+  get it too. Cost: speed (not measured here). Test: `tests/test_determinism.py` (the GPU test
+  fails 3/3 with the flag off, passes 3/3 with it on). A first version of that test leaked
+  `CUBLAS_WORKSPACE_CONFIG` into the test process (`monkeypatch.delenv(raising=False)` records
+  nothing when the variable is absent), and `test_offload`'s 100 MiB-capped subprocess then
+  ran out of GPU memory; the fixture now restores it by hand.
+- **Correctness:** losses on the 8-Nano testbed = the in-process twin on the AGX's Orin GPU
+  (`TOPOLOGY=local SL_CLIENT_NODES=0`, same file), all three seeds, every printed digit:
+  seed 0 [2.172188, 2.115542, 1.975147], seed 1 [2.134081, 2.099877, 1.879422], seed 2
+  [2.155340, 2.025841, 1.928616]. Final loss 1.928 ± 0.048.
+- **Time:** steady epoch (epochs 2–3, 250 batches) 27.28 ± 0.22 s = 109 ms/batch; epoch 1
+  ~31.4 s (warm-up). Per batch: client compute 25 ms (Nano), server compute 20 ms (AGX), cut
+  1.05 MB each way.
+- **Simulator vs reality (claim 5):** the simulator with the fitted Nano↔AGX tcp link (3.9 ms,
+  826 Mbit/s) gives `sim_comm_s` 8.07 s per epoch. Twin compute (all on the AGX, 4.0 s) +
+  sim comm = 12.1 s: **−56 %** vs measured. With the testbed's own compute (6.4 + 5.0 s) +
+  sim comm = 19.4 s: **−29 %**. Two gaps, both actionable:
+  1. devices: a Nano client computes its slice 4.3× slower than the AGX twin, and the AGX
+     *server* takes 5.0 s on the testbed vs 2.55 s in-process on the same AGX (likely DVFS
+     between bursty batches: not yet checked against the clock logs);
+  2. messages: the link model charges 3 messages per batch (activation, gradient, labels);
+     client nodes also send `client_step` (coordinator → client) and `batch_done` (client →
+     coordinator), and every message costs ~4 ms of software on a Nano (the fit's latency).
+     Unexplained after both: ~7.9 s per epoch = 32 ms/batch.
+- **Energy per client** (3 epochs, ~94 own batches): dynamic 19.4 ± 1.5 J (≈ 0.21 J per batch of
+  32), mean power 3.0–3.2 W vs idle 2.9–3.0 W: one batch in flight across 8 clients keeps each
+  client busy ~1/8 of the time. jon-001 idles at 4.7 W (another container runs there) and is
+  left out of the mean.

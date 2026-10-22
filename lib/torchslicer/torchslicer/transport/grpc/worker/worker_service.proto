@@ -104,6 +104,8 @@ message SliceConfig {
     // of itself per client (SplitFed V1), swapped in when a client's batch arrives.
     uint32  n_clients              = 21;
     bool    per_client_state       = 22;
+    // training.deterministic: deterministic GPU kernels on this worker (core/determinism.py).
+    bool    deterministic          = 23;
 }
 
 // A parameter reachable under several names, possibly on several workers.

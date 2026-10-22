@@ -1509,6 +1509,7 @@ class DistributedExecutor(BaseExecutor):
                 init_token         = init_token,
                 cut_hooks          = hook_buf.getvalue(),
                 n_slices           = n,
+                deterministic      = cfg.training.deterministic,
             )
             res = self._init_worker(proxy, slice_cfg, phase=phase)
             _LOG.info(

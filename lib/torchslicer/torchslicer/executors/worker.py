@@ -22,6 +22,7 @@ import torch
 from torch import nn, optim
 
 from ..config import NCCL_STORE_PORT_OFFSET as _NCCL_STORE_PORT_OFFSET, RunConfig
+from ..core.determinism import set_deterministic
 from ..core.split_layer import SplitLayer
 from ..core.tied import optimizer_parameters, retie
 from ..sl.hooks import CutContext, pack_payload, unpack_payload, tensor_nbytes
@@ -859,6 +860,8 @@ class WorkerServicer(
                 self._generation += 1
                 self._reset_state()
 
+            if request.deterministic:
+                set_deterministic()
             layers = self._build_layers(request.layers)
             predecessors = (
                 [list(p.indices) for p in request.predecessors]

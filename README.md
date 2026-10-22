@@ -419,6 +419,7 @@ training:
   criterion: {name: CrossEntropyLoss, params: {}}
   scheduler: {name: linear, params: {warmup_steps: 500, total_steps: 20000}}   # local executor
   mixed_precision: true          # bf16 autocast
+  deterministic: true            # same seed -> same losses on GPU too, in every process
 pipeline: {use_gpipe: true, n_micro: 4}
 discovery: {n_workers: 3}        # number of slices
 deploy: {topology: p2p}

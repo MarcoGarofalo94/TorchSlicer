@@ -383,7 +383,8 @@ class ClientNodesExecutor(DistributedExecutor):
             next_worker=self._proxies[i + 1].address if i < n - 1 else "",
             coordinator=self.coordinator_addr, n_micro=self._n_micro, run_id=self._run_id,
             worker_index=i, profile_verbosity=cfg.profile.verbosity, profile_memory=cfg.profile.memory,
-            predecessors=preds, tied=tied, init_token=token, cut_hooks=hook_buf.getvalue(), n_slices=n)
+            predecessors=preds, tied=tied, init_token=token, cut_hooks=hook_buf.getvalue(), n_slices=n,
+            deterministic=cfg.training.deterministic)
 
     def _log_plan(self, model_graph, partitions) -> None:
         super()._log_plan(model_graph, partitions)

@@ -1,0 +1,152 @@
+{
+ "name": "smoke",
+ "exit": "0",
+ "wall_s": 72.4,
+ "history": "[2.1721883709542453]",
+ "containers": {
+  "ts-smoke-client-0": {
+   "node": "jon-001",
+   "started": "2026-10-22T14:19:32.738690546Z",
+   "finished": "2026-10-22T14:20:43.11084083Z"
+  },
+  "ts-smoke-client-1": {
+   "node": "jon-003",
+   "started": "2026-10-22T14:19:35.162453274Z",
+   "finished": "2026-10-22T14:20:44.144375483Z"
+  },
+  "ts-smoke-client-2": {
+   "node": "jon-004",
+   "started": "2026-10-22T14:19:37.581979161Z",
+   "finished": "2026-10-22T14:20:44.219948715Z"
+  },
+  "ts-smoke-client-3": {
+   "node": "jon-005",
+   "started": "2026-10-22T14:19:39.810489749Z",
+   "finished": "2026-10-22T14:20:44.175841638Z"
+  },
+  "ts-smoke-client-4": {
+   "node": "jon-006",
+   "started": "2026-10-22T14:19:42.116823681Z",
+   "finished": "2026-10-22T14:20:44.183122568Z"
+  },
+  "ts-smoke-client-5": {
+   "node": "jon-007",
+   "started": "2026-10-22T14:19:44.433770914Z",
+   "finished": "2026-10-22T14:20:44.198340207Z"
+  },
+  "ts-smoke-client-6": {
+   "node": "jon-008",
+   "started": "2026-10-22T14:19:46.768561829Z",
+   "finished": "2026-10-22T14:20:44.198143499Z"
+  },
+  "ts-smoke-client-7": {
+   "node": "jon-009",
+   "started": "2026-10-22T14:19:49.094967929Z",
+   "finished": "2026-10-22T14:20:44.382210596Z"
+  },
+  "ts-smoke-worker-0": {
+   "node": "jor-001",
+   "started": "2026-10-22T14:19:51.10862296Z",
+   "finished": "2026-10-22T14:20:44.333348718Z"
+  },
+  "ts-smoke-coordinator": {
+   "node": "jor-001",
+   "started": "2026-10-22T14:19:52.448256003Z",
+   "finished": "2026-10-22T14:20:44.155179819Z"
+  }
+ },
+ "clients": {
+  "ts-smoke-client-0": {
+   "node": "jon-001",
+   "idle_w": 4.672,
+   "mean_w": 4.825932307692307,
+   "seconds": 70.372150182724,
+   "energy_j": 338.78590023207664,
+   "dynamic_j": 10.00721457839012
+  },
+  "ts-smoke-client-1": {
+   "node": "jon-003",
+   "idle_w": 2.862,
+   "mean_w": 3.0860806451612905,
+   "seconds": 68.98192238807678,
+   "energy_j": 211.53769999480247,
+   "dynamic_j": 14.111438120126707
+  },
+  "ts-smoke-client-2": {
+   "node": "jon-004",
+   "idle_w": 2.943,
+   "mean_w": 3.1728996655518396,
+   "seconds": 66.63796949386597,
+   "energy_j": 210.19915014648439,
+   "dynamic_j": 14.083605926036853
+  },
+  "ts-smoke-client-3": {
+   "node": "jon-005",
+   "idle_w": 2.934,
+   "mean_w": 3.1756805555555556,
+   "seconds": 64.3653519153595,
+   "energy_j": 202.90730011510848,
+   "dynamic_j": 14.059357595443714
+  },
+  "ts-smoke-client-4": {
+   "node": "jon-006",
+   "idle_w": 2.871,
+   "mean_w": 3.1373812949640287,
+   "seconds": 62.066298961639404,
+   "energy_j": 192.98429998660086,
+   "dynamic_j": 14.791955667734129
+  },
+  "ts-smoke-client-5": {
+   "node": "jon-007",
+   "idle_w": 2.993,
+   "mean_w": 3.2728426966292132,
+   "seconds": 59.76456928253174,
+   "energy_j": 194.5136000688076,
+   "dynamic_j": 15.638244206190109
+  },
+  "ts-smoke-client-6": {
+   "node": "jon-008",
+   "idle_w": 2.921,
+   "mean_w": 3.1849844357976655,
+   "seconds": 57.42958164215088,
+   "energy_j": 181.10245000481606,
+   "dynamic_j": 13.350642028093347
+  },
+  "ts-smoke-client-7": {
+   "node": "jon-009",
+   "idle_w": 3.069,
+   "mean_w": 3.3622016129032257,
+   "seconds": 55.28724265098572,
+   "energy_j": 184.4581997914314,
+   "dynamic_j": 14.78165209555624
+  }
+ },
+ "results": [
+  {
+   "step": 1,
+   "epoch": 1,
+   "loss": 2.172188,
+   "duration_s": 34.85,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    12.701498,
+    5.371997
+   ],
+   "client_compute_s": 12.701498,
+   "server_compute_s": 5.371997,
+   "sl_setting": "vanilla"
+  }
+ ]
+}

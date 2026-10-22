@@ -150,6 +150,8 @@ def run(name, script, config, nodes, envs, node_envs, timeout, extra_args=()):
     wall = time.time() - t0
     code = r.stdout.strip()
     logs = par_logs(cnames)
+    fmt = "{{.State.StartedAt}} {{.State.FinishedAt}}"
+    times = {nc: ssh(nc[0], f"docker inspect -f '{fmt}' {nc[1]}", sudo=True).stdout.split() for nc in cnames}
     os.makedirs(f"{HERE}/logs/{name}", exist_ok=True)
     for (node, cname), text in logs.items():
         open(f"{HERE}/logs/{name}/{cname}.log", "w").write(text)
@@ -159,13 +161,19 @@ def run(name, script, config, nodes, envs, node_envs, timeout, extra_args=()):
         if l.startswith("RESULT "):
             print(l, flush=True)
     hist = [l for l in logs[(dnode, dname)].splitlines() if l.startswith("HISTORY")]
-    print(json.dumps({"name": name, "exit": code, "wall_s": round(wall, 1),
-                      "history": hist[-1][8:] if hist else None}))
+    summary = {"name": name, "exit": code, "wall_s": round(wall, 1),
+               "history": hist[-1][8:] if hist else None}
+    print(json.dumps(summary))
     if not hist or code != "0":
         print(logs[(dnode, dname)][-3000:])
         for (n, c), t in logs.items():
             if c != dname and ("Error" in t or "Traceback" in t):
                 print(f"--- {c} ---\n{t[-1500:]}")
+    summary["containers"] = {c: {"node": n, "started": times[(n, c)][0] if times[(n, c)] else None,
+                                 "finished": times[(n, c)][1] if len(times[(n, c)]) > 1 else None}
+                             for n, c in cnames}
+    summary["driver_log"] = logs[(dnode, dname)]
+    return summary
 
 
 def scripts_order(out, scripts):

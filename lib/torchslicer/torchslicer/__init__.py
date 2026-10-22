@@ -3,6 +3,7 @@ __author__ = 'Marco Garofalo'
 
 from .core.slicer import Slicer
 from .core.split_layer import SplitLayer
+from .core.determinism import set_deterministic
 from .core.model_graph import ModelGraph, LayerNode, TraceError, _FlattenWrapper, _AddWrapper
 from .strategies.base import BaseSplitter, Partition
 from .strategies.uniform import UniformSplitter
@@ -207,6 +208,8 @@ class SlicedModel:
             raise ValueError("criterion must be provided directly or via run_config.training.criterion")
 
         n_micro = resolved_n_micro if resolved_use_gpipe else 1
+        if cfg is not None and cfg.training.deterministic:
+            set_deterministic()
         if cfg is not None and cfg.offload.mode not in ("", "none") and type(self.executor) is LocalExecutor:
             self.executor = OffloadExecutor()          # offload.* comes from the config
         import inspect
