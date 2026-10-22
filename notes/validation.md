@@ -1749,3 +1749,19 @@ container's lifetime, minus the median idle power of the 10 s before it
   Next: a per-phase breakdown on the testbed (the worker profiler's phases reach the run
   logger only; client nodes don't log them yet), and a duty-cycle-aware compute profile for
   the simulator (`compute_scale` measured at the run's gaps, per phase).
+- **Cause confirmed: Jetson DVFS** (owner-approved A/B, `notes/testbed/ab_clocks.sh` via
+  `run_ab_clocks.py`: `jetson_clocks --store`, bench, `jetson_clocks`, bench, `--restore` on
+  exit; restored and checked: GPU 306–1300 MHz, EMC override 0, 45 °C). AGX Orin, median step:
+
+  | slice | stock gap 0 | stock gap 60–200 ms | jetson_clocks gap 0 | jetson_clocks gap 60–200 ms |
+  |---|---|---|---|---|
+  | server | 5.92 ms | 9.3–10.0 ms | 2.06 ms | 2.08 ms |
+  | client | 2.67 ms | 7.1–7.2 ms | 1.06 ms | 1.00 ms |
+
+  With the clocks pinned the gap doesn't matter and the step is 2.9–7× faster: on stock
+  settings the governors (GPU `nvhost_podgov`, EMC at 204 of 3199 MHz) never ramp up for
+  split learning's millisecond bursts, even back to back. So the testbed's stock numbers are
+  a deployment property, not TorchSlicer's: the paper should report both (stock = what a
+  default Jetson gives; pinned = the hardware). The Nano wasn't A/B'd: its `jetson_clocks
+  --restore` printed "Invalid persistence mode: 2 … Terminating early" earlier, so a clean
+  revert isn't guaranteed there (a reboot would restore it).
