@@ -1,0 +1,228 @@
+{
+ "name": "prof_label_s0",
+ "exit": "0",
+ "wall_s": 96.8,
+ "history": "[2.1721883709542453, 2.115541552193463]",
+ "containers": {
+  "ts-prof_label_s0-client-0": {
+   "node": "jon-001",
+   "started": "2026-10-22T16:09:06.520427278Z",
+   "finished": "2026-10-22T16:10:42.571852403Z"
+  },
+  "ts-prof_label_s0-client-1": {
+   "node": "jon-003",
+   "started": "2026-10-22T16:09:13.103244983Z",
+   "finished": "2026-10-22T16:10:42.623215294Z"
+  },
+  "ts-prof_label_s0-client-2": {
+   "node": "jon-004",
+   "started": "2026-10-22T16:09:16.262324318Z",
+   "finished": "2026-10-22T16:10:42.635058037Z"
+  },
+  "ts-prof_label_s0-client-3": {
+   "node": "jon-005",
+   "started": "2026-10-22T16:09:18.787706619Z",
+   "finished": "2026-10-22T16:10:41.573852272Z"
+  },
+  "ts-prof_label_s0-client-4": {
+   "node": "jon-006",
+   "started": "2026-10-22T16:09:21.315156669Z",
+   "finished": "2026-10-22T16:10:42.655737451Z"
+  },
+  "ts-prof_label_s0-client-5": {
+   "node": "jon-007",
+   "started": "2026-10-22T16:09:23.66741481Z",
+   "finished": "2026-10-22T16:10:42.64765388Z"
+  },
+  "ts-prof_label_s0-client-6": {
+   "node": "jon-008",
+   "started": "2026-10-22T16:09:25.984839715Z",
+   "finished": "2026-10-22T16:10:42.653543165Z"
+  },
+  "ts-prof_label_s0-client-7": {
+   "node": "jon-009",
+   "started": "2026-10-22T16:09:28.249721709Z",
+   "finished": "2026-10-22T16:10:42.659527456Z"
+  },
+  "ts-prof_label_s0-worker-0": {
+   "node": "jor-001",
+   "started": "2026-10-22T16:09:30.065405765Z",
+   "finished": "2026-10-22T16:10:42.629645576Z"
+  },
+  "ts-prof_label_s0-coordinator": {
+   "node": "jor-001",
+   "started": "2026-10-22T16:09:31.380162459Z",
+   "finished": "2026-10-22T16:10:42.28699892Z"
+  }
+ },
+ "clients": {
+  "ts-prof_label_s0-client-0": {
+   "node": "jon-001",
+   "idle_w": 4.672,
+   "mean_w": 4.8216380090497735,
+   "seconds": 96.05142521858215,
+   "energy_j": 462.23055056786535,
+   "dynamic_j": 13.478291946649563
+  },
+  "ts-prof_label_s0-client-1": {
+   "node": "jon-003",
+   "idle_w": 2.822,
+   "mean_w": 3.05591,
+   "seconds": 89.51997017860413,
+   "energy_j": 272.6646997938156,
+   "dynamic_j": 20.039343949794755
+  },
+  "ts-prof_label_s0-client-2": {
+   "node": "jon-004",
+   "idle_w": 2.943,
+   "mean_w": 3.1504404145077722,
+   "seconds": 86.37273359298706,
+   "energy_j": 270.37630005836485,
+   "dynamic_j": 16.18134509420392
+  },
+  "ts-prof_label_s0-client-3": {
+   "node": "jon-005",
+   "idle_w": 2.934,
+   "mean_w": 3.1244972972972973,
+   "seconds": 82.78614568710327,
+   "energy_j": 257.6642002723217,
+   "dynamic_j": 14.76964882636068
+  },
+  "ts-prof_label_s0-client-4": {
+   "node": "jon-006",
+   "idle_w": 2.871,
+   "mean_w": 3.0970550964187327,
+   "seconds": 81.340580701828,
+   "energy_j": 250.6718336763382,
+   "dynamic_j": 17.143026481389995
+  },
+  "ts-prof_label_s0-client-5": {
+   "node": "jon-007",
+   "idle_w": 2.993,
+   "mean_w": 3.2527994350282485,
+   "seconds": 78.98023891448975,
+   "energy_j": 256.08099954175947,
+   "dynamic_j": 19.693144470691664
+  },
+  "ts-prof_label_s0-client-6": {
+   "node": "jon-008",
+   "idle_w": 2.921,
+   "mean_w": 3.1502761627906977,
+   "seconds": 76.66870355606079,
+   "energy_j": 240.52349999189377,
+   "dynamic_j": 16.574216904640224
+  },
+  "ts-prof_label_s0-client-7": {
+   "node": "jon-009",
+   "idle_w": 3.028,
+   "mean_w": 3.2898524096385544,
+   "seconds": 74.40980577468872,
+   "energy_j": 243.51371699500083,
+   "dynamic_j": 18.200825109243397
+  }
+ },
+ "results": [
+  {
+   "step": 1,
+   "epoch": 1,
+   "loss": 2.172188,
+   "duration_s": 29.744,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    9.418399,
+    5.391172
+   ],
+   "client_compute_s": 9.418399,
+   "server_compute_s": 5.391172,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 2806.942,
+     "backward": 2649.454,
+     "optimizer": 1212.738,
+     "send_fwd": 1326.291,
+     "send_bwd": 0.0,
+     "idle_fwd": 194282.266,
+     "idle_bwd": 12515.465
+    },
+    {
+     "forward": 1795.752,
+     "backward": 1967.466,
+     "optimizer": 700.838,
+     "send_fwd": 0.0,
+     "send_bwd": 978.376,
+     "idle_fwd": 15217.801,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 37.47,
+    "send": 5811.078,
+    "wait": 23547.483
+   }
+  },
+  {
+   "step": 2,
+   "epoch": 2,
+   "loss": 2.115542,
+   "duration_s": 25.619,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    6.376392,
+    5.038657
+   ],
+   "client_compute_s": 6.376392,
+   "server_compute_s": 5.038657,
+   "sl_setting": "vanilla",
+   "profile_ms": [
+    {
+     "forward": 969.901,
+     "backward": 1601.939,
+     "optimizer": 812.633,
+     "send_fwd": 915.324,
+     "send_bwd": 0.0,
+     "idle_fwd": 188153.234,
+     "idle_bwd": 12282.409
+    },
+    {
+     "forward": 1555.254,
+     "backward": 1921.423,
+     "optimizer": 673.162,
+     "send_fwd": 0.0,
+     "send_bwd": 666.07,
+     "idle_fwd": 14159.86,
+     "idle_bwd": 0.0
+    }
+   ],
+   "coordinator_ms": {
+    "data_load": 22.868,
+    "send": 5584.437,
+    "wait": 19694.959
+   }
+  }
+ ]
+}

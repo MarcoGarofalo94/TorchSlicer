@@ -688,6 +688,7 @@ class WorkerServicer(
         self._dist_group  = None  # torch.distributed ProcessGroup for NCCL transport; None otherwise
         self._nccl_future = None  # pending rendezvous Future; waited on before first NCCL transfer
         self._nccl_meta   = futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="nccl-meta")
+        self._label_calls = futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="labels")
         self._reset_state()
 
         # Single-worker compute pool: serialises forward/backward on this worker
@@ -1412,8 +1413,10 @@ class WorkerServicer(
 
     def _drive_batch(self, batch_id: int, inputs, labels: torch.Tensor) -> None:
         """What the coordinator does for a batch (``DistributedExecutor._send_batch``),
-        done by the client that owns it: per (micro-)batch, the labels to the last slice,
-        then the input into this slice."""
+        done by the client that owns it: per (micro-)batch, the labels to the last slice
+        and the input into this slice. The label call runs while this slice computes (the
+        last slice takes the two in either order): its round trip was on every batch's
+        critical path. Its result is still awaited, so an error fails the step."""
         from .distributed import _unpack_inputs
         main, aux = _unpack_inputs(inputs)
         M = self._n_micro
@@ -1424,12 +1427,16 @@ class WorkerServicer(
             parts = [(batch_id * M + m, mains[m], ys[m],
                       {k: v.chunk(M)[m] if v.dim() > 0 and v.shape[0] == main.shape[0] else v
                        for k, v in aux.items()}) for m in range(M)]
+        sent = []
         for mbid, x, y, a in parts:
             self._comm["bytes_label"] += tensor_nbytes(y)
             self._comm["msgs_label"] += 1
-            self._label_stub.forward(worker_service_pb2.ForwardRequest(
-                batch_id=mbid, label=serialize_tensor(y)))
+            req = worker_service_pb2.ForwardRequest(batch_id=mbid, label=serialize_tensor(y))
+            sent.append(self._label_calls.submit(contextvars.copy_context().run,
+                                                 self._label_stub.forward, req))
             self.submit_input(mbid, x, a)
+        for f in sent:
+            f.result()
 
     def _read_state(self) -> dict:
         """This slice's weights and optimizer state, as CPU copies."""

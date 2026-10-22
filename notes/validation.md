@@ -1765,3 +1765,35 @@ container's lifetime, minus the median idle power of the 10 s before it
   default Jetson gives; pinned = the hardware). The Nano wasn't A/B'd: its `jetson_clocks
   --restore` printed "Invalid persistence mode: 2 … Terminating early" earlier, so a clean
   revert isn't guaranteed there (a reboot would restore it).
+
+#### Where a client-node batch goes on the testbed (2026-10-22, profile.verbosity 1)
+
+New: with `profile.verbosity >= 1` every epoch's history entry has `profile_ms` (per slice,
+each profiler phase's total ms; with client nodes slice 0 is summed over the clients) and
+`coordinator_ms` (data_load / send / wait). Test: `test_profile_breakdown_sums_every_client`.
+Before, the phases went only to the run logger, and the client-node merge dropped them.
+
+Steady epoch, seed 0, stock clocks, per batch (250 batches, 108.5 ms):
+
+| where | ms |
+|---|---|
+| client: forward 3.2 + backward 6.2 + step 3.2 | 12.6 |
+| client: send activation | 3.6 |
+| client: idle until the gradient (server + network both ways) | 50.5 |
+| server: forward 6.3 + backward 7.9 + step 2.8 | 17.0 |
+| server: send gradient | 2.5 |
+| coordinator: inside `client_step` (returns once the client has started the batch) | 21.0 |
+| coordinator: waiting for `batch_done` | 86.2 |
+
+The client's own path is ~67 ms; the other ~42 ms is the control plane (coordinator →
+client `client_step`, the client's label call to the server inside it, `batch_done` back),
+plus loading the batch (2.4 ms on a Nano, measured apart). The simulator charges 3 messages
+x 3.9 ms for all of it.
+
+- **Engine fix (not a bug):** the client sent its labels to the last slice with a blocking
+  call *before* starting its forward, so that round trip was on every batch's critical path.
+  It now runs on a small pool while the slice computes (the last slice takes labels and
+  activation in either order) and is awaited before `client_step` returns, so an error
+  still fails the step. Testbed: steady epoch 27.13 → 25.62 s (−5.6 %, 108.5 → 102.5 ms per
+  batch; seed-to-seed spread was ±0.22 s), losses identical. The router's `_RoutedCall` has
+  no `.future` (tunnel calls), hence a pool rather than `stub.forward.future`.

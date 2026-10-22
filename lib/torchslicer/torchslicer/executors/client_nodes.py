@@ -40,7 +40,7 @@ from ..core.split_layer import SplitLayer
 from ..sl.hooks import resolve_cut_hooks
 from ..sl.metrics import CommMeter
 from ..sl.roles import Placement
-from .distributed import DistributedExecutor, build_tied_configs, _build_layer_configs
+from .distributed import DistributedExecutor, build_tied_configs, _build_layer_configs, _PHASES
 
 _LOG = get_logger("torchslicer.client_nodes")
 _MAX_BATCH_ID = 2 ** 32
@@ -663,6 +663,15 @@ class ClientNodesExecutor(DistributedExecutor):
                       "msgs_bwd", "bytes_label", "msgs_label"):
                 setattr(merged, f, getattr(merged, f) + getattr(r, f))
             merged.compute_ms += r.compute_ms
+            for p in _PHASES:                     # profiler phases (profile.verbosity >= 1)
+                src, dst = getattr(r, p), getattr(merged, p)
+                if src.count:
+                    dst.min_ms = min(dst.min_ms, src.min_ms) if dst.count else src.min_ms
+                    dst.max_ms = max(dst.max_ms, src.max_ms)
+                    dst.p95_ms = max(dst.p95_ms, src.p95_ms)      # an upper bound
+                    dst.total_ms += src.total_ms
+                    dst.count += src.count
+                    dst.avg_ms = dst.total_ms / dst.count
         return [merged, *servers]
 
     def _add_worker_comm(self, stats: list) -> None:

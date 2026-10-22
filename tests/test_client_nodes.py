@@ -429,3 +429,25 @@ def test_server_recovery_replays_the_round_exactly(mode, kill_at, tmp_path):
     assert [round(e["loss"], 6) for e in h] == ref
     _same_states(remote.states, session.states)
     assert len(ex.partitions) == 2                    # slice 0 on the clients, one server worker left
+
+
+def test_profile_breakdown_sums_every_client(monkeypatch):
+    # profile.verbosity >= 1: each epoch says where its time went, per slice and phase; slice
+    # 0's phases are summed over the client nodes (each client runs its own batches)
+    plain = _cfg
+    def profiled(transport="grpc"):
+        c = plain(transport)
+        c.profile.verbosity = 1
+        return c
+    monkeypatch.setattr(sys.modules[__name__], "_cfg", profiled)
+    _, _, h = _nodes("parallel", "copy", None)
+    for e in h:
+        client, *servers = e["profile_ms"]                       # slice 0, then the server slices
+        assert len(servers) == len(CUTS)
+        assert {"forward", "backward", "optimizer", "send_fwd"} <= set(client)
+        assert {"forward", "backward", "optimizer", "send_bwd"} <= set(servers[-1])
+        assert all(v >= 0 for p in e["profile_ms"] for v in p.values())
+        assert set(e["coordinator_ms"]) == {"data_load", "send", "wait"}
+    monkeypatch.setattr(sys.modules[__name__], "_cfg", plain)
+    _, _, h = _nodes("parallel", "copy", None)
+    assert "profile_ms" not in h[0]          # without profiling the history has no such fields

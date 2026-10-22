@@ -48,6 +48,16 @@ except ImportError:
 
 _LOG = get_logger("torchslicer.coordinator")
 
+_PHASES = ("forward", "backward", "optimizer", "send_fwd", "send_bwd", "idle_fwd", "idle_bwd")
+
+
+def _phase_totals(resp) -> dict:
+    """``{phase: total ms}`` of a worker's epoch stats (``{}`` when it didn't answer)."""
+    if resp is None:
+        return {}
+    return {p: round(getattr(resp, p).total_ms, 3) for p in _PHASES if getattr(resp, p).count}
+
+
 class WorkerFailureError(RuntimeError):
     """Raised by train_epoch() when a worker's heartbeat times out."""
     def __init__(self, worker_idx: int, address: str, epoch: int, reason: str | None = None):
@@ -700,6 +710,15 @@ class DistributedExecutor(BaseExecutor):
             "phase":      "epoch",
             **sl_metrics,
         }
+        if self._run_config.profile.verbosity >= 1:
+            # where the epoch went: per slice, each phase's total ms; the coordinator's own
+            # time sending batches and waiting for them (profile.verbosity >= 1 only)
+            sl_metrics["profile_ms"] = [_phase_totals(r) for r in stats]
+            sl_metrics["coordinator_ms"] = {"data_load": round(data_load_total_ms, 3),
+                                            "send": round(send_total_ms, 3),
+                                            "wait": round(wait_total_ms, 3)}
+            epoch_metrics.update(profile_ms=sl_metrics["profile_ms"],
+                                 coordinator_ms=sl_metrics["coordinator_ms"])
         for cb in self._callbacks:
             try:
                 result = cb.on_epoch_end(epoch, epoch_metrics)
