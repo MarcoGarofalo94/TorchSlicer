@@ -1,0 +1,20 @@
+# benchmarks/testbed/link.py between two real hosts: driver (slice 0) + one follower (slice 1).
+# Per-node DEVICE / TENSOR_TRANSPORT / BENCH_MODEL come from the environment.
+run_id: testbed_link
+
+training:
+  epochs: 5             # epoch 1 = warm-up, 2..5 timed
+  optimizer: {name: SGD, params: {lr: 0.01, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+
+discovery:
+  n_workers: 2
+
+logging:
+  enabled: false
+
+deploy:
+  topology: p2p
+
+network:
+  device: cuda

@@ -1596,3 +1596,84 @@ invisible there.
   weights, on one server worker instead of two.
 - Limit, as in every distributed run: recovery rebuilds the server optimizers (their state
   isn't reloaded across a re-split), so with momentum/Adam the replayed round differs.
+
+## M14 start: the physical testbed (2026-10-22, branch `feat/m10-multi-client`)
+
+Setup: 8 Jetson Orin Nano (6 ARM cores, 7.3 GB unified memory, Ampere iGPU), one Jetson AGX
+Orin (12 cores, 61 GB), one Dell G3 (x86, GTX 1050 4 GB, sm_61), on one lab LAN (172.17.0.0/19,
+gigabit NICs). Topology (owner): the Jetsons share one MikroTik gigabit switch; the Dell is in an
+office behind the building's 100 Mbit/s switches, a real slow edge link. Each node runs the owner's existing images (`mesl-jetson`: Python 3.10, torch
+2.11, grpcio 1.84; `mesl-x86`: Python 3.11, torch 2.5.1, grpcio 1.68) with the branch mounted
+(`git archive HEAD`, tracked files only) in `~/ts-test`. Runs use the `baremetal` launcher
+target as written: one script per node, run inside the image (`sh <node>.sh`). This container
+(A100) reaches the LAN but the LAN can't reach it (a real one-way NAT).
+
+Raw link (benchmarks/testbed/sock_bw.py, one TCP socket, 64 MB, median of 5):
+
+| pair | RTT | up / down |
+|---|---|---|
+| Nano ↔ Nano | 0.19 ms | 90 / 89 MB/s |
+| Nano ↔ AGX | 1.3 ms | 86 / 113 MB/s |
+| Nano ↔ Dell, AGX ↔ Dell | 1.3–1.6 ms | 11.6 / 11.2 MB/s |
+
+Correctness across real hosts (losses per epoch, `examples/run_anywhere`, `examples/sl`):
+- Same architecture: **bit-identical** to the same training in one process on that
+  architecture, on CPU and on the Orin GPUs: centralized (AGX coordinator + 3 Nano workers;
+  gRPC and raw TCP), P2P (3 Nanos), client nodes (`sl_client_nodes.yaml`: AGX coordinator,
+  2 Nano server workers, 4 Nano clients = 7 hosts).
+- Across architectures nothing is bit-exact, and isn't expected to be: ARM vs x86 CPU differ
+  by 9e-6 (epoch 1) / 3e-4 (epoch 2) on the same unsplit model; mixed P2P (Dell driver + Nano
+  + AGX) is within 2e-5 of x86; the GPU runs (Orin, 1050, A100) agree to ~1e-7.
+- Test suite in the images: Nano 403 passed / 4 skipped, AGX same, Dell (torch 2.5.1, no
+  transformers/peft) 401 passed / 4 skipped, after the fixes below. So torch 2.5 works too.
+
+- **40. `transport.tensor: ipc` crashed or hung on Jetson** (`executors/worker.py`, since M9).
+  Symptom: Orin Nano: `CUDA error: operation not supported` at the first batch
+  (`_share_cuda_`); AGX Orin: the export works but the receiver's open fails (`invalid
+  argument`), and the run hangs until the launcher's timeout. Root cause: CUDA IPC needs a
+  discrete GPU; Tegra's integrated GPU doesn't support it, and ipc was chosen only on "same
+  machine". Fix: `_cuda_ipc_supported()` (discrete GPU = `not is_integrated`, checked once per
+  process, with a warning) → TCP otherwise. Cost: none. Test:
+  `test_ipc_uses_tcp_without_cuda_ipc`; `test_ipc_matches_tcp_on_gpu` passes on the Nano and
+  AGX (its quantize variant is skipped without IPC: two plain TCP runs on the Orin GPU already
+  differ by up to 2e-4 with the 8-bit quantize hook, 1e-7 without; the Orin's kernels aren't
+  deterministic, and quantization rounds the noise up).
+- **41. A tensor that arrives but can't be rebuilt hung the run** (`_handle_tensor_conn`,
+  since M9). Found with #40 on the AGX. Root cause: the receiver only closed the stream; the
+  sender logged "peer unavailable" (it assumes a dead peer, which the heartbeats then catch),
+  but the heartbeats saw a live peer, so nobody failed the run. Fix: `_TensorDecodeError` from
+  `_read_ipc_frame_rest`, reported by the receiver as a fatal worker error (phase
+  `ipc_receive`), so the run stops with the reason. Test:
+  `test_an_ipc_frame_that_does_not_open_is_reported`.
+- Seen once here, not reproduced (3 + 1 reruns): `test_ipc_matches_tcp_on_gpu[None]` failed on
+  the A100 while another tenant held it at 100 % / 62 GB. Same family as the offload NaN flake
+  under contention.
+- Also seen once: the full local suite hung >2 h inside `tests/test_nat.py` (one process, no
+  children; A100 at 98 % from another tenant). `test_nat.py` alone: 24 passed in 74 s; the
+  full suite again with `-o faulthandler_timeout=300`: 407 passed, 1 skipped, no hang. Not
+  reproduced; if it comes back, the faulthandler dump says where.
+
+Transport over the real LAN (benchmarks/testbed/link.py: the bench_transport models, P2P, 2
+slices, both on the GPU, 16 batches × 4 timed epochs; results and link fits in
+`benchmarks/testbed/results/`; driver `notes/testbed/tb.py`):
+
+| pair | model (cut MB) | tcp ms/batch | grpc ms/batch | tcp goodput (both ways) |
+|---|---|---|---|---|
+| Nano ↔ Nano | small (0.07) | 27.7 | 30.6 | — (fixed cost ~13 ms) |
+| | medium (2.1) | 136.6 | 194.9 | 77 MB/s |
+| | act8 (8.4) | 268.2 | 403.9 | 87 MB/s |
+| | act32 (33.6) | 897.2 | 1418.3 | 94 MB/s (wire: 90) |
+| Nano ↔ AGX | act32 | 838.4 | 1329.6 | 102 MB/s |
+| Nano ↔ Dell | act8 | 1579.8 | 1632.0 | 11 MB/s (wire: 11.5) |
+
+- Raw TCP reaches the wire on the gigabit links; gRPC tops out at 51–58 MB/s there (1.5–1.8×
+  slower at large cuts). On the 100 Mbit/s link the wire is the limit and both are equal.
+- A Nano pays ~12–15 ms per batch at a tiny cut: per-message software cost on its ARM cores
+  (RTT is 0.2 ms), not the network.
+- Simulator link model fitted to these (`fit_link.py`, other = 3·latency + 2·cut/bandwidth):
+  tcp 4.4 ms + 763 Mbit/s (Nano↔Nano), 3.9 ms + 826 Mbit/s (Nano↔AGX), 2.8 ms + 89 Mbit/s
+  (Nano↔Dell); median error 1–3 %. gRPC: 6.4 ms + 434, 4.5 ms + 471, 2.8 ms + 86.
+- AGX NIC: `nvethernet` defaults to rx-usecs 512 / rx-frames 64 (interrupt coalescing), which
+  is why its ping is ~0.8 ms above a Nano's. Changing it needs the interface down (driver:
+  "Coalesce parameters can be changed only if interface is down"), and eno1 is the only way
+  in, so it wasn't tuned; the testbed runs on stock JetPack settings.

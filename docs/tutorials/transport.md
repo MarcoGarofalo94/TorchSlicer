@@ -54,7 +54,8 @@ difference below 8 MB.
 The sender exports the GPU buffer as a CUDA IPC handle (~350 bytes) over the TCP
 socket. The receiver maps it, clones it on the GPU and ACKs, so the sender can
 release it. No host copy: a 67 MB activation moves in ~8 ms vs ~81 ms on TCP. CPU
-tensors and peers on another machine use TCP. Cut hooks work: hooked payloads are
+tensors, peers on another machine and GPUs without CUDA IPC (integrated ones such as
+Jetson, checked once per process with a warning) use TCP. Cut hooks work: hooked payloads are
 packed on the GPU (`pack_payload`), so they go through IPC too.
 
 ## nccl

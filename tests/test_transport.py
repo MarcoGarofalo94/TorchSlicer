@@ -74,10 +74,53 @@ def test_nccl_path_decodes_cut_hooks(tmp_path):
 @pytest.mark.skipif(not CUDA, reason="needs CUDA")
 @pytest.mark.parametrize("hooks", [None, QUANTIZE])
 def test_ipc_matches_tcp_on_gpu(tmp_path, hooks):
+    from torchslicer.executors.worker import _cuda_ipc_supported
+    if hooks and not _cuda_ipc_supported():
+        pytest.skip("no CUDA IPC on this GPU, so ipc is tcp: two tcp runs differ by more "
+                    "than 1e-5 here (non-deterministic kernels, rounded by the quantize hook)")
     env = {"DEVICE": "cuda", "CUBLAS_WORKSPACE_CONFIG": ":4096:8"}
     tcp = _launch(tmp_path, {**env, "TENSOR_TRANSPORT": "tcp"}, hooks=hooks)
     ipc = _launch(tmp_path, {**env, "TENSOR_TRANSPORT": "ipc"}, hooks=hooks)
     assert ipc == pytest.approx(tcp, abs=1e-5)
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_ipc_uses_tcp_without_cuda_ipc(monkeypatch, supported):
+    # Jetson's integrated GPU can't export IPC handles ("operation not supported" at the
+    # first batch): the ipc transport must fall back to TCP there, as for another machine
+    import torchslicer.executors.worker as w
+    monkeypatch.setattr(w, "_CUDA_IPC", supported)
+    ws = w.WorkerServicer()
+    ws._tensor_transport = "ipc"
+    _, client = ws._peer_links("127.0.0.1:50051")
+    assert type(client) is (w._IpcPeerClient if supported else w._TensorPeerClient)
+
+
+def test_an_ipc_frame_that_does_not_open_is_reported(monkeypatch):
+    # AGX Orin: the handle arrives but does not open in this process. Before, the receiver
+    # only closed the stream: the sender logged "peer unavailable", the heartbeats saw a
+    # live peer, and the run hung. Now the receiver reports a fatal error with the reason.
+    import pickle
+    import socket
+    import torchslicer.executors.worker as w
+    ws = w.WorkerServicer()
+    reported = []
+    monkeypatch.setattr(ws, "_report_fatal_error", lambda phase, b, e: reported.append((phase, b, str(e))))
+    a, b = socket.socketpair()
+    handle = pickle.dumps(_Unopenable())
+    a.sendall(w._IPC_FRAME_HEADER.pack(b"f", 7, len(handle), 0) + handle)
+    ws._handle_tensor_conn(b, "peer")
+    a.close()
+    assert reported and reported[0][:2] == ("ipc_receive", 7) and "batch 7" in reported[0][2]
+
+
+class _Unopenable:
+    def __reduce__(self):
+        return (_refuse, ())
+
+
+def _refuse():
+    raise RuntimeError("CUDA error: invalid argument")
 
 
 @pytest.mark.skipif(not CUDA or torch.cuda.device_count() != 1, reason="needs exactly one GPU")

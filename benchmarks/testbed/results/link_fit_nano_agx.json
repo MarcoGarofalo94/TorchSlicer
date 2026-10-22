@@ -1,0 +1,20 @@
+{
+ "source": "link_nano_agx.json",
+ "max_mb": 40.0,
+ "fits": {
+  "grpc": {
+   "latency_ms": 4.522,
+   "bandwidth_mbps": 471.2,
+   "n": 4,
+   "median_rel_err": 0.02,
+   "max_rel_err": 0.086
+  },
+  "tcp": {
+   "latency_ms": 3.896,
+   "bandwidth_mbps": 826.3,
+   "n": 4,
+   "median_rel_err": 0.008,
+   "max_rel_err": 0.05
+  }
+ }
+}

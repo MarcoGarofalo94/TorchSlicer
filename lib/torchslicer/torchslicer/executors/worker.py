@@ -95,6 +95,16 @@ class _TensorStreamClosed(_TensorStreamError):
     """Raised when the raw tensor stream is closed cleanly by the peer."""
 
 
+class _TensorDecodeError(_TensorStreamError):
+    """A frame arrived but its tensor could not be rebuilt (e.g. a CUDA IPC handle that
+    does not open here): the receiver reports it, since the sender only sees a closed
+    stream and the heartbeats see a live peer."""
+
+    def __init__(self, batch_id: int, exc: Exception):
+        super().__init__(f"cannot rebuild the tensor of batch {batch_id}: {exc}")
+        self.batch_id = batch_id
+
+
 # ── dtype maps ─────────────────────────────────────────────────────────────────
 
 _DTYPE_MAP: dict = {}
@@ -360,6 +370,23 @@ def _is_same_machine(addr: str) -> bool:
         return False
 
 
+_CUDA_IPC: bool | None = None
+
+
+def _cuda_ipc_supported() -> bool:
+    """Whether CUDA IPC works here: a discrete GPU. Integrated ones (Jetson/Tegra) don't
+    have it (the Orin Nano refuses the export, the AGX Orin exports a handle that the
+    other process can't open), so ipc falls back to TCP there."""
+    global _CUDA_IPC
+    if _CUDA_IPC is None:
+        _CUDA_IPC = torch.cuda.is_available() and not torch.cuda.get_device_properties(
+            torch.cuda.current_device()).is_integrated
+        if torch.cuda.is_available() and not _CUDA_IPC:
+            _LOG.warning("transport.tensor=ipc: no CUDA IPC on an integrated GPU (%s); using tcp",
+                         torch.cuda.get_device_name())
+    return _CUDA_IPC
+
+
 class _IpcPeerClient:
     """CUDA IPC peer client for same-machine GPU-to-GPU tensor transfer.
 
@@ -475,7 +502,10 @@ def _read_ipc_frame_rest(sock: socket.socket) -> tuple[int, torch.Tensor, bytes]
     _recv_into(sock, handle_buf)
     # Reconstruct the CUDA tensor from the IPC handle; clone immediately so the
     # sender can safely release its allocation after receiving the ACK.
-    tensor = pickle.loads(handle_buf).clone()
+    try:
+        tensor = pickle.loads(handle_buf).clone()
+    except Exception as exc:
+        raise _TensorDecodeError(batch_id, exc) from exc
     sock.sendall(b"\x00")           # ACK: sender may now release its IPC reference
     return batch_id, tensor, ctx_bytes
 
@@ -760,6 +790,8 @@ class WorkerServicer(
                             )
                 else:
                     raise _TensorStreamError(f"unknown tensor frame kind={kind!r}")
+        except _TensorDecodeError as exc:
+            self._report_fatal_error("ipc_receive", exc.batch_id, exc)
         except Exception as exc:
             if not self._tensor_stop.is_set() and not isinstance(exc, _TensorStreamClosed):
                 _LOG.warning("tensor transport connection closed addr=%s error=%s", addr, exc)
@@ -962,7 +994,7 @@ class WorkerServicer(
         if self._tensor_transport not in {"tcp", "ipc"}:
             return stub, None
         tcp_client = _TensorPeerClient(_tensor_addr(address, self._tensor_port_offset))
-        if self._tensor_transport == "ipc" and _is_same_machine(address):
+        if self._tensor_transport == "ipc" and _is_same_machine(address) and _cuda_ipc_supported():
             return stub, _IpcPeerClient(_tensor_addr(address, self._tensor_port_offset), tcp_client)
         return stub, tcp_client
 
