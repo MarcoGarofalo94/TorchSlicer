@@ -1871,3 +1871,7 @@ FLOPs), not time/CPU/energy. Done:
   `-rf` that time) and 1 hung (output filtered, dump lost); a hang inside `test_nat.py` was
   also seen once earlier the same day, before step 5. Flaky, not yet pinned down: being
   repeated per file.
+  Repeated per file, 6x each: `test_client_nodes` 38/38, `test_nat` 24/24, `test_transport`
+  12/12 every time. So it shows only in full-suite runs (cross-test state or load; the A100
+  is shared with another tenant). Next time a full run hangs, keep the faulthandler dump
+  (run with `-o faulthandler_timeout=240 -rf` into a file, never piped through grep).
