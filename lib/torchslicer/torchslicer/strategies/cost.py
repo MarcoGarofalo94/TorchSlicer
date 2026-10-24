@@ -327,8 +327,10 @@ def activation_bytes(model_graph, example_input, aux: dict | None = None) -> lis
     with torch.random.fork_rng(devices=devices), torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
         for node in model_graph.nodes:
             args = [outputs[p] for p in node.predecessors] if node.predecessors else [example_input]
-            args = [a.detach().requires_grad_(a.is_floating_point()) if isinstance(a, torch.Tensor) else a
-                    for a in args]
+            # a fresh leaf, cloned (as SplitLayer.forward does) so in-place first ops
+            # (ResNet's ReLU(inplace=True)) don't hit "a leaf Variable ... in-place operation"
+            args = [a.detach().requires_grad_(True).clone() if isinstance(a, torch.Tensor)
+                    and a.is_floating_point() else a for a in args]
             kwargs = aux if (not node.predecessors and aux
                              and getattr(node.module, "accepts_aux_inputs", False)) else {}
             current[0] = 0

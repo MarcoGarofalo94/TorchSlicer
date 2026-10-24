@@ -1910,3 +1910,39 @@ FLOPs), not time/CPU/energy. Done:
   accuracy per second. Absolute accuracy is low (small CNN, 8000 samples, lr 0.05 + momentum
   0.9 with FedAvg is noisy: one seed's test loss jumps at epoch 10): fine for comparing the
   schedules, not a model result. Eval cost: 4.4 MB of weights fetched per evaluation.
+
+## M14: capability-aware planning on mixed hardware (2026-10-24)
+
+Setup: `benchmarks/testbed/plan.py` + `plan_p2p.yaml`: CIFAR ResNet-18 (3x3 stem, no
+max-pool), batch 32, synthetic data, P2P chain Nano (driver, data owner, slice 0) → AGX →
+Dell (cut 1 over gigabit, cut 2 over the Dell's 100 Mbit/s office link), GPUs, tcp, stock
+clocks, steady epochs 2–4 (`notes/testbed/plan_exp.py`, results `results/plan_nad_*`).
+Measured speeds (matmul benchmark): Nano 0.80, AGX 2.08, Dell 1.42 TFLOP/s.
+
+| variant | ms/batch | slices (Nano / AGX / Dell) | MB per cut |
+|---|---|---|---|
+| A `uniform` | 516 | stem / layer1–layer4 / pool+fc | 8.4, 1.05 |
+| B `flops`, `planning.heterogeneous: false` | 778 | stem+layer1 / layer2–3 / layer4+fc | 8.4, 2.1 |
+| C `flops` + speeds | 778 | same as B | 8.4, 2.1 |
+| **D `flops` + speeds + `planning.measure_links`** | **131** | everything to the pool / flatten / fc | 0.07, 0.07 |
+
+- Link-aware planning: 3.9x faster than uniform, 5.9x than compute-only balancing. ResNet-18's
+  early activations are large (8.4 MB per batch after layer1; with its gradient that is
+  ~177 ms even over gigabit), more than the Nano takes to run the whole network (131 ms):
+  the planner keeps the heavy part on the data owner. Compute-only balancing (B, C) is
+  worse than the naive split, since it ignores the network. Honest caveat: D is
+  near-degenerate here (only flatten and fc leave the Nano), which is the right answer for
+  this model on these links, not a general "split far" result; a model with small early
+  activations or a faster network would split differently.
+- C = B is not a bug: with the measured speeds, plans [4, 6] and [0, 5] tie on the planner's
+  own cost (slowest slice 0.01208 vs 0.01210 s per batch; checked offline), and benchmark
+  noise picks between them. ResNet-18's work is four nearly equal blocks, so speeds alone
+  barely move the cut.
+- **43. Heterogeneous planning crashed on models with in-place ReLUs** (`strategies/cost.py`
+  `activation_bytes`, since M5). Found here: real workers report their memory, so the plan
+  measures activation memory (`node_memory` with an `example_input`), which fed each node a
+  leaf tensor; torchvision's ResNet (`ReLU(inplace=True)`) raised "a leaf Variable that
+  requires grad is being used in an in-place operation". The local tests never declared
+  memory caps. Fix: clone the leaf, as `SplitLayer.forward` does (same bug as in the first
+  version of `sl/costs.py`). Test: `test_flops_plan_with_memory_caps_on_in_place_relus`
+  (fails without the fix). Full suite 437 passed / 1 skipped.

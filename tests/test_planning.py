@@ -283,3 +283,17 @@ def test_first_slice_worker_is_ordered_first():
     assert ex._nodes[0].address == workers[2].address
     assert all(nd.compute_gflops > 0 for nd in ex._nodes)     # measured
     assert [h["loss"] for h in history] == pytest.approx(_reference(1), abs=1e-5)
+
+
+def test_flops_plan_with_memory_caps_on_in_place_relus():
+    # found on the testbed: real workers report memory, so the plan measures activation
+    # memory; a model starting a node with ReLU(inplace=True) (every torchvision ResNet)
+    # crashed it ("a leaf Variable that requires grad is being used in an in-place operation")
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Conv2d(3, 8, 3, padding=1), nn.ReLU(inplace=True), nn.Conv2d(8, 8, 3, padding=1),
+                          nn.ReLU(inplace=True), nn.Flatten(), nn.Linear(8 * 8 * 8, 4))
+    graph = ts.trace(model)
+    s = ts.FlopsSplitter(example_input=torch.randn(2, 3, 8, 8))
+    parts = s.split(graph, 2, nodes=_nodes(10, 40, caps=[64, 64]))
+    assert len(parts) == 2 and "caps" in s.last_terms
+    assert all(m >= 0 for m in s.node_memory(graph))

@@ -1,0 +1,28 @@
+# benchmarks/testbed/plan.py: CIFAR ResNet-18 as a P2P chain of 3 nodes (driver = data owner,
+# slice 0, then two followers in --hosts order). The split strategy (PLAN_STRATEGY) and the
+# planning knobs (PLANNING_HETEROGENEOUS, PLANNING_MEASURE_LINKS) come from the environment.
+run_id: testbed_plan
+
+training:
+  epochs: 4             # epoch 1 = warm-up
+  optimizer: {name: SGD, params: {lr: 0.05, momentum: 0.9}}
+  criterion: {name: CrossEntropyLoss, params: {}}
+
+discovery:
+  n_workers: 3
+
+logging:
+  enabled: false
+
+deploy:
+  topology: p2p
+
+network:
+  device: cuda
+
+transport:
+  tensor: tcp
+
+planning:
+  heterogeneous: true
+  measure_links: false
