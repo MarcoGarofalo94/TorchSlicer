@@ -1,0 +1,257 @@
+{
+ "name": "concurrent_kill",
+ "exit": "0",
+ "wall_s": 83.3,
+ "history": "[2.138285191729665, 2.05152183953331, 1.9292934999934264, 1.8352763972112112, 1.8444355710276537, 1.762126108897584]",
+ "containers": {
+  "ts-concurrent_kill-client-0": {
+   "node": "jon-001",
+   "started": "2026-10-24T14:07:40.173165543Z",
+   "finished": "2026-10-24T14:09:02.629960897Z"
+  },
+  "ts-concurrent_kill-client-1": {
+   "node": "jon-003",
+   "started": "2026-10-24T14:07:42.647447176Z",
+   "finished": "2026-10-24T14:09:02.68072233Z"
+  },
+  "ts-concurrent_kill-client-2": {
+   "node": "jon-004",
+   "started": "2026-10-24T14:07:48.995820253Z",
+   "finished": "2026-10-24T14:09:02.688358998Z"
+  },
+  "ts-concurrent_kill-client-3": {
+   "node": "jon-005",
+   "started": "2026-10-24T14:07:51.429173725Z",
+   "finished": "2026-10-24T14:08:30.276248169Z"
+  },
+  "ts-concurrent_kill-client-4": {
+   "node": "jon-006",
+   "started": "2026-10-24T14:07:53.767001788Z",
+   "finished": "2026-10-24T14:09:02.659671814Z"
+  },
+  "ts-concurrent_kill-client-5": {
+   "node": "jon-007",
+   "started": "2026-10-24T14:07:56.125992271Z",
+   "finished": "2026-10-24T14:09:02.665858115Z"
+  },
+  "ts-concurrent_kill-client-6": {
+   "node": "jon-008",
+   "started": "2026-10-24T14:07:58.492754086Z",
+   "finished": "2026-10-24T14:09:02.700347189Z"
+  },
+  "ts-concurrent_kill-client-7": {
+   "node": "jon-009",
+   "started": "2026-10-24T14:08:00.809463464Z",
+   "finished": "2026-10-24T14:09:02.696024408Z"
+  },
+  "ts-concurrent_kill-worker-0": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:08:02.483515079Z",
+   "finished": "2026-10-24T14:09:02.712512836Z"
+  },
+  "ts-concurrent_kill-coordinator": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:08:03.833682804Z",
+   "finished": "2026-10-24T14:09:02.543494938Z"
+  }
+ },
+ "results": [
+  {
+   "loss": 2.138285191729665,
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    8.680294,
+    4.517777
+   ],
+   "client_compute_s": 8.680294,
+   "server_compute_s": 4.517777,
+   "sl_setting": "vanilla",
+   "bytes_state": 169309
+  },
+  {
+   "loss": 2.05152183953331,
+   "bytes_fwd": [
+    229376000
+   ],
+   "bytes_bwd": [
+    234618880
+   ],
+   "bytes_input": 0,
+   "bytes_label": 56000,
+   "bytes_total": 464050880,
+   "bytes_client": 464050880,
+   "bytes_per_batch": 2026423.1,
+   "raw_bytes_total": 464050880,
+   "compute_s": [
+    4.997293,
+    3.923651
+   ],
+   "client_compute_s": 4.997293,
+   "server_compute_s": 3.923651,
+   "sl_setting": "vanilla",
+   "bytes_state": 143185,
+   "clients_lost": [
+    3
+   ],
+   "batches_skipped": 27
+  },
+  {
+   "loss": 1.9292934999934264,
+   "bytes_fwd": [
+    229376000
+   ],
+   "bytes_bwd": [
+    229376000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 56000,
+   "bytes_total": 458808000,
+   "bytes_client": 458808000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 458808000,
+   "compute_s": [
+    4.739875,
+    3.267557
+   ],
+   "client_compute_s": 4.739875,
+   "server_compute_s": 3.267557,
+   "sl_setting": "vanilla",
+   "bytes_state": 143185,
+   "clients_lost": [
+    3
+   ],
+   "batches_skipped": 32
+  },
+  {
+   "loss": 1.8352763972112112,
+   "bytes_fwd": [
+    229376000
+   ],
+   "bytes_bwd": [
+    229376000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 56000,
+   "bytes_total": 458808000,
+   "bytes_client": 458808000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 458808000,
+   "compute_s": [
+    4.934072,
+    3.723805
+   ],
+   "client_compute_s": 4.934072,
+   "server_compute_s": 3.723805,
+   "sl_setting": "vanilla",
+   "bytes_state": 143185,
+   "clients_lost": [
+    3
+   ],
+   "batches_skipped": 32
+  },
+  {
+   "loss": 1.8444355710276537,
+   "bytes_fwd": [
+    229376000
+   ],
+   "bytes_bwd": [
+    229376000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 56000,
+   "bytes_total": 458808000,
+   "bytes_client": 458808000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 458808000,
+   "compute_s": [
+    5.009436,
+    3.962045
+   ],
+   "client_compute_s": 5.009436,
+   "server_compute_s": 3.962045,
+   "sl_setting": "vanilla",
+   "bytes_state": 143185,
+   "clients_lost": [
+    3
+   ],
+   "batches_skipped": 32
+  },
+  {
+   "loss": 1.762126108897584,
+   "bytes_fwd": [
+    229376000
+   ],
+   "bytes_bwd": [
+    229376000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 56000,
+   "bytes_total": 458808000,
+   "bytes_client": 458808000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 458808000,
+   "compute_s": [
+    5.068885,
+    3.638784
+   ],
+   "client_compute_s": 5.068885,
+   "server_compute_s": 3.638784,
+   "sl_setting": "vanilla",
+   "bytes_state": 143185,
+   "clients_lost": [
+    3
+   ],
+   "batches_skipped": 32
+  }
+ ],
+ "events": {
+  "mem_min_mb": {
+   "jon-001": 5566,
+   "jon-003": 5486,
+   "jon-004": 5638,
+   "jon-005": 5601,
+   "jon-006": 5465,
+   "jon-007": 5635,
+   "jon-008": 5568,
+   "jon-009": 5704,
+   "jor-001": 57975
+  },
+  "train_start": 1792850901.3778355,
+  "killed": 1792850910.759745
+ },
+ "kill": "client-3",
+ "after": 8.0,
+ "restart": null,
+ "servers": 1,
+ "envs": {
+  "OMP_NUM_THREADS": "4",
+  "EPOCHS": "6",
+  "SL_CLIENT_SCHEDULE": "concurrent",
+  "N_WORKERS": "2"
+ },
+ "coordinator_events": [
+  "14:08:22 INFO [torchslicer.coordinator] failure detection on heartbeat_interval_s=5.0 ping_timeout_s=3.0 recovery=False",
+  "14:08:30 WARNING [torchslicer.client_nodes] client node lost client=3 address=172.17.7.6:50051; the run goes on without it"
+ ],
+ "since_kill_s": [
+  [
+   -8.8,
+   "14:08:22 INFO [torchslicer.coordinator] failure detection on heartbeat_interval_s=5.0 ping_timeout_s=3.0 recovery=False"
+  ],
+  [
+   -0.8,
+   "14:08:30 WARNING [torchslicer.client_nodes] client node lost client=3 address=172.17.7.6:50051; the run goes on without it"
+  ]
+ ]
+}

@@ -1,0 +1,211 @@
+{
+ "name": "server_nokill",
+ "exit": "0",
+ "wall_s": 179.3,
+ "history": "[2.1721883709542453, 2.115541552193463, 1.9751465595327318, 1.9535431363619864]",
+ "containers": {
+  "ts-server_nokill-client-0": {
+   "node": "jon-001",
+   "started": "2026-10-24T14:34:19.858677272Z",
+   "finished": "2026-10-24T14:37:18.321261801Z"
+  },
+  "ts-server_nokill-client-1": {
+   "node": "jon-003",
+   "started": "2026-10-24T14:34:22.338160265Z",
+   "finished": "2026-10-24T14:37:18.383364035Z"
+  },
+  "ts-server_nokill-client-2": {
+   "node": "jon-004",
+   "started": "2026-10-24T14:34:24.801855207Z",
+   "finished": "2026-10-24T14:37:18.399851935Z"
+  },
+  "ts-server_nokill-client-3": {
+   "node": "jon-005",
+   "started": "2026-10-24T14:34:30.599090422Z",
+   "finished": "2026-10-24T14:37:18.39230559Z"
+  },
+  "ts-server_nokill-client-4": {
+   "node": "jon-006",
+   "started": "2026-10-24T14:34:33.714668103Z",
+   "finished": "2026-10-24T14:37:18.364454352Z"
+  },
+  "ts-server_nokill-client-5": {
+   "node": "jon-007",
+   "started": "2026-10-24T14:34:36.166101534Z",
+   "finished": "2026-10-24T14:37:18.358911913Z"
+  },
+  "ts-server_nokill-client-6": {
+   "node": "jon-008",
+   "started": "2026-10-24T14:34:38.635967559Z",
+   "finished": "2026-10-24T14:37:18.404611736Z"
+  },
+  "ts-server_nokill-client-7": {
+   "node": "jon-009",
+   "started": "2026-10-24T14:34:41.029404748Z",
+   "finished": "2026-10-24T14:37:18.412463567Z"
+  },
+  "ts-server_nokill-worker-0": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:34:42.885916323Z",
+   "finished": "2026-10-24T14:37:18.361324032Z"
+  },
+  "ts-server_nokill-worker-1": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:34:44.208194236Z",
+   "finished": "2026-10-24T14:37:18.379435047Z"
+  },
+  "ts-server_nokill-coordinator": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:34:45.455291697Z",
+   "finished": "2026-10-24T14:37:18.199371194Z"
+  }
+ },
+ "results": [
+  {
+   "step": 1,
+   "epoch": 1,
+   "loss": 2.1721883709542453,
+   "duration_s": 34.854,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_bwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 786496000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 3072250.0,
+   "raw_bytes_total": 786496000,
+   "compute_s": [
+    9.348599,
+    2.357768,
+    4.515703
+   ],
+   "client_compute_s": 9.348599,
+   "server_compute_s": 6.873471,
+   "sl_setting": "vanilla",
+   "bytes_state": 169309
+  },
+  {
+   "step": 2,
+   "epoch": 2,
+   "loss": 2.115541552193463,
+   "duration_s": 30.978,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_bwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 786496000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 3072250.0,
+   "raw_bytes_total": 786496000,
+   "compute_s": [
+    6.343243,
+    2.115947,
+    4.384683
+   ],
+   "client_compute_s": 6.343243,
+   "server_compute_s": 6.50063,
+   "sl_setting": "vanilla",
+   "bytes_state": 163640
+  },
+  {
+   "step": 3,
+   "epoch": 3,
+   "loss": 1.9751465595327318,
+   "duration_s": 30.72,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_bwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 786496000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 3072250.0,
+   "raw_bytes_total": 786496000,
+   "compute_s": [
+    6.301735,
+    2.07364,
+    4.378315
+   ],
+   "client_compute_s": 6.301735,
+   "server_compute_s": 6.451955,
+   "sl_setting": "vanilla",
+   "bytes_state": 163640
+  },
+  {
+   "step": 4,
+   "epoch": 4,
+   "loss": 1.9535431363619864,
+   "duration_s": 30.944,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_bwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 786496000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 3072250.0,
+   "raw_bytes_total": 786496000,
+   "compute_s": [
+    6.373335,
+    2.146744,
+    4.38002
+   ],
+   "client_compute_s": 6.373335,
+   "server_compute_s": 6.526764,
+   "sl_setting": "vanilla",
+   "bytes_state": 163640
+  }
+ ],
+ "events": {
+  "mem_min_mb": {
+   "jon-001": 5537,
+   "jon-003": 5496,
+   "jon-004": 5621,
+   "jon-005": 5583,
+   "jon-006": 5404,
+   "jon-007": 5609,
+   "jon-008": 5550,
+   "jon-009": 5669,
+   "jor-001": 57246
+  }
+ },
+ "kill": null,
+ "after": null,
+ "restart": null,
+ "servers": 2,
+ "envs": {
+  "OMP_NUM_THREADS": "4",
+  "EPOCHS": "4",
+  "FAULT_TOLERANCE_ENABLED": "1",
+  "N_WORKERS": "3"
+ },
+ "coordinator_events": [
+  "14:35:06 INFO [torchslicer.coordinator] failure detection on heartbeat_interval_s=5.0 ping_timeout_s=3.0 recovery=True"
+ ]
+}

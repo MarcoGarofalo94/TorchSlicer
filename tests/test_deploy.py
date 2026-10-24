@@ -357,3 +357,22 @@ def test_render_baremetal_spaces_ipc_nodes_like_tcp(tmp_path):
     peers = next(line.split("=", 1)[1] for p in paths for line in pathlib.Path(p).read_text().splitlines()
                  if line.startswith("export WORKER_PEERS="))
     assert peers == "h0:50051,h1:50051,h1:50053"
+
+
+def test_render_baremetal_workers_avoid_the_coordinators_port(tmp_path):
+    # two workers on the coordinator's host: the second one's tensor listener (port + 1)
+    # took the coordinator's port 50054
+    cfg = ts.RunConfig()
+    cfg.deploy.topology = "centralized"
+    cfg.transport.tensor = "tcp"
+    cfg.discovery.n_workers = 3
+    paths = render_baremetal(cfg, SCRIPT, "c.yaml", ["h"] * 4, out=str(tmp_path), workdir="/")
+    listens = []
+    for p in paths:
+        env = dict(line[7:].strip().split("=", 1) for line in open(p) if line.startswith("export "))
+        if "COORDINATOR_BIND_ADDRESS" in env:
+            listens.append(int(env["COORDINATOR_BIND_ADDRESS"].rsplit(":", 1)[1]))
+        else:
+            port = int(env["PORT"])
+            listens += [port, port + 1]
+    assert len(paths) == 4 and len(listens) == len(set(listens))

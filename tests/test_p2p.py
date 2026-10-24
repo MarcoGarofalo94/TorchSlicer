@@ -23,19 +23,21 @@ def _model():
                          nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4))
 
 
-def _loader():
+def _loader(shuffle=False):
     g = torch.Generator().manual_seed(1)
     x, y = torch.randn(64, 8, generator=g), torch.randint(0, 4, (64,), generator=g)
-    return DataLoader(TensorDataset(x, y), batch_size=16, shuffle=False)
+    return DataLoader(TensorDataset(x, y), batch_size=16, shuffle=shuffle,
+                      generator=torch.Generator().manual_seed(2) if shuffle else None)
 
 
-def _reference(epochs, n_micro=1):
+def _reference(epochs, n_micro=1, shuffle=False):
     model = _model()
     opt = torch.optim.SGD(model.parameters(), **SGD["params"])
+    loader = _loader(shuffle)
     out = []
     for _ in range(epochs):
         losses = []
-        for x, y in _loader():
+        for x, y in loader:
             opt.zero_grad()
             parts = [nn.functional.cross_entropy(model(xm), ym) for xm, ym
                      in zip(x.chunk(n_micro), y.chunk(n_micro))]
@@ -147,6 +149,17 @@ class _StopAfter(ts.TrainingCallback):
         return metrics
 
 
+class _StopAtStart(ts.TrainingCallback):
+    """Stop a follower's server as an epoch begins, after the previous epoch's checkpoint."""
+
+    def __init__(self, worker, epoch):
+        self.worker, self.epoch = worker, epoch
+
+    def on_epoch_begin(self, epoch):
+        if epoch == self.epoch:
+            self.worker.stop()
+
+
 @pytest.mark.parametrize("dead", [0, 1])   # middle follower (hung before M2), last follower
 def test_p2p_dead_follower_fails_the_run_instead_of_hanging(dead):
     cfg = _cfg(epochs=3)            # fault_tolerance.enabled = False: no recovery
@@ -163,15 +176,19 @@ def test_p2p_dead_follower_fails_the_run_instead_of_hanging(dead):
             w.stop()
 
 
-def test_p2p_recovers_from_a_dead_follower(tmp_path):
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_p2p_recovers_from_a_dead_follower(shuffle, tmp_path):
     cfg = _cfg(epochs=3, enabled=True, max_retries=1)
     cfg.checkpoint.dir = str(tmp_path)
     followers = _followers(cfg, 2)
     try:
         ex = _driver(cfg, followers)
         sliced = ts.slice(_model(), n=3, executor=ex)
-        history = sliced.train(_loader(), run_config=cfg, callbacks=[_StopAfter(followers[1], 1)])
-        assert len(history) == 3 and all(h["loss"] == h["loss"] for h in history)
+        history = sliced.train(_loader(shuffle), run_config=cfg, callbacks=[_StopAtStart(followers[1], 2)])
+        # epoch 2 replayed from epoch 1's checkpoint, momentum included, on the same shuffle:
+        # as if nothing had failed (the re-split slices' optimizer state used to restart
+        # from zero, and a retried epoch drew a new permutation)
+        assert [h["loss"] for h in history] == pytest.approx(_reference(3, shuffle=shuffle), abs=1e-6)
         assert [nd.address for nd in ex._nodes] == [ex.address, followers[0].address]
     finally:
         for w in followers:

@@ -338,25 +338,30 @@ def render_k8s(cfg: RunConfig, script: str, config_text: str, *,
 def render_baremetal(cfg: RunConfig, script: str, config_path: str, hosts: list[str], *,
                      out: str, workdir: str, python: str = "python3") -> list[str]:
     """One ``<node>.sh`` per node. ``hosts`` has one entry per node, the driving node
-    first; nodes sharing a host get consecutive ports."""
+    first; nodes sharing a host get the next ports none of them listens on."""
     names = node_names(cfg)
     if len(hosts) != len(names):
         raise SystemExit(f"--hosts needs {len(names)} hosts ({', '.join(n for n, _ in names)}), "
                          f"got {len(hosts)}")
     step = max(cfg.transport.listen_offsets(drives=True)) + 1   # nodes on one host don't overlap
-    used: dict[tuple, int] = {}
+    taken: dict[str, set] = {}      # per host, every port a node there listens on (any role)
     ports = []
     for (_, role), h in zip(names, hosts):
         base = (coordinator_port(cfg) if role == "coordinator" else RELAY_PORT if role == "relay"
                 else int(cfg.network.worker_port))
-        ports.append(base + step * used.get((h, base), 0))
-        used[(h, base)] = used.get((h, base), 0) + 1
+        offsets = [0] if role == "relay" else cfg.transport.listen_offsets(drives=role in ("coordinator", "driver"))
+        used = taken.setdefault(h, set())
+        port = base
+        while any(port + d in used for d in offsets):
+            port += step
+        ports.append(port)
+        used.update(port + d for d in offsets)
     tail = None
     if tail_slice(cfg) and not cfg.sl.tail_port:
-        # the next free slot after every worker port on the driving node's host
-        taken = {p + d for h, p in zip(hosts, ports) if h == hosts[0] for d in range(step)}
+        # the next free slot after every port on the driving node's host
+        here = taken[hosts[0]]
         tail = ports[0] + 2
-        while any(tail + d in taken for d in range(step)):
+        while any(tail + d in here for d in range(step)):
             tail += step
     nodes = plan_nodes(cfg, hosts, ports, config_path=config_path, tail_port=tail)
     paths = []

@@ -1,0 +1,278 @@
+{
+ "name": "concurrent_rejoin",
+ "exit": "0",
+ "wall_s": 75.8,
+ "history": "[2.140008303336799, 2.0809468727196214, 2.0151300419654166, 1.8826707280240953, 1.851141628343612, 1.8541506174951792]",
+ "containers": {
+  "ts-concurrent_rejoin-client-0": {
+   "node": "jon-001",
+   "started": "2026-10-24T14:09:58.966022863Z",
+   "finished": "2026-10-24T14:11:13.660022224Z"
+  },
+  "ts-concurrent_rejoin-client-1": {
+   "node": "jon-003",
+   "started": "2026-10-24T14:10:01.623352675Z",
+   "finished": "2026-10-24T14:11:13.694605302Z"
+  },
+  "ts-concurrent_rejoin-client-2": {
+   "node": "jon-004",
+   "started": "2026-10-24T14:10:04.009465965Z",
+   "finished": "2026-10-24T14:11:13.733546472Z"
+  },
+  "ts-concurrent_rejoin-client-3": {
+   "node": "jon-005",
+   "started": "2026-10-24T14:10:47.092116098Z",
+   "finished": "2026-10-24T14:11:13.736066937Z"
+  },
+  "ts-concurrent_rejoin-client-4": {
+   "node": "jon-006",
+   "started": "2026-10-24T14:10:08.624465642Z",
+   "finished": "2026-10-24T14:11:12.634757493Z"
+  },
+  "ts-concurrent_rejoin-client-5": {
+   "node": "jon-007",
+   "started": "2026-10-24T14:10:11.049326545Z",
+   "finished": "2026-10-24T14:11:13.712408368Z"
+  },
+  "ts-concurrent_rejoin-client-6": {
+   "node": "jon-008",
+   "started": "2026-10-24T14:10:13.574900145Z",
+   "finished": "2026-10-24T14:11:13.759787455Z"
+  },
+  "ts-concurrent_rejoin-client-7": {
+   "node": "jon-009",
+   "started": "2026-10-24T14:10:15.907474156Z",
+   "finished": "2026-10-24T14:11:13.7378078Z"
+  },
+  "ts-concurrent_rejoin-worker-0": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:10:17.549063144Z",
+   "finished": "2026-10-24T14:11:13.810069522Z"
+  },
+  "ts-concurrent_rejoin-coordinator": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:10:18.862586915Z",
+   "finished": "2026-10-24T14:11:13.668628362Z"
+  }
+ },
+ "results": [
+  {
+   "step": 1,
+   "epoch": 1,
+   "loss": 2.140008303336799,
+   "duration_s": 6.175,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    8.550364,
+    4.337629
+   ],
+   "client_compute_s": 8.550364,
+   "server_compute_s": 4.337629,
+   "sl_setting": "vanilla",
+   "bytes_state": 169309
+  },
+  {
+   "step": 2,
+   "epoch": 2,
+   "loss": 2.0809468727196214,
+   "duration_s": 5.132,
+   "phase": "epoch",
+   "bytes_fwd": [
+    229376000
+   ],
+   "bytes_bwd": [
+    231473152
+   ],
+   "bytes_input": 0,
+   "bytes_label": 56000,
+   "bytes_total": 460905152,
+   "bytes_client": 460905152,
+   "bytes_per_batch": 2039403.3,
+   "raw_bytes_total": 460905152,
+   "compute_s": [
+    4.960188,
+    3.640585
+   ],
+   "client_compute_s": 4.960188,
+   "server_compute_s": 3.640585,
+   "sl_setting": "vanilla",
+   "bytes_state": 143185,
+   "clients_lost": [
+    3
+   ],
+   "batches_skipped": 30
+  },
+  {
+   "step": 3,
+   "epoch": 3,
+   "loss": 2.0151300419654166,
+   "duration_s": 5.437,
+   "phase": "epoch",
+   "bytes_fwd": [
+    229376000
+   ],
+   "bytes_bwd": [
+    229376000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 56000,
+   "bytes_total": 458808000,
+   "bytes_client": 458808000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 458808000,
+   "compute_s": [
+    5.108848,
+    3.976846
+   ],
+   "client_compute_s": 5.108848,
+   "server_compute_s": 3.976846,
+   "sl_setting": "vanilla",
+   "bytes_state": 143185,
+   "clients_lost": [
+    3
+   ],
+   "batches_skipped": 32
+  },
+  {
+   "step": 4,
+   "epoch": 4,
+   "loss": 1.8826707280240953,
+   "duration_s": 6.258,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    6.117324,
+    4.509182
+   ],
+   "client_compute_s": 6.117324,
+   "server_compute_s": 4.509182,
+   "sl_setting": "vanilla",
+   "bytes_state": 169053,
+   "clients_joined": [
+    3
+   ]
+  },
+  {
+   "step": 5,
+   "epoch": 5,
+   "loss": 1.851141628343612,
+   "duration_s": 5.765,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    5.717633,
+    4.168078
+   ],
+   "client_compute_s": 5.717633,
+   "server_compute_s": 4.168078,
+   "sl_setting": "vanilla",
+   "bytes_state": 163640
+  },
+  {
+   "step": 6,
+   "epoch": 6,
+   "loss": 1.8541506174951792,
+   "duration_s": 4.972,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    5.701233,
+    3.557623
+   ],
+   "client_compute_s": 5.701233,
+   "server_compute_s": 3.557623,
+   "sl_setting": "vanilla",
+   "bytes_state": 163640
+  }
+ ],
+ "events": {
+  "mem_min_mb": {
+   "jon-001": 5573,
+   "jon-003": 5478,
+   "jon-004": 5642,
+   "jon-005": 5590,
+   "jon-006": 5445,
+   "jon-007": 5626,
+   "jon-008": 5571,
+   "jon-009": 5716,
+   "jor-001": 57973
+  },
+  "train_start": 1792851031.9131525,
+  "killed": 1792851041.3606117,
+  "restarted": 1792851047.6894946
+ },
+ "kill": "client-3",
+ "after": 8.0,
+ "restart": 5.0,
+ "servers": 1,
+ "envs": {
+  "OMP_NUM_THREADS": "4",
+  "EPOCHS": "6",
+  "SL_CLIENT_SCHEDULE": "concurrent",
+  "N_WORKERS": "2"
+ },
+ "coordinator_events": [
+  "14:10:33 INFO [torchslicer.coordinator] failure detection on heartbeat_interval_s=5.0 ping_timeout_s=3.0 recovery=False",
+  "14:10:41 WARNING [torchslicer.client_nodes] client node lost client=3 address=172.17.7.6:50051; the run goes on without it",
+  "14:10:53 INFO [torchslicer.client_nodes] clients joined [3]"
+ ],
+ "since_kill_s": [
+  [
+   -8.4,
+   "14:10:33 INFO [torchslicer.coordinator] failure detection on heartbeat_interval_s=5.0 ping_timeout_s=3.0 recovery=False"
+  ],
+  [
+   -0.4,
+   "14:10:41 WARNING [torchslicer.client_nodes] client node lost client=3 address=172.17.7.6:50051; the run goes on without it"
+  ],
+  [
+   11.6,
+   "14:10:53 INFO [torchslicer.client_nodes] clients joined [3]"
+  ]
+ ]
+}

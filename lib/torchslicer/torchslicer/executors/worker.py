@@ -800,7 +800,15 @@ class WorkerServicer(
             except Exception:
                 pass
 
-    def _reset_state(self):
+    def _reset_state(self, keep_data: bool = False):
+        """Drop the slice. ``keep_data``: a client node keeps its place in its data (a re-init
+        within the same run, e.g. after a server worker's recovery, then replays the epoch
+        from the same random state)."""
+        if not keep_data:
+            self._data_epoch = None   # a client node: the epoch its loader iterator is on
+            self._data_rng = None     # ... and the random state that epoch started from
+            self._data_iter = None
+            self._data_index = 0
         self.layer:       SplitLayer = None
         self.loss_fn                 = None
         self.is_last:     bool       = False
@@ -819,9 +827,6 @@ class WorkerServicer(
         self._gate_batch = None       # _gated(): the batch in flight on this slice
         self._gate_parked: list = []  # ... and forwards of later batches, in arrival order
         self._label_stub = None       # a client node: the last slice, for its labels
-        self._data_epoch = None       # a client node: the epoch its loader iterator is on
-        self._data_iter = None
-        self._data_index = 0
         self._n_clients = 0           # a server slice with client nodes: how many
         self._per_client = False      # SplitFed V1: one copy of this slice per client
         self._client_copies: dict = {}
@@ -858,7 +863,7 @@ class WorkerServicer(
         try:
             with self._lock:
                 self._generation += 1
-                self._reset_state()
+                self._reset_state(keep_data=bool(request.run_id) and request.run_id == self._run_id)
 
             if request.deterministic:
                 set_deterministic()
@@ -1395,12 +1400,11 @@ class WorkerServicer(
         loader = self._client_data()
         with self._data_lock:
             if request.epoch != self._data_epoch or request.index == 0:   # a new or retried epoch
-                self._data_epoch, self._data_iter, self._data_index = request.epoch, iter(loader), 0
+                self._start_epoch(loader, request.epoch)
             if request.index != self._data_index:
                 raise RuntimeError(f"client_step: batch {request.index} of epoch {request.epoch} "
                                    f"asked, but this client is at batch {self._data_index}")
-            inputs, labels = next(self._data_iter)
-            self._data_index += 1
+            inputs, labels = self._next_batch(loader)
         self._drive_batch(request.batch_id, inputs, labels)
         return worker_service_pb2.Ack(batch_id=request.batch_id)
 
@@ -1412,10 +1416,9 @@ class WorkerServicer(
         loader = self._client_data()
         generation = self._generation
         with self._data_lock:
-            self._data_epoch, self._data_iter, self._data_index = request.epoch, iter(loader), 0
+            self._start_epoch(loader, request.epoch)
             for batch_id in request.batch_ids:
-                inputs, labels = next(self._data_iter)
-                self._data_index += 1
+                inputs, labels = self._next_batch(loader)
                 done = threading.Event()
                 with self._lock:
                     self._round_done[batch_id] = done
@@ -1426,6 +1429,32 @@ class WorkerServicer(
                     if self._generation != generation:
                         raise RuntimeError("client_round: the slice was re-initialized or shut down")
         return worker_service_pb2.Ack(batch_id=request.batch_ids[-1] if request.batch_ids else 0)
+
+    def _start_epoch(self, loader, epoch: int) -> None:
+        """Iterate ``loader`` from its start for ``epoch``. A new epoch remembers the random
+        state it starts from (the loader's shuffle, dropout); the same epoch again (retried
+        after a server worker's recovery) restores it, so the replay takes the same batches."""
+        from ..core.determinism import rng_restore, rng_snapshot
+        if epoch != self._data_epoch or self._data_rng is None:
+            self._data_rng = rng_snapshot(loader)
+        else:
+            rng_restore(self._data_rng, loader)
+        self._data_epoch, self._data_iter, self._data_index = epoch, iter(loader), 0
+
+    def _next_batch(self, loader):
+        """The epoch's next batch. After the last one, run the iterator to its end, as a for
+        loop does: a shuffling ``RandomSampler`` draws its generator once more there, so
+        without it every later epoch's order differs from the in-process session's."""
+        batch = next(self._data_iter)
+        self._data_index += 1
+        try:
+            last = self._data_index == len(loader)
+        except TypeError:                 # no length (an iterable dataset)
+            last = False
+        if last:
+            for _ in self._data_iter:
+                pass
+        return batch
 
     def _client_data(self):
         if self.data is None:

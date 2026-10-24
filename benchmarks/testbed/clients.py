@@ -5,7 +5,8 @@
     TOPOLOGY=local SL_CLIENT_NODES=0 python benchmarks/testbed/clients.py -c ...   # the in-process twin
 
 One RESULT per epoch: the history entry (loss, duration_s, bytes_*, compute_s,
-client_compute_s, sim_*), so a testbed run and its in-process twin compare field by field.
+client_compute_s, clients_lost / clients_joined, ...), so a testbed run and its in-process
+twin compare field by field.
 """
 import argparse
 import json
@@ -47,9 +48,12 @@ if __name__ == "__main__":
     torch.manual_seed(cfg.data.seed)
     in_ch, n_classes, side = SHAPES.get(cfg.data.dataset) or npz_shape(cfg.data.params["path"])
     epochs = _Epochs()
-    history = ts.run(lambda: SmallCNN(in_ch, n_classes, side), run_config=cfg, cuts=["pool1"],
+    history = ts.run(lambda: SmallCNN(in_ch, n_classes, side), run_config=cfg,
+                     cuts=["pool1", "pool2"][:cfg.discovery.n_workers - 1],   # 2 server workers: also at pool2
                      callbacks=[epochs])
     if history:
-        for m in epochs.metrics:
+        # the callback's metrics (duration_s, epoch) + what the executor adds after it
+        # (clients_lost, clients_joined, batches_skipped, bytes_state)
+        for m in ({**c, **h} for c, h in zip(epochs.metrics, history)):
             print("RESULT " + json.dumps(_plain(m)), flush=True)
         print("HISTORY " + json.dumps([h["loss"] for h in history]), flush=True)

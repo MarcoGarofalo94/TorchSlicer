@@ -12,7 +12,7 @@ from torch import nn
 
 from ..algorithm.base import BackwardPolicy
 from ..core.split_layer import SplitLayer
-from ..core.tied import find_tied_parameters
+from ..core.tied import find_tied_parameters, optimizer_parameters
 
 from .base import BaseExecutor
 from .startup import init_worker_with_retry
@@ -1113,6 +1113,7 @@ class DistributedExecutor(BaseExecutor):
         Returns the flat layer list with trained weights, or None if any checkpoint
         is missing (recovery will fall back to initial weights).
         """
+        self._recovered_opt = {}
         if not self._ft_checkpoint_dir or not self._stored_layers:
             return None
         all_layers = list(self._stored_layers)
@@ -1130,10 +1131,63 @@ class DistributedExecutor(BaseExecutor):
                 tmp_sl = SplitLayer(partition_mods)
                 tmp_sl.load_state_dict(sd, strict=False)
                 # Weights updated in-place on the shared module objects in all_layers
+                self._collect_optimizer_state(i, all_layers, ckpt)
             except Exception as e:
                 _LOG.warning("recovery checkpoint load failed path=%s error=%s", path, e)
+                self._recovered_opt = {}
                 return None
         return all_layers
+
+    def _collect_optimizer_state(self, i: int, layers: list, ckpt: dict) -> None:
+        """Recovery: keep old slice ``i``'s optimizer state from its checkpoint ``ckpt`` per
+        parameter (``_recovered_opt``), for whichever slice holds that parameter after the
+        re-split (``_restore_optimizer_states``)."""
+        osd = ckpt.get("optimizer_state_dict")
+        if not osd:
+            return
+        indices = self._stored_partition_indices
+        tied = build_tied_configs([[layers[j] for j in idx] for idx in indices], [""] * len(indices))
+        params = optimizer_parameters(SplitLayer([layers[j] for j in indices[i]]),
+                                      exclude={n for t in tied[i] if not t.owner for n in t.names})
+        ids = [pid for g in osd["param_groups"] for pid in g["params"]]
+        if len(ids) != len(params):
+            _LOG.warning("recovery: slice %s's optimizer state doesn't match its parameters; "
+                         "it restarts from zero", i)
+            return
+        for pid, p in zip(ids, params):
+            if pid in osd["state"]:
+                self._recovered_opt[id(p)] = osd["state"][pid]
+
+    def _restore_optimizer_states(self, layers: list, partitions: list, slices) -> None:
+        """Recovery: give each re-split slice in ``slices`` the optimizer state of its
+        parameters from the old slices' checkpoints. Without it the workers' new optimizers
+        start empty: momentum / Adam moments restart from zero and the replayed round
+        differs from an uninterrupted run."""
+        states = getattr(self, "_recovered_opt", None)
+        if not states:
+            return
+        tied = build_tied_configs([[layers[j] for j in p.layer_indices] for p in partitions],
+                                  [proxy.address for proxy in self._proxies])
+        for i in slices:
+            params = optimizer_parameters(SplitLayer([layers[j] for j in partitions[i].layer_indices]),
+                                          exclude={n for t in tied[i] if not t.owner for n in t.names})
+            have = {k: states[id(p)] for k, p in enumerate(params) if id(p) in states}
+            if not have:
+                continue
+            stub = self._proxies[i].stub()
+            state = torch.load(io.BytesIO(stub.get_state(worker_service_pb2.StateRequest(), timeout=300.0).data),
+                               weights_only=True)
+            opt = state.get("optimizer")
+            ids = [pid for g in opt["param_groups"] for pid in g["params"]] if opt else []
+            if len(ids) != len(params):
+                _LOG.warning("recovery: slice %s's optimizer doesn't match its parameters; "
+                             "its state restarts from zero", i)
+                continue
+            opt["state"] = {ids[k]: st for k, st in have.items()}
+            buf = io.BytesIO()
+            torch.save(state, buf)
+            stub.set_state(worker_service_pb2.StateBlob(data=buf.getvalue()), timeout=300.0)
+        self._recovered_opt = {}
 
     @staticmethod
     def _uniform_split(layers: list, n: int) -> "list[list]":
@@ -1231,6 +1285,7 @@ class DistributedExecutor(BaseExecutor):
         if all_layers is None:
             _LOG.warning("recovery using initial layer weights because no checkpoint was available")
             all_layers = list(self._stored_layers)
+            self._recovered_opt = {}
 
         # Rebuild proxy + node lists with new sequential indices
         self._nodes   = [self._nodes[old_i]   for old_i, _ in alive]
@@ -1256,6 +1311,7 @@ class DistributedExecutor(BaseExecutor):
 
         # Send new SliceConfig to each survivor (reinit wires up new prev/next stubs)
         self._init_slices(all_layers, partitions, phase="recovery")
+        self._restore_optimizer_states(all_layers, partitions, range(n_alive))
 
         # Reset failure state
         self._failed_workers.clear()

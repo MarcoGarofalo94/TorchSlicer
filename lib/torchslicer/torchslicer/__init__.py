@@ -249,8 +249,12 @@ class SlicedModel:
         self.partitions = getattr(self.executor, "partitions", None) or self.partitions
         history = []
         max_retries = getattr(self.executor, '_max_fault_retries', 0)
+        from .core.determinism import rng_restore, rng_snapshot
         for epoch in range(1, resolved_epochs + 1):
+            rng = rng_snapshot(data_loader)      # a retried epoch replays the same batches
             for attempt in range(max_retries + 1):
+                if attempt:
+                    rng_restore(rng, data_loader)
                 try:
                     history.append(self.executor.train_epoch(
                         data_loader, epoch=epoch, verbose=verbose, total_epochs=epochs))

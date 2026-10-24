@@ -62,8 +62,16 @@ def _local(mode, handoff, algorithm, n_micro=1, loaders=None, eval_data=None, hi
     return ([e["loss"] for e in h], session.states) + ((h,) if history else ())
 
 
+def _shuffled():
+    """The clients' data as shuffling DataLoaders, each with its own generator."""
+    from torch.utils.data import DataLoader, TensorDataset
+    return [DataLoader(TensorDataset(torch.cat([x for x, _ in b]), torch.cat([y for _, y in b])), batch_size=8,
+                       shuffle=True, generator=torch.Generator().manual_seed(k))
+            for k, b in enumerate(_loaders())]
+
+
 def _nodes(mode, handoff, algorithm, transport="grpc", n_micro=1, servicers=None, server_servicer=None,
-           eval_data=None, **sl):
+           eval_data=None, registered=False, loaders=None, **sl):
     cfg = _cfg(transport)
     for key, v in sl.items():
         setattr(cfg.sl, key, v)
@@ -71,14 +79,15 @@ def _nodes(mode, handoff, algorithm, transport="grpc", n_micro=1, servicers=None
     offsets = cfg.transport.listen_offsets()
     servers = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg,
                                servicer_class=server_servicer) for _ in range(2)]
-    data = _loaders()
+    data = loaders or _loaders()
     clients = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg, data=data[k],
                                client_index=k, servicer_class=(servicers or {}).get(k))
                for k in range(C)]
     peers = [w.address for w in clients[::-1] + servers]      # discovery order doesn't matter
     addr = f"127.0.0.1:{free_port(cfg.transport.listen_offsets(drives=True))}"
-    ex = ts.ClientNodesExecutor(discovery=StaticDiscovery(peers=peers), coordinator_addr=addr,
-                                run_config=cfg)
+    discovery = (_Registered(peers, {c.address: ["client", f"client={k}"] for k, c in enumerate(clients)})
+                 if registered else StaticDiscovery(peers=peers))
+    ex = ts.ClientNodesExecutor(discovery=discovery, coordinator_addr=addr, run_config=cfg)
     session = ts.RemoteSession(C, mode=mode, handoff=handoff)
     try:
         h = ts.slice(_model(), cuts=CUTS, executor=ex).train(session, run_config=cfg, algorithm=algorithm,
@@ -88,6 +97,15 @@ def _nodes(mode, handoff, algorithm, transport="grpc", n_micro=1, servicers=None
         for w in servers + clients:
             w.stop()
     return [e["loss"] for e in h], states, h
+
+
+class _Registered(StaticDiscovery):
+    """The nodes as coordinator discovery keeps them: with the tags they registered with,
+    also after they go down."""
+    def __init__(self, peers, tags):
+        super().__init__(peers)
+        for nd in self._nodes:
+            nd.tags = list(tags.get(nd.address, []))
 
 
 def _swap_first_two(prev_state, next_state, info):   # a custom handoff
@@ -155,6 +173,15 @@ def test_client_nodes_match_the_in_process_session(mode, handoff, algorithm, tra
     else:
         assert moved > 0               # a handoff or an aggregation moved states
     assert h[-1]["bytes_label"] > 0    # labels go from the clients to the last slice
+
+
+@pytest.mark.parametrize("mode", ["parallel", "sequential"])
+def test_client_nodes_with_shuffled_data_match_the_in_process_session(mode):
+    # a client node took exactly its n batches with next(); a for loop (the in-process
+    # session) also runs the iterator to its end, where RandomSampler draws its generator
+    # once more, so from epoch 2 on the nodes trained on another order
+    ref = _local(mode, "copy", None, loaders=_shuffled())[0]
+    assert [round(x, 6) for x in _nodes(mode, "copy", None, loaders=_shuffled())[0]] == ref
 
 
 @pytest.mark.parametrize("algorithm", [ts.SplitFedAlgorithm, ts.SplitFedV1Algorithm])
@@ -270,6 +297,16 @@ def test_a_dead_client_leaves_and_the_others_go_on(mode, dies_at):
     assert h[0]["clients_lost"] == [1] and h[1]["clients_lost"] == [1]
     n1 = len(_loaders()[1])
     assert h[0]["batches_skipped"] == n1 - dies_at - 1 and h[1]["batches_skipped"] == n1
+
+
+def test_a_dead_registered_client_is_not_asked_to_join_again():
+    # coordinator discovery keeps a dead client's registered tags: the next round start
+    # took it for a returning client, its join timed out with TimeoutError and the run died
+    got, _, h = _nodes("parallel", "copy", None, servicers={1: _dies_at(1, 1)}, registered=True)
+    loaders = _loaders()
+    loaders[1] = loaders[1][:1]
+    assert [round(x, 6) for x in got] == _local("parallel", "copy", _Without(1), loaders=loaders)[0]
+    assert h[1]["clients_lost"] == [1]
 
 
 def test_a_dead_client_stops_the_run_without_drop_failed_clients():
@@ -392,15 +429,16 @@ def test_a_client_that_died_comes_back_from_the_initial_weights():
 
 # ── step 4c: a server worker dies (fault_tolerance.enabled) ─────────────────────
 
-@pytest.mark.parametrize("mode,kill_at", [("parallel", 2), ("sequential", 2), ("parallel", 1)])
-def test_server_recovery_replays_the_round_exactly(mode, kill_at, tmp_path):
-    # kill_at 2: back to round 1's checkpoint; kill_at 1: no checkpoint yet, back to the start
-    # SGD without momentum: no optimizer state, so recovery (which rebuilds optimizers)
-    # must give exactly the uninterrupted run's losses and client weights
+@pytest.mark.parametrize("mode,kill_at,opt", [("parallel", 2, "SGD"), ("sequential", 2, "SGD"),
+                                              ("parallel", 1, "SGD"), ("parallel", 2, "AdamW")])
+def test_server_recovery_replays_the_round_exactly(mode, kill_at, opt, tmp_path):
+    # kill_at 2: back to round 1's checkpoint; kill_at 1: no checkpoint yet, back to the start.
+    # The server slices are re-split with their optimizer state (momentum, Adam moments and
+    # step), so the losses and client weights are the uninterrupted run's
     def cfg_():
         c = _cfg()
         c.training.epochs = 3
-        c.training.optimizer = {"name": "SGD", "params": {"lr": 0.05}}
+        c.training.optimizer = {"name": opt, "params": {"lr": 0.05, **({"momentum": 0.9} if opt == "SGD" else {})}}
         return c
     session = ts.ClientSession(_loaders(), mode=mode)
     ref = [e["loss"] for e in ts.slice(_model(), cuts=CUTS).train(session, run_config=cfg_())]
@@ -431,6 +469,45 @@ def test_server_recovery_replays_the_round_exactly(mode, kill_at, tmp_path):
     assert [round(e["loss"], 6) for e in h] == ref
     _same_states(remote.states, session.states)
     assert len(ex.partitions) == 2                    # slice 0 on the clients, one server worker left
+
+
+def test_server_recovery_mid_round_with_shuffled_data_replays_exactly(tmp_path):
+    # a server worker dies in round 2 after some batches: the clients' retried epoch must
+    # start from the same random state (shuffle), also though recovery re-inits them, and
+    # the server slices come back with their optimizer state
+    def cfg_():
+        c = _cfg()
+        c.training.epochs = 3
+        return c                                          # SGD with momentum
+    session = ts.ClientSession(_shuffled(), mode="parallel")
+    ref = [e["loss"] for e in ts.slice(_model(), cuts=CUTS).train(session, run_config=cfg_(),
+                                                                  algorithm=ts.SplitFedAlgorithm())]
+    cfg = cfg_()
+    cfg.fault_tolerance.enabled, cfg.fault_tolerance.max_retries = True, 1
+    cfg.fault_tolerance.heartbeat_interval_s = 0.5
+    cfg.checkpoint.dir = str(tmp_path)
+    offsets = cfg.transport.listen_offsets()
+    servers = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg) for _ in range(2)]
+
+    class _KillsServer(ts.WorkerServicer):               # client 1's batch 1 of round 2
+        def client_step(self, request, context):
+            if (request.epoch, request.index) == (2, 1) and servers[1] is not None:
+                servers[1].stop()
+            return super().client_step(request, context)
+    data = _shuffled()
+    clients = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg, data=data[k], client_index=k,
+                               servicer_class=_KillsServer if k == 1 else None) for k in range(C)]
+    addr = f"127.0.0.1:{free_port(cfg.transport.listen_offsets(drives=True))}"
+    ex = ts.ClientNodesExecutor(discovery=StaticDiscovery(peers=[w.address for w in clients + servers]),
+                                coordinator_addr=addr, run_config=cfg)
+    remote = ts.RemoteSession(C, mode="parallel")
+    try:
+        h = ts.slice(_model(), cuts=CUTS, executor=ex).train(remote, run_config=cfg, algorithm=ts.SplitFedAlgorithm())
+    finally:
+        for w in servers + clients:
+            w.stop()
+    assert [round(e["loss"], 6) for e in h] == ref
+    assert len(ex.partitions) == 2
 
 
 def test_profile_breakdown_sums_every_client(monkeypatch):

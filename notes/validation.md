@@ -1946,3 +1946,56 @@ Measured speeds (matmul benchmark): Nano 0.80, AGX 2.08, Dell 1.42 TFLOP/s.
   memory caps. Fix: clone the leaf, as `SplitLayer.forward` does (same bug as in the first
   version of `sl/costs.py`). Test: `test_flops_plan_with_memory_caps_on_in_place_relus`
   (fails without the fix). Full suite 437 passed / 1 skipped.
+
+## M14: real node failures on the testbed (2026-10-24)
+
+Setup: `benchmarks/testbed/clients.py` + `clients.yaml` (SmallCNN, SplitFed V2, 8 client nodes
+on the Nanos, coordinator + server workers on the AGX, 1000 CIFAR samples per client, tcp,
+`training.deterministic`). Failures are `docker kill` of one of our containers (a crashed
+process; nothing on the boards changes), driven by `notes/testbed/fail_exp.py`, which also
+polls every node's free memory (min ~5.4 GB available on the Nanos throughout). Results
+`results/fail_*.json`, logs `logs/{lockstep_kill,concurrent_kill,concurrent_rejoin,server_kill,server_nokill}`.
+
+| test | what | outcome |
+|---|---|---|
+| client dies, lockstep | client-3 killed mid epoch 2 of 4 | dropped within the log's 1 s resolution (the in-flight call fails; no heartbeat wait); trained 12 of its 32 batches that round; 7 clients finish; epoch 22.3 s vs 25.8 s with 8 (= 7/8) |
+| client dies, concurrent | same, 6 epochs | dropped within 1 s; 5 of 32 batches; epoch 5.2 s vs 6.3 s (= 7/8) |
+| client rejoins | killed, `docker start` 5 s later (a new process) | rejoins at the first round start after it is up (11.6 s after the kill), from the latest aggregate; `clients_joined: [3]` |
+| server worker dies | 2 server workers, `fault_tolerance.enabled`, worker-1 killed mid epoch 2 | re-split onto the survivor and all 8 clients restored within 1.4 s; **losses bit-identical to the uninterrupted run** (2.17219, 2.11554, 1.97515, 1.95354) after the fixes below |
+
+Bugs found (each with a test that fails without the fix):
+- **44. Baremetal launch gave a worker the coordinator's port** (`deploy/launch.py`
+  `render_baremetal`): ports on a shared host were spaced only among nodes of the same role,
+  so with two workers on the coordinator's host, worker-1 got 50053 and its TCP tensor listener
+  50054 = the coordinator's. Fix: per host, skip every port any node there listens on. Test
+  `test_render_baremetal_workers_avoid_the_coordinators_port`.
+- **45. A dead client node crashed the run at the next round start** (`client_nodes._admit`):
+  with coordinator discovery a node keeps the tags it registered with, so the dead client was
+  never probed and looked like a returning one; its join timed out with `TimeoutError`, which
+  `_admit` didn't catch. The local tests use static discovery (no tags, always probed). Fix:
+  probe candidates live (`_classify(probe=True)`) and catch `TimeoutError`. Test
+  `test_a_dead_registered_client_is_not_asked_to_join_again`.
+- **46. Recovery dropped the re-split slices' optimizer state** (`DistributedExecutor.recover`,
+  `ClientNodesExecutor.recover`, since M2): only the weights came back from the checkpoints, so
+  momentum / Adam moments restarted from zero (testbed: epoch 2 loss 2.34 vs 2.12). The tests
+  used SGD without momentum. Fix: `_collect_optimizer_state` maps each old slice's checkpointed
+  optimizer state to its parameters, `_restore_optimizer_states` loads it into the new slices
+  (`get_state` / `set_state`). Tests: client-node recovery with momentum and AdamW; P2P recovery
+  now compared with unsplit PyTorch (it only checked finite losses).
+- **47. A retried epoch drew a new shuffle** (client nodes and the data owner's retry loop):
+  `iter(loader)` again advanced the loader's generator, and recovery's re-init also reset the
+  client's place in its data. Fix: `rng_snapshot` / `rng_restore` (`core/determinism.py`: the
+  loader's generators + CPU/CUDA RNG) at each epoch's start, restored on a retry; a re-init in
+  the same run keeps the client's data state. Tests: mid-round server kill with shuffled data
+  (client nodes), P2P recovery with a shuffled loader.
+- **48. Client nodes trained on another order than the in-process session from epoch 2 on**
+  (`WorkerServicer.client_step`/`client_round`, since M10), with shuffled data whose size is a
+  multiple of the batch size: the node took its n batches with `next()`, while a for loop also
+  runs the iterator to its end, where `RandomSampler` draws its generator once more. Fix:
+  `_next_batch` runs the iterator to its end after the last batch. Not visible on the testbed
+  (1000 samples, batch 32: the partial last batch already exhausts the sampler), so the earlier
+  testbed-vs-twin results stand. Test `test_client_nodes_with_shuffled_data_match_the_in_process_session`.
+- Harness: the benchmark printed the callback's metrics, which lack `clients_lost` /
+  `clients_joined` (the executor adds them after the callbacks); it now merges the history entry.
+
+Full suite 444 passed / 1 skipped.

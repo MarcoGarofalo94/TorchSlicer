@@ -223,13 +223,14 @@ class ClientNodesExecutor(DistributedExecutor):
         self._rep = self._clients[first]
         return [clients[first], *servers]
 
-    def _classify(self, nodes: list, timeout: float) -> tuple:
+    def _classify(self, nodes: list, timeout: float, probe: bool = False) -> tuple:
         """``(servers, {client index: node})`` among ``nodes``; a node whose tags can't be
-        read within ``timeout`` (not up) is left out."""
+        read within ``timeout`` (not up) is left out. ``probe``: ask every node, also one
+        whose tags discovery already has (it registered once, but may be down now)."""
         clients, servers = {}, []
         for nd in nodes:
             try:
-                tags = list(nd.tags) or self._describe_tags(nd.address, timeout)
+                tags = (not probe and list(nd.tags)) or self._describe_tags(nd.address, timeout)
             except (TimeoutError, grpc.RpcError):
                 continue
             if "client" not in tags:
@@ -302,7 +303,7 @@ class ClientNodesExecutor(DistributedExecutor):
         candidates = [nd for nd in self._discovery.known_nodes() if nd.address not in live]
         for nd in candidates:
             self._router.reset(nd.address)     # dial afresh: it may be a new process there
-        _, found = self._classify(candidates, timeout=1.0)
+        _, found = self._classify(candidates, timeout=1.0, probe=True)
         joined = []
         for k in missing:
             nd = found.get(k)
@@ -311,7 +312,7 @@ class ClientNodesExecutor(DistributedExecutor):
             try:
                 self._join(k, nd)
                 joined.append(k)
-            except grpc.RpcError as e:
+            except (grpc.RpcError, TimeoutError) as e:      # went down again meanwhile
                 _LOG.warning("client %s at %s didn't join: %s", k, nd.address, e)
         if joined:
             self._proxies[1].stub().set_peers(worker_service_pb2.PeersRequest(
@@ -707,6 +708,7 @@ class ClientNodesExecutor(DistributedExecutor):
             _LOG.warning("recovery from the initial weights: no complete checkpoint")
             all_layers = list(self._stored_layers)
             self._client_ckpt.clear()
+            self._recovered_opt = {}
             snap = self._start_snap
         n = 1 + len(alive)
         partitions = self._server_split(len(alive))
@@ -726,6 +728,7 @@ class ClientNodesExecutor(DistributedExecutor):
         if self._session is not None and snap is not None:
             self._session.restore(snap)
         self._init_slices(all_layers, partitions, phase="recovery")
+        self._restore_optimizer_states(all_layers, partitions, range(1, n))   # clients load their own
         self._failed_workers.clear()
         self._failure_info.clear()
         self._failure_event.clear()
@@ -739,6 +742,7 @@ class ClientNodesExecutor(DistributedExecutor):
         """The stored layers with the server slices' weights from ``epoch``'s checkpoints
         (slice 0 is restored on each client from its own)."""
         import copy as _copy
+        self._recovered_opt = {}
         if not self._ft_checkpoint_dir:
             return None
         layers = list(self._stored_layers)
@@ -748,9 +752,11 @@ class ClientNodesExecutor(DistributedExecutor):
             path = os.path.join(self._ft_checkpoint_dir, f"worker_{i}_epoch_{epoch}.pt")
             if not os.path.exists(path):
                 _LOG.warning("recovery checkpoint missing path=%s", path)
+                self._recovered_opt = {}
                 return None
             ckpt = torch.load(path, map_location="cpu", weights_only=False)
             SplitLayer([layers[j] for j in indices]).load_state_dict(ckpt.get("layer_state_dict", {}), strict=False)
+            self._collect_optimizer_state(i, layers, ckpt)
         return layers
 
     def _server_split(self, n_servers: int) -> list:

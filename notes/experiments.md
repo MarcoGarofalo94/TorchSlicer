@@ -332,3 +332,10 @@ NAT/relay, and avoid it for cuts over a few MB. NCCL remains unmeasured.
 - Best test acc (mean ± std): vanilla 0.9045±0.0026, R2 0.9032±0.0014, R4 0.9030±0.0010, R8 0.9019±0.0009, R16 0.9012±0.0014. Last epoch: 0.8955 / 0.8964 / 0.8969 / 0.8917 / 0.8963.
 - Bytes fwd/epoch: 409.6 MB → 204.8 / 102.4 / 51.2 / 25.6 MB (gradients the same).
 - Conclusion: reproduced, all within 0.01; the drop from R = 16 is ≤0.3 points (paper 0.3).
+
+## 2026-10-24 — M14: real node failures on the testbed
+- Hypothesis: client nodes that die leave and the others go on (lockstep and concurrent); a restarted client rejoins; a dead server worker is recovered from the last checkpoint and the run is as if nothing had failed.
+- Config: benchmarks/testbed/clients.yaml (seed 0, deterministic); command: `notes/testbed/fail_exp.py NAME --kill CONTAINER --after S [--restart S] [--servers 2] --env EPOCHS=4 [--env SL_CLIENT_SCHEDULE=concurrent] [--env FAULT_TOLERANCE_ENABLED=1]`.
+- Client drop: detected within 1 s, 7 clients finish, epoch time 7/8. Rejoin: at the first round start after the new process is up (11.6 s after the kill). Server worker kill: recovered in 1.4 s, losses bit-identical to the uninterrupted run.
+- Found and fixed bugs 44–48 (validation.md): launcher port clash, crash at the next round after a client died, optimizer state lost in recovery, retried epoch reshuffled, client nodes' epoch order after epoch 1.
+- Conclusion: failure handling works on real nodes once fixed; recovery is now exact (momentum, shuffled data, mid-round kill).

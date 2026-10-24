@@ -1,0 +1,265 @@
+{
+ "name": "server_kill",
+ "exit": "0",
+ "wall_s": 164.9,
+ "history": "[2.1721883709542453, 2.115541552193463, 1.9751465595327318, 1.9535431363619864]",
+ "containers": {
+  "ts-server_kill-client-0": {
+   "node": "jon-001",
+   "started": "2026-10-24T14:37:38.168123976Z",
+   "finished": "2026-10-24T14:40:20.983737442Z"
+  },
+  "ts-server_kill-client-1": {
+   "node": "jon-003",
+   "started": "2026-10-24T14:37:40.587486054Z",
+   "finished": "2026-10-24T14:40:22.074984372Z"
+  },
+  "ts-server_kill-client-2": {
+   "node": "jon-004",
+   "started": "2026-10-24T14:37:43.015495822Z",
+   "finished": "2026-10-24T14:40:22.104422241Z"
+  },
+  "ts-server_kill-client-3": {
+   "node": "jon-005",
+   "started": "2026-10-24T14:37:45.603697801Z",
+   "finished": "2026-10-24T14:40:22.081137275Z"
+  },
+  "ts-server_kill-client-4": {
+   "node": "jon-006",
+   "started": "2026-10-24T14:37:48.196388748Z",
+   "finished": "2026-10-24T14:40:22.09193091Z"
+  },
+  "ts-server_kill-client-5": {
+   "node": "jon-007",
+   "started": "2026-10-24T14:37:50.538215265Z",
+   "finished": "2026-10-24T14:40:22.094297123Z"
+  },
+  "ts-server_kill-client-6": {
+   "node": "jon-008",
+   "started": "2026-10-24T14:37:52.865139294Z",
+   "finished": "2026-10-24T14:40:22.10495528Z"
+  },
+  "ts-server_kill-client-7": {
+   "node": "jon-009",
+   "started": "2026-10-24T14:37:55.2879955Z",
+   "finished": "2026-10-24T14:40:22.10963537Z"
+  },
+  "ts-server_kill-worker-0": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:37:57.140942252Z",
+   "finished": "2026-10-24T14:40:22.103282837Z"
+  },
+  "ts-server_kill-worker-1": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:37:58.495269359Z",
+   "finished": "2026-10-24T14:38:58.414901576Z"
+  },
+  "ts-server_kill-coordinator": {
+   "node": "jor-001",
+   "started": "2026-10-24T14:37:59.776266291Z",
+   "finished": "2026-10-24T14:40:22.159318603Z"
+  }
+ },
+ "results": [
+  {
+   "step": 1,
+   "epoch": 1,
+   "loss": 2.1721883709542453,
+   "duration_s": 34.396,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_bwd": [
+    262144000,
+    131072000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 786496000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 3072250.0,
+   "raw_bytes_total": 786496000,
+   "compute_s": [
+    9.152771,
+    2.358456,
+    4.41388
+   ],
+   "client_compute_s": 9.152771,
+   "server_compute_s": 6.772336,
+   "sl_setting": "vanilla",
+   "bytes_state": 169309
+  },
+  {
+   "step": 2,
+   "epoch": 2,
+   "loss": 2.115541552193463,
+   "duration_s": 26.227,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    6.211032,
+    5.19839
+   ],
+   "client_compute_s": 6.211032,
+   "server_compute_s": 5.19839,
+   "sl_setting": "vanilla",
+   "bytes_state": 163640
+  },
+  {
+   "step": 3,
+   "epoch": 3,
+   "loss": 1.9751465595327318,
+   "duration_s": 26.025,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    6.330382,
+    5.054536
+   ],
+   "client_compute_s": 6.330382,
+   "server_compute_s": 5.054536,
+   "sl_setting": "vanilla",
+   "bytes_state": 163640
+  },
+  {
+   "step": 4,
+   "epoch": 4,
+   "loss": 1.9535431363619864,
+   "duration_s": 25.891,
+   "phase": "epoch",
+   "bytes_fwd": [
+    262144000
+   ],
+   "bytes_bwd": [
+    262144000
+   ],
+   "bytes_input": 0,
+   "bytes_label": 64000,
+   "bytes_total": 524352000,
+   "bytes_client": 524352000,
+   "bytes_per_batch": 2048250.0,
+   "raw_bytes_total": 524352000,
+   "compute_s": [
+    6.297891,
+    5.014602
+   ],
+   "client_compute_s": 6.297891,
+   "server_compute_s": 5.014602,
+   "sl_setting": "vanilla",
+   "bytes_state": 163640
+  }
+ ],
+ "events": {
+  "mem_min_mb": {
+   "jon-001": 5523,
+   "jon-003": 5492,
+   "jon-004": 5603,
+   "jon-005": 5573,
+   "jon-006": 5416,
+   "jon-007": 5593,
+   "jon-008": 5546,
+   "jon-009": 5662,
+   "jor-001": 57226
+  },
+  "train_start": 1792852697.7515144,
+  "killed": 1792852738.578463
+ },
+ "kill": "worker-1",
+ "after": 40.0,
+ "restart": null,
+ "servers": 2,
+ "envs": {
+  "OMP_NUM_THREADS": "4",
+  "EPOCHS": "4",
+  "FAULT_TOLERANCE_ENABLED": "1",
+  "N_WORKERS": "3"
+ },
+ "coordinator_events": [
+  "14:38:19 INFO [torchslicer.coordinator] failure detection on heartbeat_interval_s=5.0 ping_timeout_s=3.0 recovery=True",
+  "14:39:00 WARNING [torchslicer.client_nodes] recovery: server slices 2 -> 1 workers ['172.17.6.25:50051']",
+  "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.6.194:50051 hostname=jon-001",
+  "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.6.248:50051 hostname=jon-003",
+  "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.5:50051 hostname=jon-004",
+  "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.6:50051 hostname=jon-005",
+  "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.7:50051 hostname=jon-006",
+  "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.8:50051 hostname=jon-007",
+  "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.9:50051 hostname=jon-008",
+  "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.10:50051 hostname=jon-002",
+  "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=1 address=172.17.6.25:50051 hostname=ubuntu",
+  "14:39:00 INFO [torchslicer.client_nodes] recovery complete server_workers=1"
+ ],
+ "since_kill_s": [
+  [
+   -39.6,
+   "14:38:19 INFO [torchslicer.coordinator] failure detection on heartbeat_interval_s=5.0 ping_timeout_s=3.0 recovery=True"
+  ],
+  [
+   1.4,
+   "14:39:00 WARNING [torchslicer.client_nodes] recovery: server slices 2 -> 1 workers ['172.17.6.25:50051']"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.6.194:50051 hostname=jon-001"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.6.248:50051 hostname=jon-003"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.5:50051 hostname=jon-004"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.6:50051 hostname=jon-005"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.7:50051 hostname=jon-006"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.8:50051 hostname=jon-007"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.9:50051 hostname=jon-008"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=0 address=172.17.7.10:50051 hostname=jon-002"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] worker recovery complete slice=1 address=172.17.6.25:50051 hostname=ubuntu"
+  ],
+  [
+   1.4,
+   "14:39:00 INFO [torchslicer.client_nodes] recovery complete server_workers=1"
+  ]
+ ]
+}
