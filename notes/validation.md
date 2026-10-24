@@ -1894,3 +1894,19 @@ FLOPs), not time/CPU/energy. Done:
   3-client session (`test_distributed_runs_evaluate_like_the_local_one`); client nodes =
   in-process session, with and without FedAvg (per-client lists); concurrent evaluates.
   Full suite 436 passed / 1 skipped.
+- **Testbed, lockstep vs concurrent with test accuracy** (8 Orin Nano clients, AGX server,
+  CIFAR-10 npz, 1000 train samples per client, 2000 test samples evaluated on the AGX
+  coordinator every epoch, SplitFed, 10 epochs, seeds 0–2; `notes/testbed/results/acc_*`):
+
+  | | lockstep | concurrent |
+  |---|---|---|
+  | test acc, mean of the last 3 epochs | 0.321 ± 0.032 | 0.311 ± 0.016 |
+  | final test acc | 0.338 ± 0.042 | 0.310 ± 0.041 |
+  | best test acc | 0.349 ± 0.033 | 0.327 ± 0.023 |
+  | epoch | 25.6 s | 6.2 s |
+
+  No accuracy difference beyond the seed spread (the 3-epoch training-loss gap seen before
+  doesn't show in test accuracy over 10 epochs); 4.1x faster per epoch, so far more
+  accuracy per second. Absolute accuracy is low (small CNN, 8000 samples, lr 0.05 + momentum
+  0.9 with FedAvg is noisy: one seed's test loss jumps at epoch 10): fine for comparing the
+  schedules, not a model result. Eval cost: 4.4 MB of weights fetched per evaluation.
