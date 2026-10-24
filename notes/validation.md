@@ -1875,3 +1875,22 @@ FLOPs), not time/CPU/energy. Done:
   12/12 every time. So it shows only in full-suite runs (cross-test state or load; the A100
   is shared with another tenant). Next time a full run hangs, keep the faulthandler dump
   (run with `-o faulthandler_timeout=240 -rf` into a file, never piped through grep).
+
+## Evaluation in distributed runs (2026-10-24)
+
+- `DistributedExecutor` / `P2PExecutor` / `ClientNodesExecutor` accept `eval_data` /
+  `eval_every` (`ts.run` with a `data` section builds the test set on the data owner, and
+  on a client-node coordinator, which holds no training data). After the epoch the data
+  owner fetches every slice's weights (`get_state`) into a cached local copy of the split
+  (rebuilt if recovery re-splits) and runs the shared `evaluate_slices` (moved out of
+  `LocalExecutor.evaluate`). Sessions: every distinct client state with the shared server
+  (in-process states on the data owner; client nodes: each live client's slice 0, deduped
+  by content), `*_clients` lists as on the local executor. `bytes_eval` reports the fetched
+  bytes, apart from training traffic. Refused: SplitFed V1 on client nodes, offload.
+- **Bug in the first version (before commit):** a distributed session evaluated only the
+  client state loaded in the slice at that moment; the local executor averages every
+  client's. Caught by the new equality test (centralized, 3 clients, no aggregation).
+- Tests: distributed = local for centralized pipeline/vanilla, P2P vanilla/u_shaped, a
+  3-client session (`test_distributed_runs_evaluate_like_the_local_one`); client nodes =
+  in-process session, with and without FedAvg (per-client lists); concurrent evaluates.
+  Full suite 436 passed / 1 skipped.

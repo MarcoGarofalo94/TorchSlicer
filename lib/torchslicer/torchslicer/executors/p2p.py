@@ -88,7 +88,7 @@ def _advertised(cfg: RunConfig) -> str | None:
 
 def run_p2p(model_fn, data_fn, *, port: int | None = None, is_driver: bool | None = None,
             address: str | None = None, run_config: RunConfig | None = None,
-            verbose: bool = True, callbacks: list | None = None, **slice_kwargs) -> list:
+            verbose: bool = True, callbacks: list | None = None, eval_data=None, **slice_kwargs) -> list:
     """Run this process as one node of a P2P run, and return the history on the driver.
 
     Every node runs the same script; the role comes from ``is_driver``, else
@@ -141,6 +141,6 @@ def run_p2p(model_fn, data_fn, *, port: int | None = None, is_driver: bool | Non
     _LOG.info("p2p driver start run_id=%s\n%s", cfg.run_id, sliced.summary())
     from ..sl.clients import data_for_run
     history = sliced.train(data_for_run(cfg, data_fn), run_config=cfg, verbose=verbose,
-                           callbacks=callbacks)
+                           callbacks=callbacks, eval_data=eval_data)
     _LOG.info("p2p driver complete run_id=%s", cfg.run_id)
     return history

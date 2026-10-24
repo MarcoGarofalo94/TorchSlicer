@@ -497,8 +497,8 @@ There are two `pyproject.toml` files: the root one for editable installs, and
 `lib/torchslicer/pyproject.toml`, which CI publishes to PyPI on `v*.*.*` tags. Keep their
 versions and dependencies in sync, along with `__version__`.
 
-**Known limits:** test-set evaluation runs on the local executor only; multi-client
-sessions simulate all clients in one process; channels are unencrypted and
+**Known limits:** test-set evaluation isn't available with offload or with SplitFed V1 on
+client nodes; channels are unencrypted and
 unauthenticated (TLS/mTLS is planned), so run on trusted networks; real multi-GPU NCCL is
 not yet validated.
 

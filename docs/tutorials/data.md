@@ -84,9 +84,13 @@ the history entries.
 - **Sessions:** each distinct client state is evaluated with the shared server slices;
   the history has the mean and `test_accuracy_clients`/`test_loss_clients`. After FedAvg
   all clients share one state, which is evaluated once.
-- **Supported on the local executor** (the simulator). Distributed, P2P and offload refuse
-  `eval_data` with a clear error for now. With a `data` section on those topologies, set
-  `data.eval_every: 0`.
+- **Distributed runs** (centralized, P2P, client nodes) evaluate on the data owner: after
+  the epoch it fetches every slice's current weights (`get_state`) into a local copy of the
+  split and evaluates there, so the numbers equal the in-process run's (the tests check
+  this). With client nodes, the coordinator holds the test set (a `data` section builds it
+  there) and fetches each client's slice 0. The fetched bytes are reported in
+  `bytes_eval`, apart from the training traffic. Not yet: per-client server copies
+  (SplitFed V1) on client nodes, and offload (both refuse `eval_data`).
 
 ## Many clients
 

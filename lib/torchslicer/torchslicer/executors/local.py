@@ -95,6 +95,69 @@ def _unpack_inputs(inputs):
     return inputs, {}
 
 
+
+def evaluate_slices(split_layers: list, criterion, loader, hooks: dict | None = None) -> dict:
+    """Test loss (the training criterion) and, for classification (``(N, C)`` outputs and
+    ``(N,)`` labels, or per token: ``(N, C, T)`` and ``(N, T)``), accuracy of the slices'
+    current weights: forward only, no gradients, every slice in eval mode, the RNG state
+    restored after. Cut ``hooks`` transform the activations as in training
+    (``CutContext.direction == "eval"``; ``Recorder`` skips it); no bytes are counted."""
+    device = next(split_layers[0].parameters()).device
+    hooks = hooks or {}
+    was_training = [sl.training for sl in split_layers]
+    for sl in split_layers:
+        sl.eval()
+    total, correct, n, n_items, classify = 0.0, 0, 0, 0, True
+    # iterating a DataLoader draws from the global RNG: keep training's stream intact
+    rng_devices = [device] if device.type == "cuda" else []
+    try:
+        with torch.random.fork_rng(devices=rng_devices), torch.no_grad():
+            for inputs, labels in loader:
+                main, aux = _unpack_inputs(inputs)
+                x = main.to(device)
+                labels = labels.to(device)
+                aux = {k: v.to(device) for k, v in aux.items()}
+                for i, sl in enumerate(split_layers):
+                    if i > 0 and (hook := hooks.get(i - 1)) is not None:
+                        ctx = CutContext(i - 1, "eval", -1, len(split_layers))
+                        x = hook.decode(_detach_payload(hook.encode(x, ctx)), ctx)
+                    x = sl(x, **aux) if (i == 0 and aux) else sl(x)
+                    sl.pop_moe_aux_loss()
+                b = labels.shape[0]
+                total += criterion(x, labels).item() * b
+                n += b
+                # classes on dim 1: (N, C) vs (N,), or (N, C, T...) vs (N, T...) for tokens
+                if (x.dim() == labels.dim() + 1 and not labels.is_floating_point()
+                        and x.shape[0] == b and x.shape[2:] == labels.shape[1:]):
+                    correct += (x.argmax(1) == labels).sum().item()
+                    n_items += labels.numel()
+                else:
+                    classify = False
+    finally:
+        for sl, mode in zip(split_layers, was_training):
+            sl.train(mode)
+    if n == 0:
+        return {}
+    out = {"test_loss": round(total / n, 6), "test_samples": n}
+    if classify:
+        out["test_accuracy"] = round(correct / n_items, 6)
+    return out
+
+
+def combine_client_evals(results: list, n_distinct: int) -> dict:
+    """One ``evaluate_slices`` result per client: the means, plus ``*_clients`` lists when
+    the clients held more than one distinct state."""
+    out = {}
+    for key in ("test_loss", "test_accuracy"):
+        vals = [r[key] for r in results if key in r]
+        if vals:
+            out[key] = round(sum(vals) / len(vals), 6)
+            if n_distinct > 1:
+                out[f"{key}_clients"] = vals
+    if results:
+        out["test_samples"] = results[0].get("test_samples", 0)
+    return out
+
 class LocalExecutor(BaseExecutor):
     def __init__(self):
         self.split_layers: list[SplitLayer] = []
@@ -443,48 +506,8 @@ class LocalExecutor(BaseExecutor):
         return epoch_metrics
 
     def evaluate(self, loader) -> dict:
-        """Test loss (the training criterion) and, for classification (``(N, C)`` outputs and
-        ``(N,)`` labels, or per token: ``(N, C, T)`` and ``(N, T)``), accuracy of the current weights: forward only, no gradients,
-        every slice in eval mode, the RNG state restored after. Cut hooks transform the activations as in training
-        (``CutContext.direction == "eval"``; ``Recorder`` skips it); no bytes are counted."""
-        device = next(self.split_layers[0].parameters()).device
-        was_training = [sl.training for sl in self.split_layers]
-        for sl in self.split_layers:
-            sl.eval()
-        total, correct, n, n_items, classify = 0.0, 0, 0, 0, True
-        # iterating a DataLoader draws from the global RNG: keep training's stream intact
-        rng_devices = [device] if device.type == "cuda" else []
-        try:
-            with torch.random.fork_rng(devices=rng_devices), torch.no_grad():
-                for inputs, labels in loader:
-                    main, aux = _unpack_inputs(inputs)
-                    x = main.to(device)
-                    labels = labels.to(device)
-                    aux = {k: v.to(device) for k, v in aux.items()}
-                    for i, sl in enumerate(self.split_layers):
-                        if i > 0:
-                            x = self._eval_cut(i - 1, x)
-                        x = sl(x, **aux) if (i == 0 and aux) else sl(x)
-                        sl.pop_moe_aux_loss()
-                    b = labels.shape[0]
-                    total += self.criterion(x, labels).item() * b
-                    n += b
-                    # classes on dim 1: (N, C) vs (N,), or (N, C, T...) vs (N, T...) for tokens
-                    if (x.dim() == labels.dim() + 1 and not labels.is_floating_point()
-                            and x.shape[0] == b and x.shape[2:] == labels.shape[1:]):
-                        correct += (x.argmax(1) == labels).sum().item()
-                        n_items += labels.numel()
-                    else:
-                        classify = False
-        finally:
-            for sl, mode in zip(self.split_layers, was_training):
-                sl.train(mode)
-        if n == 0:
-            return {}
-        out = {"test_loss": round(total / n, 6), "test_samples": n}
-        if classify:
-            out["test_accuracy"] = round(correct / n_items, 6)
-        return out
+        """Test loss and accuracy of the current weights (:func:`evaluate_slices`)."""
+        return evaluate_slices(self.split_layers, self.criterion, loader, self._hooks)
 
     def _eval_cut(self, cut: int, x):
         hook = self._hooks.get(cut)
@@ -508,15 +531,7 @@ class LocalExecutor(BaseExecutor):
             results.append(by_state[id(state)])
         if session.current is not None and session.states[session.current] is not None:
             adapter.set_state(session.states[session.current])
-        out = {}
-        for key in ("test_loss", "test_accuracy"):
-            vals = [r[key] for r in results if key in r]
-            if vals:
-                out[key] = round(sum(vals) / len(vals), 6)
-                if len(by_state) > 1:
-                    out[f"{key}_clients"] = vals
-        out["test_samples"] = results[0].get("test_samples", 0)
-        return out
+        return combine_client_evals(results, len(by_state))
 
     def _measure_costs(self, inputs) -> list:
         """Hardware-independent memory and FLOPs per slice on this first batch, or ``[]``

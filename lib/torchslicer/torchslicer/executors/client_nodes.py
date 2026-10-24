@@ -146,7 +146,7 @@ class ClientNodesExecutor(DistributedExecutor):
     def setup(self, model_graph, partitions, optimizer_cfg: dict, criterion_cfg: dict,
               mixed_precision: bool = False, n_micro_batches: int = 1, callbacks: list = None,
               model_name: str = "unknown", strategy_name: str = "unknown", run_config=None,
-              planner=None, cut_hooks=None, algorithm=None) -> None:
+              planner=None, cut_hooks=None, algorithm=None, eval_data=None, eval_every: int = 1) -> None:
         """As ``DistributedExecutor.setup`` (same signature: ``SlicedModel.train`` passes
         what it names); an algorithm that needs per-client server state
         (``needs_per_client_server_state``, SplitFed V1) makes every server worker keep one
@@ -158,13 +158,17 @@ class ClientNodesExecutor(DistributedExecutor):
         if self._per_client and self._concurrent:
             raise ValueError("sl.client_schedule concurrent doesn't support per-client server copies "
                              "(SplitFed V1) yet: the server swaps a client's copy in at its forward")
+        if self._per_client and eval_data is not None:
+            raise ValueError("evaluation with per-client server copies (SplitFed V1) isn't supported "
+                             "on client nodes yet")
         if self._per_client and self._run_config.fault_tolerance.enabled:
             raise ValueError("fault_tolerance.enabled with per-client server copies (SplitFed V1) "
                              "isn't supported on client nodes yet: the copies aren't checkpointed")
         super().setup(model_graph, partitions, optimizer_cfg, criterion_cfg,
                       mixed_precision=mixed_precision, n_micro_batches=n_micro_batches,
                       callbacks=callbacks, model_name=model_name, strategy_name=strategy_name,
-                      run_config=run_config, planner=planner, cut_hooks=cut_hooks, algorithm=algorithm)
+                      run_config=run_config, planner=planner, cut_hooks=cut_hooks, algorithm=algorithm,
+                      eval_data=eval_data, eval_every=eval_every)
 
     def _unsupported_hooks(self) -> dict:
         hooks = super()._unsupported_hooks()
@@ -524,6 +528,34 @@ class ClientNodesExecutor(DistributedExecutor):
         with self._lock:
             self._round_losses = None
         return {b: sum(v) / len(v) for b, v in have.items()}
+
+    def _evaluate_round(self, session) -> dict:
+        """Every distinct client state (slice 0 on each live client node; a client that
+        left keeps its last fetched state, else the initial one) with the server slices,
+        evaluated on the coordinator's ``eval_data``: the means, and ``*_clients`` lists
+        when the clients differ (as an in-process session reports)."""
+        import hashlib
+        from .local import combine_client_evals, evaluate_slices
+        self._eval_bytes = 0
+        servers = [self._fetch_state(p) for p in self._proxies[1:]]
+        crit, results, by_state = self._eval_criterion(), [], {}
+        for k in range(self.n_clients):
+            if k in self._lost or self._clients[k] is None:
+                st = session.states[k] if session is not None and session.states[k] is not None else None
+                st = st[0]["model"] if st is not None else (session._initial[0]["model"]
+                                                            if session is not None and session._initial else None)
+                if st is None:
+                    continue
+            else:
+                st = self._fetch_state(self._clients[k])
+            key = hashlib.sha1(b"".join(v.detach().cpu().numpy().tobytes() for v in st.values())).hexdigest()
+            if key not in by_state:
+                by_state[key] = evaluate_slices(self._eval_slices([st, *servers]), crit,
+                                                self._eval_loader, self._hooks)
+            results.append(by_state[key])
+        out = combine_client_evals(results, len(by_state))
+        out["bytes_eval"] = self._eval_bytes
+        return out
 
     def _session_adapter(self, n_clients: int):
         return None                  # states live on the nodes (RemoteSession moves them)

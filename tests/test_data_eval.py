@@ -150,11 +150,27 @@ def test_config_data_errors(tmp_path):
     cfg = _data_cfg(tmp_path)
     with pytest.raises(ValueError, match="either data_fn or data.dataset"):
         ts.run(lambda: _model(), lambda: _loader(1), run_config=cfg, verbose=False)
-    cfg.deploy.topology = "p2p"
-    with pytest.raises(ValueError, match="eval_every: 0"):
-        ts.run(lambda: _model(), run_config=cfg, verbose=False)
     with pytest.raises(ValueError, match="needs a data_fn"):
         ts.run(lambda: _model(), run_config=_cfg(), verbose=False)
+
+
+@pytest.mark.parametrize("topology,setting,clients", [
+    ("centralized", "pipeline", 1), ("centralized", "vanilla", 1), ("p2p", "vanilla", 1),
+    ("p2p", "u_shaped", 1), ("centralized", "vanilla", 3),
+])
+def test_distributed_runs_evaluate_like_the_local_one(tmp_path, topology, setting, clients):
+    # the data owner fetches every slice's weights and evaluates them on its test set:
+    # the same numbers as the in-process run, which trains the same way
+    def run(topo):
+        cfg = _data_cfg(tmp_path, batch_size=16)
+        cfg.deploy.topology, cfg.sl.setting, cfg.discovery.n_workers = topo, setting, 3
+        cfg.sl.clients, cfg.sl.client_mode = clients, "parallel"
+        return ts.run(lambda: _model(), run_config=cfg, verbose=False, cuts=["1", "3"])
+    ref, got = run("local"), run(topology)
+    for r, g in zip(ref, got):
+        for key in ("loss", "test_loss", "test_accuracy", "test_samples"):
+            assert g[key] == pytest.approx(r[key], abs=1e-6), key
+        assert g["bytes_eval"] > 0 and g["bytes_total"] == r["bytes_total"]   # eval isn't training traffic
 
 
 def test_executors_without_evaluation_refuse_eval_data():

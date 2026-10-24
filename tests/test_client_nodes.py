@@ -55,15 +55,15 @@ def _cfg(transport="grpc"):
     return c
 
 
-def _local(mode, handoff, algorithm, n_micro=1, loaders=None):
+def _local(mode, handoff, algorithm, n_micro=1, loaders=None, eval_data=None, history=False):
     session = ts.ClientSession(loaders or _loaders(), mode=mode, handoff=handoff)
     h = ts.slice(_model(), cuts=CUTS).train(session, run_config=_cfg(), algorithm=algorithm,
-                                           n_micro_batches=n_micro)
-    return [e["loss"] for e in h], session.states
+                                           n_micro_batches=n_micro, eval_data=eval_data)
+    return ([e["loss"] for e in h], session.states) + ((h,) if history else ())
 
 
 def _nodes(mode, handoff, algorithm, transport="grpc", n_micro=1, servicers=None, server_servicer=None,
-           **sl):
+           eval_data=None, **sl):
     cfg = _cfg(transport)
     for key, v in sl.items():
         setattr(cfg.sl, key, v)
@@ -82,7 +82,7 @@ def _nodes(mode, handoff, algorithm, transport="grpc", n_micro=1, servicers=None
     session = ts.RemoteSession(C, mode=mode, handoff=handoff)
     try:
         h = ts.slice(_model(), cuts=CUTS, executor=ex).train(session, run_config=cfg, algorithm=algorithm,
-                                                            n_micro_batches=n_micro)
+                                                            n_micro_batches=n_micro, eval_data=eval_data)
         states = session.states          # every client's final state, read at teardown
     finally:
         for w in servers + clients:
@@ -579,3 +579,29 @@ def test_concurrent_equals_the_session_in_the_servers_order(n_micro):
                                               n_micro_batches=n_micro)
     assert [round(x, 6) for x in got] == [e["loss"] for e in ref]
     _same_states(states, session.states)
+
+
+def _test_set():
+    g = torch.Generator().manual_seed(7)
+    return [(torch.randn(16, 8, generator=g), torch.randint(0, 4, (16,), generator=g)) for _ in range(3)]
+
+
+@pytest.mark.parametrize("algorithm", [None, ts.SplitFedAlgorithm()])
+def test_client_nodes_evaluate_like_the_in_process_session(algorithm):
+    # without aggregation every client holds its own slice 0: each is evaluated with the
+    # server and reported per client; after FedAvg they share one, evaluated once
+    _, _, ref = _local("parallel", "copy", algorithm, eval_data=_test_set(), history=True)
+    _, _, h = _nodes("parallel", "copy", algorithm, eval_data=_test_set())
+    for r, g in zip(ref, h):
+        for key in ("test_loss", "test_accuracy", "test_samples"):
+            assert g[key] == pytest.approx(r[key], abs=1e-6), key
+        assert ("test_loss_clients" in g) == ("test_loss_clients" in r) == (algorithm is None)
+        if algorithm is None:
+            assert g["test_loss_clients"] == pytest.approx(r["test_loss_clients"], abs=1e-6)
+        assert g["bytes_eval"] > 0
+
+
+def test_concurrent_client_nodes_evaluate():
+    _, _, h = _nodes("parallel", "copy", ts.SplitFedAlgorithm(), eval_data=_test_set(),
+                     client_schedule="concurrent")
+    assert all(0 <= e["test_accuracy"] <= 1 and e["test_samples"] == 48 for e in h)

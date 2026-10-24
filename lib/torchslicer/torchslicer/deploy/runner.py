@@ -76,23 +76,23 @@ def client_nodes(cfg: RunConfig) -> int:
     return int(cfg.sl.clients or 1) if cfg.sl.client_nodes else 0
 
 
-def _config_data(cfg, data_fn, topology: str, drives: bool):
+def _config_data(cfg, data_fn, topology: str, drives: bool, evaluates: bool = False):
     """``(data_fn, eval_data)``: with ``data.dataset`` set, TorchSlicer builds the loaders
-    (``torchslicer.data.build_data``) and ``data_fn`` must be ``None``."""
+    (``torchslicer.data.build_data``) and ``data_fn`` must be ``None``. ``drives``: this
+    node trains on the data; ``evaluates``: it runs the evaluation (the data owner, or a
+    client-node coordinator, which holds the test set but no training data)."""
     if not cfg.data.dataset:
         if data_fn is None and drives:
             raise ValueError("ts.run needs a data_fn, or data.dataset in the config")
         return data_fn, None
     if data_fn is not None:
         raise ValueError("set either data_fn or data.dataset, not both")
-    if not drives:
+    wants_eval = evaluates and bool(cfg.data.eval_every)
+    if not (drives or wants_eval):
         return None, None
-    if topology != "local" and cfg.data.eval_every:
-        raise ValueError(f"evaluation runs only on the local topology for now ({topology}); "
-                         "set data.eval_every: 0")
     from ..data.build import build_data
     train, test, _ = build_data(cfg)
-    return (lambda: train), test
+    return ((lambda: train) if drives else None), (test if wants_eval else None)
 
 
 def run(model_fn, data_fn=None, *, run_config: RunConfig | None = None, role: str | None = None,
@@ -129,7 +129,8 @@ def run(model_fn, data_fn=None, *, run_config: RunConfig | None = None, role: st
     _LOG.info("run topology=%s role=%s n=%s run_id=%s", topology, role, n, cfg.run_id)
     # who reads the data: the driving node, or with client nodes, each client
     needs_data = role in ("client", "all") or (role not in ("worker", "follower") and not cfg.sl.client_nodes)
-    data_fn, eval_data = _config_data(cfg, data_fn, topology, needs_data)
+    evaluates = role not in ("worker", "follower", "client")
+    data_fn, eval_data = _config_data(cfg, data_fn, topology, needs_data, evaluates)
 
     if topology == "local":
         import torch
@@ -146,10 +147,10 @@ def run(model_fn, data_fn=None, *, run_config: RunConfig | None = None, role: st
     if role == "client":
         return _client(cfg, data_fn)
     if role == "all":
-        return _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwargs)
+        return _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwargs, eval_data)
     if topology == "centralized":
-        return _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs)
-    return _drive(cfg, model_fn, data_fn, verbose, callbacks, slice_kwargs)
+        return _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs, eval_data)
+    return _drive(cfg, model_fn, data_fn, verbose, callbacks, slice_kwargs, eval_data)
 
 
 # ── roles ──────────────────────────────────────────────────────────────────────
@@ -191,7 +192,7 @@ def _client(cfg: RunConfig, data_fn) -> list:
     return []
 
 
-def _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> list:
+def _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs, eval_data=None) -> list:
     """The centralized coordinator: discovery per ``discovery.backend``, then train."""
     from .. import slice as ts_slice
     from ..discovery import CoordinatorDiscovery, StaticDiscovery
@@ -224,17 +225,17 @@ def _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> 
         data = data_for_run(cfg, data_fn)
     sliced = ts_slice(model_fn(), n=n, executor=executor, **slice_kwargs)
     _LOG.info("coordinator start run_id=%s\n%s", cfg.run_id, sliced.summary())
-    return sliced.train(data, run_config=cfg, verbose=verbose, callbacks=callbacks)
+    return sliced.train(data, run_config=cfg, verbose=verbose, callbacks=callbacks, eval_data=eval_data)
 
 
-def _drive(cfg, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> list:
+def _drive(cfg, model_fn, data_fn, verbose, callbacks, slice_kwargs, eval_data=None) -> list:
     """The P2P driver (worker 0 + embedded coordinator)."""
     from ..executors.p2p import run_p2p
     return run_p2p(model_fn, data_fn, is_driver=True, run_config=cfg, verbose=verbose,
-                   callbacks=callbacks, **slice_kwargs)
+                   callbacks=callbacks, eval_data=eval_data, **slice_kwargs)
 
 
-def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwargs) -> list:
+def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwargs, eval_data=None) -> list:
     """Every node in this process: workers on loopback, then the driving role."""
     from ..executors.worker import start_worker
 
@@ -268,12 +269,12 @@ def _run_all(cfg, topology, n, model_fn, data_fn, verbose, callbacks, slice_kwar
             cfg.discovery.peers = peers
             cfg.network.coordinator_bind_address = f"127.0.0.1:{free_port(drives)}"
             cfg.network.coordinator_address = cfg.network.coordinator_bind_address
-            return _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs)
+            return _coordinate(cfg, n, model_fn, data_fn, verbose, callbacks, slice_kwargs, eval_data)
         port = free_port(drives)
         cfg.network.worker_port = port
         cfg.network.worker_address = f"127.0.0.1:{port}"
         cfg.discovery.peers = [cfg.network.worker_address, *peers]
-        return _drive(cfg, model_fn, data_fn, verbose, callbacks, slice_kwargs)
+        return _drive(cfg, model_fn, data_fn, verbose, callbacks, slice_kwargs, eval_data)
     finally:
         for w in workers:
             w.stop()

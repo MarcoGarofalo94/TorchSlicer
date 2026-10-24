@@ -425,11 +425,20 @@ class DistributedExecutor(BaseExecutor):
         planner=None,
         cut_hooks=None,
         algorithm=None,
+        eval_data=None,
+        eval_every: int = 1,
     ) -> None:
         """``planner(nodes) -> partitions`` (from ``SlicedModel``) re-plans the split for
         the discovered nodes, in slice order, once their capabilities are known; it is
         also used by ``recover()``. Without it, ``partitions`` are used as given.
-        ``cut_hooks``: ``ts.slice(cut_hooks=)``, added to the config's ``sl.cut_hooks``."""
+        ``cut_hooks``: ``ts.slice(cut_hooks=)``, added to the config's ``sl.cut_hooks``.
+        ``eval_data``: a test loader on this process, evaluated every ``eval_every`` epochs
+        with every slice's current weights (``_evaluate_round``)."""
+        self._eval_loader = eval_data
+        self._eval_every = int(eval_every or 0) if eval_data is not None else 0
+        self._criterion_cfg = criterion_cfg
+        self._mixed_precision = mixed_precision
+        self._eval_cache = None
         if self._run_config.training.scheduler:
             raise ValueError("training.scheduler runs on the local executor for now")
         if self._run_config.privacy.attacks or self._run_config.privacy.defences:
@@ -688,6 +697,66 @@ class DistributedExecutor(BaseExecutor):
                                   data_load_total_ms, send_total_ms, wait_total_ms)
 
 
+    # ── evaluation on the data owner ──────────────────────────────────────────────
+
+    def _fetch_state(self, proxy) -> dict:
+        """A slice's current weights, from its worker (``get_state``, after any batch in
+        progress); counted in ``bytes_eval``."""
+        blob = proxy.stub().get_state(worker_service_pb2.StateRequest(), timeout=300.0)
+        self._eval_bytes += len(blob.data)
+        return torch.load(io.BytesIO(blob.data), weights_only=True)["model"]
+
+    def _eval_slices(self, states: list) -> list:
+        """The slices of the current split, on this process's device, with ``states``
+        loaded: a copy of the stored layers, made once per split (recovery re-splits)."""
+        key = [list(p.layer_indices) for p in self.partitions]
+        if self._eval_cache is None or self._eval_cache[0] != key:
+            import copy
+            device = torch.device(resolve_device(self._run_config.network.device))
+            n = len(self.partitions)
+            slices = []
+            for i, p in enumerate(self.partitions):
+                layers = copy.deepcopy([self._stored_layers[j] for j in p.layer_indices])
+                slices.append(SplitLayer(layers, is_last=(i == n - 1),
+                                         predecessors=p.predecessors or None,
+                                         mixed_precision=self._mixed_precision).to(device))
+            self._eval_cache = (key, slices)
+        slices = self._eval_cache[1]
+        for sl, st in zip(slices, states):
+            sl.load_state_dict(st)
+        return slices
+
+    def _eval_criterion(self):
+        c = self._criterion_cfg
+        return getattr(nn, c["name"])(**c.get("params", {}))
+
+    def _evaluate_round(self, session) -> dict:
+        """Test loss / accuracy of the slices' current weights, evaluated here on the
+        data owner's ``eval_data``: each worker's slice is fetched (``get_state``) into a
+        local copy of the split. Forward only, as on the local executor."""
+        from .local import combine_client_evals, evaluate_slices
+        self._eval_bytes = 0
+        states = [self._fetch_state(p) for p in self._proxies]
+        crit = self._eval_criterion()
+        if session is None:
+            out = evaluate_slices(self._eval_slices(states), crit, self._eval_loader, self._hooks)
+        else:
+            # a session keeps every client's client slices here: each distinct state is
+            # evaluated with the shared server slices, as on the local executor
+            results, by_state = [], {}
+            for st in session.states:
+                st = st if st is not None else session._initial          # not trained yet
+                if id(st) not in by_state:
+                    mixed = list(states)
+                    for i, sub in st.items():
+                        mixed[i] = sub["model"]
+                    by_state[id(st)] = evaluate_slices(self._eval_slices(mixed), crit,
+                                                       self._eval_loader, self._hooks)
+                results.append(by_state[id(st)])
+            out = combine_client_evals(results, len(by_state))
+        out["bytes_eval"] = self._eval_bytes
+        return out
+
     def _finish_epoch(self, epoch: int, epoch_t0: float, total_loss: float, n_batches: int,
                       session, adapter, selected, verbose: bool, total_epochs: int,
                       data_load_total_ms: float, send_total_ms: float, wait_total_ms: float) -> dict:
@@ -705,6 +774,8 @@ class DistributedExecutor(BaseExecutor):
         self._add_worker_comm(stats)
         sl_metrics = self._meter.summary(self._placement, self._run_config.sl.link_bandwidth_mbps,
                                          self._run_config.sl.link_latency_ms)
+        if getattr(self, "_eval_every", 0) and epoch % self._eval_every == 0:
+            sl_metrics.update(self._evaluate_round(session))
         if verbose:
             suffix = f"/{total_epochs}" if total_epochs else ""
             _LOG.info(
