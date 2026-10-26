@@ -138,22 +138,62 @@ class SlicedModel:
         self._splitter.validate(self.graph, partitions)
         return partitions
 
-    def summary(self) -> str:
-        """Which nodes each partition holds, with its parameter count."""
-        lines = [f"SlicedModel({self._model_name}, strategy={self._strategy_name}, "
-                 f"partitions={len(self.partitions)})"]
-        seen = set()
+    def summary(self, params: bool = False, example_input=None, aux: dict | None = None) -> str:
+        """Each slice with its nodes and parameter count, and the cut after it.
+
+        A module whose nodes all sit in one slice is shown once, as ``layer1.0 (7 nodes)``.
+        ``params=True`` adds each slice's size (parameters + buffers; a tied weight is
+        counted once). ``example_input`` adds the shape and size of what crosses each
+        cut. Both measure like :meth:`ModelGraph.summary`, on a copy of the model.
+        """
+        from .core.model_graph import _human_bytes
+        sizes = self.graph._param_sizes()
+        outs = self.graph._output_sizes(example_input, aux) if example_input is not None else None
+        total = sum(s[0] for s in sizes)
+        head = (f"SlicedModel({self._model_name}, strategy={self._strategy_name}, "
+                f"{len(self.partitions)} slices, {total:,} params")
+        if params:
+            head += f", {_human_bytes(sum(s[1] for s in sizes))}"
+        lines = [head + ")"]
         for p in self.partitions:
-            params = 0
-            for i in p.layer_indices:
-                for prm in self.graph.nodes[i].module.parameters():
-                    if id(prm) not in seen:
-                        seen.add(id(prm))
-                        params += prm.numel()
-            names = [self.graph.nodes[i].name or str(i) for i in p.layer_indices]
-            shown = names if len(names) <= 6 else names[:3] + ["..."] + names[-2:]
-            lines.append(f"  {p.index}: {len(names)} nodes, {params:,} params  {shown}")
+            count = sum(sizes[i][0] for i in p.layer_indices)
+            n_nodes = len(p.layer_indices)
+            line = f"  slice {p.index}: {n_nodes} node{'s' if n_nodes > 1 else ''}, {count:,} params"
+            if params:
+                line += f", {_human_bytes(sum(sizes[i][1] for i in p.layer_indices))}"
+            lines.append(line)
+            lines.extend("      " + row for row in _wrap(self._group_names(p.layer_indices), 96))
+            last = p.layer_indices[-1]
+            if p.index < len(self.partitions) - 1:
+                cut = f"  ── cut {p.index} after {self.graph.nodes[last].name}"
+            elif outs:
+                cut = "  ── output"
+            else:
+                continue
+            if outs:
+                shape, nbytes = outs[last]
+                cut += f": {shape}, {_human_bytes(nbytes)}"
+            lines.append(cut + " ──")
         return "\n".join(lines)
+
+    def _group_names(self, indices: list) -> list:
+        """Node names of one slice, a module whose nodes are all in it shown once."""
+        inside = set(indices)
+        members = {}
+        for node in self.graph.nodes:
+            for scope in node.scope:
+                members.setdefault(scope, []).append(node.index)
+        shown, done = [], set()
+        for i in indices:
+            node = self.graph.nodes[i]
+            whole = next((s for s in node.scope
+                          if len(members[s]) > 1 and set(members[s]) <= inside), None)
+            if whole is None:
+                shown.append(node.name or str(i))
+            elif whole not in done:
+                done.add(whole)
+                shown.append(f"{whole} ({len(members[whole])} nodes)")
+        return shown
 
     def train(
         self,
@@ -269,6 +309,33 @@ class SlicedModel:
         return history
 
 
+def _wrap(items: list, width: int) -> list:
+    """Join ``items`` with commas into lines of at most ``width`` characters."""
+    rows, row = [], ""
+    for item in items:
+        if row and len(row) + 2 + len(item) > width:
+            rows.append(row + ",")
+            row = item
+        else:
+            row = f"{row}, {item}" if row else item
+    return rows + [row] if row else rows
+
+
+def _check_traced_graph(graph, splitter, expand, pack):
+    """``ts.slice(graph)`` cuts the graph as traced: refuse anything that would need another trace."""
+    if expand is not None or pack is not None:
+        raise ValueError("ts.slice(graph, ...) cuts the graph as traced: pass expand=/pack= to "
+                         "ts.trace(model, ...) instead, or call ts.slice(model, expand=..., pack=...)")
+    if graph.expand == "all" or graph.is_packed():
+        return
+    missing = [m for m in splitter.expand_for(getattr(graph, "model", None)) if m not in graph.expand]
+    if missing:
+        raise ValueError(f"cuts inside {missing}, which this graph does not expand "
+                         f"(expand={graph.expand}): trace it with "
+                         f"ts.trace(model, expand={sorted(set(graph.expand) | set(missing))}), "
+                         f"or call ts.slice(model, cuts=...), which expands them for you")
+
+
 def _merge_expand(a, b):
     if a == "all" or b == "all":
         return "all"
@@ -282,13 +349,16 @@ def trace(model, expand=None, pack=None) -> ModelGraph:
 
     ``print(ts.trace(model).summary())`` lists every node's name (use them in
     ``cuts=``) and marks where a cut is allowed. ``expand`` and ``pack`` mean the
-    same as in :func:`slice`.
+    same as in :func:`slice`. ``ts.slice(graph, ...)`` then cuts exactly this graph.
     """
     if pack is not None:
         if expand:
             raise ValueError("expand= has no effect with pack=: packed stages are not traced")
-        return ModelGraph.from_stages(list(pack(model)))
-    return ModelGraph.from_module(model, expand=expand)
+        graph = ModelGraph.from_stages(list(pack(model)))
+    else:
+        graph = ModelGraph.from_module(model, expand=expand)
+    graph.model = model
+    return graph
 
 
 def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
@@ -296,7 +366,10 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
     """Slice a model into ``n`` partitions for distributed training.
 
     Args:
-        model:    Any ``nn.Module``.
+        model:    Any ``nn.Module``, or a graph from ``ts.trace(model, expand=...)``:
+                  then that graph is cut as it is (not traced again), so the cuts
+                  are the ones its ``summary()`` showed. ``expand``/``pack`` are
+                  given to ``ts.trace`` in that case, not here.
         strategy: Splitting strategy name, class, or instance. Built in:
                   ``"uniform"`` (equal layer count, the default), ``"params"``
                   (balance parameter count), ``"flops"`` (balance forward FLOPs,
@@ -365,7 +438,11 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
     if example_input is not None and hasattr(splitter, "example_input"):
         splitter.example_input = example_input
 
-    if pack is not None:
+    if isinstance(model, ModelGraph):
+        graph = model
+        _check_traced_graph(graph, splitter, expand, pack)
+        model = getattr(graph, "model", None)
+    elif pack is not None:
         graph = trace(model, expand=expand, pack=pack)
     else:
         graph = trace(model, expand=_merge_expand(expand, splitter.expand_for(model)))
@@ -374,7 +451,7 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
     return SlicedModel(
         graph, partitions,
         executor or LocalExecutor(),
-        model_name=type(model).__name__,
+        model_name=type(model).__name__ if model is not None else "ModelGraph",
         strategy_name=strategy_name,
         splitter=splitter,
         cut_hooks=cut_hooks,

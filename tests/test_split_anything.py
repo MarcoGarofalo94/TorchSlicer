@@ -383,6 +383,58 @@ def test_named_cuts_train_like_unsplit():
     assert [h["loss"] for h in history] == pytest.approx(_reference_losses("resmlp"), abs=1e-5)
 
 
+# ── slicing a traced graph ────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name", list(MODELS))
+def test_slice_traces_exactly_like_trace(name):
+    """One tracing path: with the same expand, ts.slice cuts the graph ts.trace shows."""
+    for expand in (None, "all"):
+        model = _build(name)
+        assert ts.slice(model, expand=expand).graph.names() == ts.trace(model, expand=expand).names()
+
+
+def test_slice_a_traced_graph_cuts_it_as_traced_and_trains_like_unsplit():
+    model = _build("resmlp")
+    graph = ts.trace(model, expand=["stage1"])
+    sliced = ts.slice(graph, cuts=["stage1.1", "stage2"])
+    assert sliced.graph is graph and sliced.summary().startswith("SlicedModel(ResMLP,")
+    on_the_fly = ts.slice(_build("resmlp"), cuts=["stage1.1", "stage2"])
+    assert [p.layer_indices for p in sliced.partitions] == [p.layer_indices for p in on_the_fly.partitions]
+    history = sliced.train(_loader("resmlp"), SGD, CE, epochs=2)
+    assert [h["loss"] for h in history] == pytest.approx(_reference_losses("resmlp"), abs=1e-5)
+
+
+def test_slice_a_traced_graph_with_a_strategy_or_packed():
+    assert len(ts.slice(ts.trace(_build("resmlp"), expand="all"), strategy="params", n=3).partitions) == 3
+    packed = ts.trace(ResMLP(), pack=lambda m: list(m.children()))
+    assert [p.layer_indices for p in ts.slice(packed, cuts=[1]).partitions] == [[0, 1], [2, 3]]
+
+
+def test_sliced_summary_lists_every_node_groups_whole_modules_and_sizes_cuts():
+    model = _build("resmlp")
+    x = torch.randn(5, 8)
+    sliced = ts.slice(ts.trace(model, expand="all"), cuts=["stage1.0", "add_2"])   # add_2: stage2.0's residual sum
+    text = sliced.summary(params=True, example_input=x)
+    unique = sum(p.numel() for p in model.parameters())
+    assert text.splitlines()[0].startswith(f"SlicedModel(ResMLP, strategy=named, 3 slices, {unique:,} params")
+    assert "stage1.0 (" in text and "stage1.1 (" in text      # whole blocks shown once
+    assert "stage2.0.fc1" in text and "stage2.1 (" in text    # the cut block node by node
+    assert "── cut 0 after " in text and "[5, 16], 320 B ──" in text
+    assert "── output: [5, 3], 60 B ──" in text
+    assert "..." not in text
+    assert "── output" not in sliced.summary()                 # no example input, no sizes
+
+
+def test_slice_a_traced_graph_refuses_what_would_need_another_trace():
+    graph = ts.trace(_build("resmlp"))
+    with pytest.raises(ValueError, match=r"does not expand.*expand=\['stage1'\]"):
+        ts.slice(graph, cuts=["stage1.1"])
+    with pytest.raises(ValueError, match="cuts the graph as traced"):
+        ts.slice(graph, cuts=["stage1"], expand=["stage2"])
+    with pytest.raises(ValueError, match="cuts the graph as traced"):
+        ts.slice(graph, pack=lambda m: list(m.children()))
+
+
 # ── cost strategies ───────────────────────────────────────────────────────────
 
 def _brute_force(costs, valid, n):
@@ -475,6 +527,33 @@ def test_inplace_first_layer_of_a_slice_trains():
     """M0 bug: a slice starting with ReLU(inplace=True) failed with an autograd error."""
     history = ts.slice(_build("inplace"), cuts=["fc1"]).train(_loader("inplace"), SGD, CE, epochs=2)
     assert [h["loss"] for h in history] == pytest.approx(_reference_losses("inplace"), abs=1e-5)
+
+
+def test_summary_sizes_count_tied_weights_once_and_leave_model_untouched():
+    class Tied(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb, self.mid = nn.Embedding(50, 8), nn.Linear(8, 8)
+            self.bn, self.head = nn.BatchNorm1d(8), nn.Linear(8, 50, bias=False)
+            self.head.weight = self.emb.weight
+
+        def forward(self, t):
+            return self.head(self.bn(self.mid(self.emb(t))))
+
+    torch.manual_seed(0)
+    model, x = Tied().train(), torch.randint(0, 50, (6,))
+    state = {k: v.clone() for k, v in model.state_dict().items()}
+    rng = torch.get_rng_state()
+    g = ts.trace(model)
+    text = g.summary(params=True, example_input=x)
+    unique = sum(p.numel() for p in model.parameters())
+    assert f"total: {unique:,} params" in text
+    head = next(line for line in text.splitlines() if " head " in line)
+    assert "*" in head and "[6, 50]" in head and "1.2 KiB" in head      # 6 x 50 float32
+    assert sum(c for c, _, _ in g._param_sizes()) == unique
+    assert all(torch.equal(state[k], v) for k, v in model.state_dict().items())  # BN stats too
+    assert torch.equal(rng, torch.get_rng_state())
+    assert g.summary().splitlines()[1].startswith("    0  emb")               # default unchanged
 
 
 def test_manifest_records_node_names_and_expand(tmp_path):

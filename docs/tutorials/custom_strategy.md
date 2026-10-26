@@ -48,6 +48,39 @@ g = ts.trace(model, expand="all")        # down to the built-in torch.nn layers
 Inside a fully expanded residual block only the block boundaries are valid cuts. The nodes
 inside are listed, but not marked `cut ok`.
 
+**Sizes.** `summary(params=True)` adds each node's parameter count and size (parameters +
+buffers; a tied weight is counted once, at its first node). With `example_input=` it also
+shows each node's output shape and size: what crosses the wire if you cut right after it.
+Both run on a copy, so the model is not changed.
+
+```python
+print(ts.trace(model).summary(params=True, example_input=torch.randn(8, 3, 32, 32)))
+```
+
+```text
+ModelGraph(source=traced, nodes=11, expand=[])
+    #  name      type          params       size  output              out size  inputs
+    0  conv1     Conv2d         9,408   36.8 KiB  [8, 64, 16, 16]    512.0 KiB  <- []  | cut ok
+    ...
+    7  layer4    Sequential 8,393,728   32.0 MiB  [8, 512, 1, 1]      16.0 KiB  <- [6]  | cut ok
+   10  fc        Linear         5,130   20.0 KiB  [8, 10]                320 B  <- [9]
+  total: 11,181,642 params, 42.7 MiB (parameters + buffers)
+```
+
+**Cut the graph you looked at.** `ts.slice` accepts the graph from `ts.trace` and cuts it as
+it is, without tracing again, so the nodes and `cut ok` marks are exactly the ones you printed:
+
+```python
+g = ts.trace(model, expand=["layer1"])
+print(g.summary())
+sliced = ts.slice(g, cuts=["layer1.0", "layer3"])     # or strategy="params", n=3, ...
+```
+
+`ts.slice(model, cuts=..., expand=...)` still works and traces on the fly; a dotted cut name
+such as `"layer1.0"` there expands its parent for you. Given a graph, `ts.slice` refuses
+`expand=`/`pack=` and cuts inside modules the graph doesn't expand, and says which `expand=`
+to trace with instead.
+
 ## 2. Built-in ways to cut
 
 | How | What it balances | Example |

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import copy
 import operator
 
 import torch
@@ -18,6 +19,34 @@ _PACK_HINT = (
     "     traced (unless listed in expand=), so moving data-dependent control flow or extra\n"
     "     inputs into a submodule is often enough."
 )
+
+
+def _human_bytes(n: int) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024 or unit == "GiB":
+            return f"{n} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def _tensors(x) -> list:
+    if isinstance(x, torch.Tensor):
+        return [x]
+    if isinstance(x, (tuple, list)):
+        return [t for v in x for t in _tensors(v)]
+    if isinstance(x, dict):
+        return [t for v in x.values() for t in _tensors(v)]
+    return []
+
+
+def _tensor_bytes(x) -> int:
+    return sum(t.numel() * t.element_size() for t in _tensors(x))
+
+
+def _shape_str(x) -> str:
+    if isinstance(x, torch.Tensor):
+        return str(list(x.shape))
+    ts_ = _tensors(x)
+    return f"{type(x).__name__}({len(ts_)} tensors)" if ts_ else type(x).__name__
 
 
 # ── functional-op wrappers ─────────────────────────────────────────────────────
@@ -160,6 +189,8 @@ class ModelGraph:
         self.source = source
         # Submodules traced through (see from_module); recorded so the same graph can be rebuilt.
         self.expand: list | str = []
+        # The model this graph was traced from (set by ``ts.trace``), for ``ts.slice(graph)``.
+        self.model: nn.Module | None = None
 
     # ── constructors ──────────────────────────────────────────────────────────
 
@@ -480,15 +511,73 @@ class ModelGraph:
                 outputs.append(node.module(example_input))
         return outputs
 
-    def summary(self) -> str:
-        """One line per node: index, name, type, predecessors, and whether a cut may follow it."""
+    def summary(self, params: bool = False, example_input=None, aux: dict | None = None) -> str:
+        """One line per node: index, name, type, predecessors, and whether a cut may follow it.
+
+        ``params=True`` adds each node's parameter count and size (parameters + buffers);
+        a tensor shared by several nodes (tied weights) is counted at its first node only.
+        ``example_input`` adds each node's output shape and size, i.e. what crosses a cut
+        placed right after it. It runs on a copy, so the model's weights, buffers and RNG
+        state are not changed.
+        """
         cuts = set(self.valid_cuts())
+        sizes = self._param_sizes() if params else None
+        outs = self._output_sizes(example_input, aux) if example_input is not None else None
         lines = [f"ModelGraph(source={self.source}, nodes={len(self)}, expand={self.expand or []})"]
+        if sizes or outs:
+            head = f"  {'#':>3}  {'name':<28} {'type':<20} "
+            if sizes:
+                head += f"{'params':>12} {'size':>10}  "
+            if outs:
+                head += f"{'output':<20} {'out size':>10}  "
+            lines.append(head + "inputs")
         for node in self.nodes:
             mark = "  | cut ok" if node.index in cuts else ""
-            lines.append(f"  {node.index:>3}  {node.name:<28} {type(node.module).__name__:<20} "
-                         f"<- {node.predecessors}{mark}")
+            line = f"  {node.index:>3}  {node.name:<28} {type(node.module).__name__:<20} "
+            if sizes:
+                count, nbytes, tied = sizes[node.index]
+                line += f"{count:>12,} {_human_bytes(nbytes):>10}{'*' if tied else ' '} "
+            if outs:
+                shape, nbytes = outs[node.index]
+                line += f"{shape:<20} {_human_bytes(nbytes):>10}  "
+            lines.append(line + f"<- {node.predecessors}{mark}")
+        if sizes:
+            count = sum(s[0] for s in sizes)
+            nbytes = sum(s[1] for s in sizes)
+            lines.append(f"  total: {count:,} params, {_human_bytes(nbytes)} (parameters + buffers)")
+            if any(s[2] for s in sizes):
+                lines.append("  * shares tensors with an earlier node (tied weights), counted there")
         return "\n".join(lines)
+
+    def _param_sizes(self) -> list:
+        """Per node: (parameter count, bytes of parameters + buffers, shares a tensor with
+        an earlier node). Each tensor is counted once, at the first node that holds it."""
+        seen, sizes = set(), []
+        for node in self.nodes:
+            count = nbytes = 0
+            tied = False
+            for kind, tensors in (("p", node.module.parameters()), ("b", node.module.buffers())):
+                for t in tensors:
+                    if id(t) in seen:
+                        tied = True
+                        continue
+                    seen.add(id(t))
+                    nbytes += t.numel() * t.element_size()
+                    if kind == "p":
+                        count += t.numel()
+            sizes.append((count, nbytes, tied))
+        return sizes
+
+    def _output_sizes(self, example_input, aux=None) -> list:
+        """Per node: (output shape, output bytes), measured on a copy of the graph."""
+        g = copy.copy(self)
+        g.nodes = [copy.copy(n) for n in self.nodes]
+        modules = copy.deepcopy([n.module for n in self.nodes])  # one memo: sharing kept
+        for n, m in zip(g.nodes, modules):
+            n.module = m
+        with torch.random.fork_rng(devices=[]), torch.no_grad():
+            outputs = g.run_nodes(example_input, aux)
+        return [(_shape_str(o), _tensor_bytes(o)) for o in outputs]
 
     def __len__(self) -> int:
         return len(self.nodes)
