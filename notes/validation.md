@@ -2002,5 +2002,6 @@ Full suite 444 passed / 1 skipped.
 
 Not run, by the owner's decision (2026-10-26): network failures (taking a board's interface
 down / partitions). They could leave a board unreachable without physical access; the
-container kills above cover a crashed process, which the code sees the same way as a lost link
-(the in-flight call fails, heartbeats stop).
+container kills above cover a crashed process only. Untested gap: a silent link loss sends no
+connection reset, so detection would rely on heartbeat / call timeouts rather than an
+immediate call failure; the drop time would likely be longer than the 1 s measured here.
