@@ -103,6 +103,14 @@ h = ts.run(build_model, get_data, run_config=config("u_shaped", topology="p2p"),
 assert h[0]["bytes_label"] == 0 and h[0]["bytes_input"] == 0
 ```
 
+**The trained model.** The slices run on copies (on the workers, or deserialized in the
+data owner's own servicers), so at the end of the run the data owner reads them back into
+the model it sliced, which is then trained as after a local run. `training.sync_back`
+chooses which: `all` (the default), `hosted` (only the slices the data owner runs: the
+client's part, as in a deployment where the server keeps its own), or `none`. With
+`hosted`, the other slices keep their initial weights in the model. With client nodes,
+slice 0 is the last active client's, as the in-process session leaves it.
+
 ## 2. Cut hooks: change or watch what crosses a cut
 
 Cut `k` is the boundary between slice `k` and slice `k + 1`. A `ts.CutHook` has four

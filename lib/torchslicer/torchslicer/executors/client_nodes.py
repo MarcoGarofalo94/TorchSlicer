@@ -820,6 +820,16 @@ class ClientNodesExecutor(DistributedExecutor):
         if stats and stats[0] is not None:
             self._meter.add_label(stats[0].bytes_label, stats[0].msgs_label)
 
+    def _slice_state(self, i: int) -> "dict | None":
+        """Slice 0 is every client's: the model ends with the last active client's, as the
+        in-process session leaves it (read at teardown, before the client nodes stop)."""
+        if i != 0:
+            return super()._slice_state(i)
+        session = self._session
+        if session is None or session.current is None or session.states[session.current] is None:
+            return None
+        return session.states[session.current][0]
+
     def teardown(self) -> None:
         """Read every client's final state into ``session.states`` (as an in-process
         session ends with them), then shut the nodes down."""

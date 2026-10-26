@@ -420,6 +420,7 @@ training:
   scheduler: {name: linear, params: {warmup_steps: 500, total_steps: 20000}}   # local executor
   mixed_precision: true          # bf16 autocast
   deterministic: true            # same seed -> same losses on GPU too, in every process
+  sync_back: all                 # after a cluster run, the trained weights come back into `model`
 pipeline: {use_gpipe: true, n_micro: 4}
 discovery: {n_workers: 3}        # number of slices
 deploy: {topology: p2p}
@@ -436,7 +437,9 @@ The env var for each field is listed in `_ENV_OVERRIDES` in
 
 - **Run logs:** with `logging.enabled`, each run writes structured JSONL, the resolved config
   and checkpoints under `runs/<run_id>/`. `ts.restore_model_from_run(...)` rebuilds the
-  trained model.
+  trained model from them. After `train()` the model you sliced is already trained, on a
+  cluster too: the data owner reads the slices back from the workers at the end of the run
+  (`training.sync_back`: `all` by default, `hosted` = only its own slices, `none`).
 - **Profiling:** per-phase timing and memory, collected from the workers.
 - **Callbacks:** subclass `ts.TrainingCallback` for per-batch and per-epoch hooks.
 - **Tracing:** OpenTelemetry, one trace per batch with context propagated across workers,

@@ -2026,3 +2026,14 @@ Found while walking through the features (`notes/report.md`, F1).
 - **51. `RunConfig.create(optimizer="Adam")` crashed** (`Adam ... unexpected keyword argument
   'momentum'`): only the name changed, the default SGD params stayed. Fix: another optimizer
   starts from its own defaults (+ `lr` if given). Test `test_create_with_another_optimizer_*`.
+- **52. After a distributed run the data owner's model was untrained** (since M0, every
+  distributed executor and setting): the slices train on copies (workers; deserialized
+  in-process servicers for hosted slices), and nothing read them back, while the local
+  executor trains the model in place. `evaluate(model)` / `torch.save(model)` after
+  `train()` silently used the initial weights on a cluster. Fix (owner decision: `all` by
+  default): `training.sync_back` (`all | hosted | none`, env `SYNC_BACK`), at teardown,
+  before the shutdown, `get_state` per slice loaded into the model's modules; client nodes:
+  slice 0 = the last active client's state, as the in-process session leaves it. Tests
+  `tests/test_sync_back.py` (centralized pipeline/vanilla/u_shaped, P2P vanilla/u_shaped,
+  gRPC/TCP, hosted, none, client nodes sequential and SplitFed parallel; equal to the local
+  run), plus weight checks in P2P recovery (re-split slices) and distributed tied weights.

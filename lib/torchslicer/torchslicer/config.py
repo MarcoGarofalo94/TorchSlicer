@@ -87,6 +87,10 @@ class TrainingConfig:
     scheduler:        dict = None   # {name: linear, params: {warmup_steps, total_steps}}, local only
     mixed_precision:  bool = False
     deterministic:    bool = False  # deterministic GPU kernels in every process (core/determinism.py)
+    # After a distributed run, read the trained slices back into the data owner's model, so
+    # it ends trained as on the local executor: "all" | "hosted" (only the slices the data
+    # owner runs itself: the client's part in vanilla / u_shaped) | "none".
+    sync_back:        str  = "all"
 
 
 @dataclass
@@ -653,6 +657,7 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     # ── training ───────────────────────────────────────────────────────────────
     ("EPOCHS",            lambda cfg, v: setattr(cfg.training, "epochs",           int(v))),
     ("MIXED_PRECISION",   lambda cfg, v: setattr(cfg.training, "mixed_precision",  _parse_bool(v))),
+    ("SYNC_BACK",         lambda cfg, v: setattr(cfg.training, "sync_back",        v.strip().lower())),
     ("DETERMINISTIC",     lambda cfg, v: setattr(cfg.training, "deterministic",    _parse_bool(v))),
     # ── pipeline ───────────────────────────────────────────────────────────────
     ("USE_GPIPE",         lambda cfg, v: setattr(cfg.pipeline, "use_gpipe",        _parse_bool(v))),

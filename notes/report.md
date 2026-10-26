@@ -125,4 +125,7 @@ initial weights; the trained ones are on the workers / in checkpoints (`ts.resto
 Checked 2026-10-26 on a 3-slice MLP: same loss in all 4 modes, params changed only for local.
 Proposed (b): pull the final weights back at teardown, default only the slices the data owner hosts
 (`sync_back: hosted | all | none`), so `s.slices()` and evaluating `model` mean the same everywhere.
-Waiting for the owner's decision; `s.slices()` waits on it.
+**Done (owner: `all` by default; validation #52):** `training.sync_back: all | hosted | none`.
+After `train()` the model equals the simulator's in every topology/setting tested, incl. recovery
+and tied weights. Then `s.slices(copy=False)`: the slices as `SplitLayer` modules (shared with the
+model, or independent copies), documented in `custom_strategy.md` §1.

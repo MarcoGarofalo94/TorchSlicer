@@ -36,8 +36,8 @@ def _loader():
     return DataLoader(TensorDataset(x, (x + 1) % VOCAB), batch_size=8)
 
 
-def _reference_losses(epochs=2):
-    model = _tied_lm()
+def _reference_losses(epochs=2, model=None):
+    model = model if model is not None else _tied_lm()
     opt = torch.optim.Adam(model.parameters(), **ADAM["params"])
     crit = nn.CrossEntropyLoss()
     out = []
@@ -107,9 +107,15 @@ def test_distributed_tied_weights_match_unsplit_with_adam():
         executor = DistributedExecutor(discovery=StaticDiscovery(peers=list(peers)),
                                        coordinator_addr=coord, coordinator_bind_addr=coord,
                                        run_config=cfg)
-        sliced = ts.slice(_tied_lm(), n=3, executor=executor)
+        model = _tied_lm()
+        sliced = ts.slice(model, n=3, executor=executor)
         history = sliced.train(_loader(), run_config=cfg)
     finally:
         for s in servers:
             s.stop(0)
-    assert [h["loss"] for h in history] == pytest.approx(_reference_losses(), abs=1e-5)
+    unsplit = _tied_lm()
+    assert [h["loss"] for h in history] == pytest.approx(_reference_losses(model=unsplit), abs=1e-5)
+    # sync_back: the model got the trained weights back, the tied pair still one tensor
+    assert model[0].weight is model[4].weight
+    for (name, x), y in zip(model.named_parameters(), unsplit.parameters()):
+        assert torch.allclose(x, y, atol=1e-5), name

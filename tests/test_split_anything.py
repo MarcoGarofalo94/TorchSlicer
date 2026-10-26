@@ -425,6 +425,24 @@ def test_sliced_summary_lists_every_node_groups_whole_modules_and_sizes_cuts():
     assert "── output" not in sliced.summary()                 # no example input, no sizes
 
 
+def test_slices_chain_to_the_model_and_share_or_copy_its_modules():
+    model, x = _build("resmlp").eval(), torch.randn(5, 8)
+    sliced = ts.slice(model, cuts=["stage1.1", "stage2.0"], expand=["stage1", "stage2"])
+    slices = sliced.slices()
+    assert len(slices) == 3
+    with torch.no_grad():
+        h = x
+        for s in slices:
+            h = s.run(h)
+        assert torch.equal(h, model(x))
+    assert slices[0].layers[0] is model.stem                     # shared: the model's own
+    copies = sliced.slices(copy=True)
+    assert copies[0].layers[0] is not model.stem
+    with torch.no_grad():
+        copies[0].layers[0].weight.add_(1.0)
+    assert not torch.equal(copies[0].layers[0].weight, model.stem.weight)
+
+
 def test_slice_a_traced_graph_refuses_what_would_need_another_trace():
     graph = ts.trace(_build("resmlp"))
     with pytest.raises(ValueError, match=r"does not expand.*expand=\['stage1'\]"):

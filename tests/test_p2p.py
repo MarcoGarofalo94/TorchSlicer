@@ -30,8 +30,9 @@ def _loader(shuffle=False):
                       generator=torch.Generator().manual_seed(2) if shuffle else None)
 
 
-def _reference(epochs, n_micro=1, shuffle=False):
-    model = _model()
+def _reference(epochs, n_micro=1, shuffle=False, model=None):
+    """Unsplit losses; trains ``model`` (default a fresh one) in place."""
+    model = model if model is not None else _model()
     opt = torch.optim.SGD(model.parameters(), **SGD["params"])
     loader = _loader(shuffle)
     out = []
@@ -188,8 +189,13 @@ def test_p2p_recovers_from_a_dead_follower(shuffle, tmp_path):
         # epoch 2 replayed from epoch 1's checkpoint, momentum included, on the same shuffle:
         # as if nothing had failed (the re-split slices' optimizer state used to restart
         # from zero, and a retried epoch drew a new permutation)
-        assert [h["loss"] for h in history] == pytest.approx(_reference(3, shuffle=shuffle), abs=1e-6)
+        unsplit = _model()
+        assert [h["loss"] for h in history] == pytest.approx(_reference(3, shuffle=shuffle, model=unsplit), abs=1e-6)
         assert [nd.address for nd in ex._nodes] == [ex.address, followers[0].address]
+        # the trained weights came back from the re-split slices (training.sync_back: all)
+        for a, b in zip(sliced.graph.get_layers(), unsplit):
+            for x, y in zip(a.parameters(), b.parameters()):
+                assert torch.allclose(x, y, atol=1e-6)
     finally:
         for w in followers:
             w.stop()

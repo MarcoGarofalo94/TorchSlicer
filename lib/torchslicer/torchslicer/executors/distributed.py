@@ -893,6 +893,7 @@ class DistributedExecutor(BaseExecutor):
 
     def teardown(self) -> None:
         self._stop_heartbeats()
+        self._sync_back()
         cfg  = self._run_config
 
         # Resolve the run directory: if logging is enabled, use logging.dir;
@@ -1624,6 +1625,32 @@ class DistributedExecutor(BaseExecutor):
                 i, nd.address, nd.device, nd.compute_gflops, nd.memory_cap_mb(),
                 f"{p.layer_indices[0]}..{p.layer_indices[-1]}", params,
             )
+
+    def _sync_back(self) -> None:
+        """Read the trained slices back into the model's own modules (``training.sync_back``),
+        so after ``train()`` the data owner's model is trained, as on the local executor.
+        The slices ran on copies (workers, or deserialized in-process servicers)."""
+        mode = self._run_config.training.sync_back
+        if mode == "none" or not self._stored_layers or not self.partitions:
+            return
+        for i, partition in enumerate(self.partitions):
+            if mode == "hosted" and i not in self._local:
+                continue
+            try:
+                state = self._slice_state(i)
+            except Exception as e:
+                _LOG.warning("sync_back: slice %s not read, the model keeps its old weights there: %s", i, e)
+                continue
+            if state is None:
+                continue
+            target = SplitLayer([self._stored_layers[j] for j in partition.layer_indices])
+            target.load_state_dict(state["model"])          # copies into the model's tensors
+        _LOG.info("sync_back=%s: trained weights read back into the model", mode)
+
+    def _slice_state(self, i: int) -> dict | None:
+        """Slice ``i``'s final weights (``{"model": state_dict, ...}``), from its node."""
+        blob = self._proxies[i].stub().get_state(worker_service_pb2.StateRequest())
+        return torch.load(io.BytesIO(blob.data), weights_only=True) if blob.data else None
 
     def _make_proxy(self, i: int, node) -> "_WorkerProxy":
         return _WorkerProxy(name=node.node_id, address=node.address, worker_index=i,

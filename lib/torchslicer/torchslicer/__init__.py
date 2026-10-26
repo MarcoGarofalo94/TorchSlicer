@@ -3,6 +3,7 @@ __author__ = 'Marco Garofalo'
 
 from .core.slicer import Slicer
 from .core.split_layer import SplitLayer
+import copy as _copy_module
 from .core.determinism import set_deterministic
 from .core.model_graph import ModelGraph, LayerNode, TraceError, _FlattenWrapper, _AddWrapper
 from .strategies.base import BaseSplitter, Partition
@@ -177,6 +178,24 @@ class SlicedModel:
             lines.append(cut + " ──")
         return "\n".join(lines)
 
+    def slices(self, copy: bool = False) -> list:
+        """The slices as modules (``SplitLayer``), in order: print one, run it with
+        ``.run(x)``, count its parameters.
+
+        They hold the model's own modules, so after ``train()`` they are trained (on a
+        cluster too, with ``training.sync_back: all``), and running them in train mode
+        or with gradients changes the model (BatchNorm statistics, ``.grad``). Use
+        ``eval()`` and ``torch.no_grad()`` to only look, or ``copy=True`` for independent
+        copies (tied weights stay tied among them).
+        """
+        layers = self.graph.get_layers()
+        if copy:
+            layers = _copy_module.deepcopy(layers)           # one memo: sharing kept
+        last = len(self.partitions) - 1
+        return [SplitLayer([layers[j] for j in p.layer_indices], is_last=(p.index == last),
+                           predecessors=p.predecessors)
+                for p in self.partitions]
+
     def _group_names(self, indices: list) -> list:
         """Node names of one slice, a module whose nodes are all in it shown once."""
         inside = set(indices)
@@ -249,6 +268,8 @@ class SlicedModel:
             raise ValueError("criterion must be provided directly or via run_config.training.criterion")
         resolved_optimizer = normalize_component(resolved_optimizer, "optimizer")
         resolved_criterion = normalize_component(resolved_criterion, "criterion")
+        if cfg is not None and cfg.training.sync_back not in ("all", "hosted", "none"):
+            raise ValueError(f"training.sync_back must be all, hosted or none; got {cfg.training.sync_back!r}")
 
         n_micro = resolved_n_micro if resolved_use_gpipe else 1
         if cfg is not None and cfg.training.deterministic:

@@ -81,6 +81,17 @@ such as `"layer1.0"` there expands its parent for you. Given a graph, `ts.slice`
 `expand=`/`pack=` and cuts inside modules the graph doesn't expand, and says which `expand=`
 to trace with instead.
 
+**Hold a slice.** `sliced.slices()` returns the slices as modules, in order. They are the
+model's own modules, so use `eval()` and `torch.no_grad()` to only look, or
+`slices(copy=True)` for independent copies:
+
+```python
+client, *server = ts.slice(model.eval(), cuts=["layer2"]).slices()
+with torch.no_grad():
+    z = client.run(torch.randn(8, 3, 32, 32))     # what slice 0 sends across the cut
+print(z.shape, sum(p.numel() for p in client.parameters()))
+```
+
 ## 2. Built-in ways to cut
 
 | How | What it balances | Example |
