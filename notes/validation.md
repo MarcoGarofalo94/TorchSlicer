@@ -1999,3 +1999,8 @@ Bugs found (each with a test that fails without the fix):
   `clients_joined` (the executor adds them after the callbacks); it now merges the history entry.
 
 Full suite 444 passed / 1 skipped.
+
+Not run, by the owner's decision (2026-10-26): network failures (taking a board's interface
+down / partitions). They could leave a board unreachable without physical access; the
+container kills above cover a crashed process, which the code sees the same way as a lost link
+(the in-flight call fails, heartbeats stop).
