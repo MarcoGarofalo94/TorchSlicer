@@ -111,3 +111,18 @@ sends 512 KiB, after `layer4` 16 KiB.
   node; `── cut k after <node>: <shape>, <bytes> ──` between slices and `── output ──` at the end (with
   `example_input`); slice size with `params=True`. Test `test_sliced_summary_lists_every_node_*`.
 - Full suite before the summary redesign: 452 passed, 1 skipped (7 min). After: split + docs tests 63 passed.
+
+### Config bugs fixed on `refinement` (validation.md 49–51)
+Optimizer/criterion dicts: workers forced lr=0.001 when none was given (simulator ≠ cluster:
+Adagrad epoch-2 loss 1.3457 local vs 1.3746 centralized); a missing `"params"` crashed some
+executors; `RunConfig.create(optimizer="Adam")` crashed. Now `config.normalize_component` checks
+the dict once in `train()` and workers use the user's kwargs exactly.
+
+### Open finding: trained weights stay on the workers (simulator ≠ cluster)
+After `train()`, the local executor has updated `model` in place; after a centralized or P2P run
+(any setting, even vanilla's in-process slice 0, a deserialized copy) `model` still holds its
+initial weights; the trained ones are on the workers / in checkpoints (`ts.restore_model_from_run`).
+Checked 2026-10-26 on a 3-slice MLP: same loss in all 4 modes, params changed only for local.
+Proposed (b): pull the final weights back at teardown, default only the slices the data owner hosts
+(`sync_back: hosted | all | none`), so `s.slices()` and evaluating `model` mean the same everywhere.
+Waiting for the owner's decision; `s.slices()` waits on it.

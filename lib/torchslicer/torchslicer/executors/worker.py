@@ -894,8 +894,11 @@ class WorkerServicer(
             self._configure_tied(request.tied, request.init_token)
             params = optimizer_parameters(
                 self.layer, exclude={n for t in request.tied if not t.owner for n in t.names})
-            opt = getattr(optim, request.optimizer.name)(
-                params, **{"lr": request.optimizer.lr, **opt_extra}) if params else None
+            # extra_params holds the user's kwargs exactly (lr included when given), so the
+            # optimizer is the one the local executor builds; the float32 ``lr`` field is
+            # only a fallback for a driver that sends no extra_params.
+            opt_kwargs = opt_extra if request.optimizer.extra_params else {"lr": request.optimizer.lr}
+            opt = getattr(optim, request.optimizer.name)(params, **opt_kwargs) if params else None
             self.layer.set_optimizer(opt)
 
             self.prev_worker = request.prev_worker or None

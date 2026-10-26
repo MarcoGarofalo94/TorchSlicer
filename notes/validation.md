@@ -2005,3 +2005,24 @@ down / partitions). They could leave a board unreachable without physical access
 container kills above cover a crashed process only. Untested gap: a silent link loss sends no
 connection reset, so detection would rely on heartbeat / call timeouts rather than an
 immediate call failure; the drop time would likely be longer than the 1 s measured here.
+
+## Refinement: optimizer / criterion configs (2026-10-26, branch `refinement`)
+
+Found while walking through the features (`notes/report.md`, F1).
+- **49. Workers trained with lr=0.001 when the optimizer config gave no lr** (`distributed.py`
+  `_build_optimizer_config` + `WorkerServicer.init`, since M0): the driver filled the proto `lr`
+  with 0.001 and the worker passed it on top of the user's kwargs, while the local executor
+  used the optimizer's own default (Adagrad 0.01, Adadelta 1.0, ...). Same config, different
+  training in the simulator and on a cluster, no error: Adagrad, epoch 2 loss 1.3457 local vs
+  1.3746 centralized. Fix: the worker builds the optimizer from `extra_params` (the user's
+  kwargs exactly); the `lr` field is only a fallback when no kwargs are sent. Test
+  `test_optimizer_without_params_trains_the_same_locally_and_on_workers` (centralized, p2p;
+  fails on the old code).
+- **50. A config without `"params"` crashed with a bare `KeyError`** on the local and offload
+  executors, worked on others; a typo (`"parms"`) was silently ignored where it worked. Fix:
+  `config.normalize_component`, called once in `SlicedModel.train` on the node that starts
+  training: missing `params` → `{}`; unknown keys, unknown class names and kwargs the class
+  does not take are refused with the reason. Test `test_normalize_component_*`.
+- **51. `RunConfig.create(optimizer="Adam")` crashed** (`Adam ... unexpected keyword argument
+  'momentum'`): only the name changed, the default SGD params stayed. Fix: another optimizer
+  starts from its own defaults (+ `lr` if given). Test `test_create_with_another_optimizer_*`.

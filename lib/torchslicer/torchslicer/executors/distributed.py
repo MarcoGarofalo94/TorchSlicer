@@ -183,7 +183,7 @@ def _build_optimizer_config(cfg: dict):
     torch.save(extra, buf)
     return worker_service_pb2.OptimizerConfig(
         name=cfg["name"],
-        lr=float(cfg["params"].get("lr", 0.001)),
+        lr=float(cfg.get("params", {}).get("lr", 0.0)),   # informational: workers use extra_params
         extra_params=buf.getvalue(),
     )
 

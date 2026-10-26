@@ -42,6 +42,38 @@ def _default_run_id() -> str:
     return datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
 
+def normalize_component(cfg: dict, kind: str) -> dict:
+    """Check an ``{"name": ..., "params": {...}}`` optimizer or criterion config and return
+    it with ``params`` filled in (``{}`` when missing).
+
+    Done once, on the node that starts training, so the local executor and every worker
+    build exactly the same object. ``kind`` is ``"optimizer"`` (a ``torch.optim`` class)
+    or ``"criterion"`` (a ``torch.nn`` loss). Unknown keys, an unknown name and keyword
+    arguments the class does not take are refused here, with the reason.
+    """
+    import inspect
+    import torch
+    where = torch.optim if kind == "optimizer" else torch.nn
+    if not isinstance(cfg, dict) or "name" not in cfg:
+        raise ValueError(f"{kind} config must be a dict like "
+                         f"{{'name': 'SGD', 'params': {{'lr': 0.05}}}}; got {cfg!r}")
+    unknown = set(cfg) - {"name", "params"}
+    if unknown:
+        raise ValueError(f"{kind} config has unknown key(s) {sorted(unknown)}; "
+                         f"expected 'name' and 'params' (got {cfg!r})")
+    name, params = cfg["name"], cfg.get("params") or {}
+    cls = getattr(where, name, None) if isinstance(name, str) else None
+    if not inspect.isclass(cls):
+        raise ValueError(f"{kind} {name!r} not found in {where.__name__}")
+    sig = inspect.signature(cls.__init__).parameters
+    if not any(p.kind is p.VAR_KEYWORD for p in sig.values()):
+        bad = sorted(set(params) - set(sig))
+        if bad:
+            raise ValueError(f"{kind} {name} does not take {bad}; it takes "
+                             f"{sorted(k for k in sig if k not in ('self', 'params'))}")
+    return {"name": name, "params": dict(params)}
+
+
 @dataclass
 class TrainingConfig:
     epochs:           int  = 10
@@ -503,7 +535,9 @@ class RunConfig:
         cfg = cls()
         if run_id is not None:              cfg.run_id = run_id
         if epochs is not None:              cfg.training.epochs = epochs
-        if optimizer is not None:           cfg.training.optimizer["name"] = optimizer
+        if optimizer is not None and optimizer != cfg.training.optimizer["name"]:
+            # The default params are SGD's (momentum): another optimizer starts from its own defaults.
+            cfg.training.optimizer = {"name": optimizer, "params": {}}
         if lr is not None:                  cfg.training.optimizer["params"]["lr"] = lr
         if criterion is not None:           cfg.training.criterion["name"] = criterion
         if mixed_precision is not None:     cfg.training.mixed_precision = mixed_precision

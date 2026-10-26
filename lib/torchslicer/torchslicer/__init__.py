@@ -26,6 +26,7 @@ from .transport.base import BaseTransport
 from .discovery import BaseDiscovery, NodeInfo, AnnounceResult
 from .discovery import CoordinatorDiscovery, announce_to_coordinator, StaticDiscovery
 from .config import (
+    normalize_component,
     RunConfig, TrainingConfig, PipelineConfig, DiscoveryConfig,
     StartupConfig, TransportConfig,
     CheckpointConfig, LoggingConfig, ProfileConfig, FaultToleranceConfig,
@@ -246,6 +247,8 @@ class SlicedModel:
             raise ValueError("optimizer must be provided directly or via run_config.training.optimizer")
         if resolved_criterion is None:
             raise ValueError("criterion must be provided directly or via run_config.training.criterion")
+        resolved_optimizer = normalize_component(resolved_optimizer, "optimizer")
+        resolved_criterion = normalize_component(resolved_criterion, "criterion")
 
         n_micro = resolved_n_micro if resolved_use_gpipe else 1
         if cfg is not None and cfg.training.deterministic:
