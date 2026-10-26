@@ -1492,10 +1492,10 @@ class WorkerServicer(
         for f in sent:
             f.result()
 
-    def _read_state(self) -> dict:
-        """This slice's weights and optimizer state, as CPU copies."""
+    def _read_state(self, weights_only: bool = False) -> dict:
+        """This slice's weights and optimizer state (none with ``weights_only``), as CPU copies."""
         from ..sl.clients import _copy_optimizer_state
-        opt = self.layer.optimizer
+        opt = None if weights_only else self.layer.optimizer
         return {"model": {k: v.detach().to("cpu", copy=True) for k, v in self.layer.state_dict().items()},
                 "optimizer": _copy_optimizer_state(opt.state_dict(), "cpu") if opt else None}
 
@@ -1540,7 +1540,9 @@ class WorkerServicer(
                 if state is None:
                     raise RuntimeError(f"no copy of this slice for client {request.client}")
             else:
-                state = self._read_state()
+                state = self._read_state(weights_only=request.weights_only)
+            if request.weights_only:
+                state = {"model": state["model"], "optimizer": None}
             buf = io.BytesIO()
             torch.save(state, buf)
             return buf.getvalue()

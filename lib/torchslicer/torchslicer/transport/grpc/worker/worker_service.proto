@@ -238,6 +238,7 @@ message PeersRequest {
 message StateRequest {
     bool   per_client = 1;  // a server slice's copy for `client` (per_client_state)
     uint32 client     = 2;
+    bool   weights_only = 3;  // no optimizer state (sync_back reads only the weights)
 }
 
 // torch.save({"model": state_dict, "optimizer": state_dict | None}); loaded weights_only

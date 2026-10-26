@@ -1649,7 +1649,7 @@ class DistributedExecutor(BaseExecutor):
 
     def _slice_state(self, i: int) -> dict | None:
         """Slice ``i``'s final weights (``{"model": state_dict, ...}``), from its node."""
-        blob = self._proxies[i].stub().get_state(worker_service_pb2.StateRequest())
+        blob = self._proxies[i].stub().get_state(worker_service_pb2.StateRequest(weights_only=True))
         return torch.load(io.BytesIO(blob.data), weights_only=True) if blob.data else None
 
     def _make_proxy(self, i: int, node) -> "_WorkerProxy":

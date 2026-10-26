@@ -54,7 +54,14 @@ history = s.train(loader, {"name": "SGD", "params": {"lr": 0.05}},
                   {"name": "CrossEntropyLoss", "params": {}}, epochs=1)
 ```
 
-**Proposed test.** Exactness: on ResNet-18 (residual blocks, BatchNorm, a functional `flatten`), cutting with
+**Script (updated 2026-10-26, `notes/report/f01_slicing.py`, all checks pass):** (1) graph summary with
+sizes, valid cuts, a block expanded; (2) `ts.slice(g)` = on-the-fly plan, and the three refusals (unexpanded
+module, `expand=` with a graph, a cut inside a residual block); (3) slice summary with sizes, `slices()`
+chained == `model(x)`; (4) uniform / params / flops / named cuts / a cut after `add_3` from `expand="all"`:
+same loss as unsplit and **equal final weights**; (5) centralized on 3 loopback workers: `sync_back=all`
+→ model trained like unsplit, `none` → still initial.
+
+**Proposed test (original).** Exactness: on ResNet-18 (residual blocks, BatchNorm, a functional `flatten`), cutting with
 each method must give the same training losses as the unsplit model with the same seed and data. Also inspect
 the partitions and the bytes crossing each cut. Script: `notes/report/f01_slicing.py`.
 
@@ -129,3 +136,18 @@ Proposed (b): pull the final weights back at teardown, default only the slices t
 After `train()` the model equals the simulator's in every topology/setting tested, incl. recovery
 and tied weights. Then `s.slices(copy=False)`: the slices as `SplitLayer` modules (shared with the
 model, or independent copies), documented in `custom_strategy.md` §1.
+- sync_back reads weights only (`StateRequest.weights_only`): with Adam a slice's transfer was 3× its
+  weights. Stubs regenerated with grpcio-tools 1.64.0 (Python 3.11 scratch env): the repo venv's 1.84 would
+  have made every node require grpcio>=1.84 (generated code raises on older), e.g. older Jetson installs.
+
+### Memory of the data owner (discussed 2026-10-26)
+- The data owner builds the **whole** model (`model_fn()` on CPU) to trace and slice it, and keeps it for
+  recovery; P2P's driver also trains slice 0 on a deserialized copy. sync_back copies into those tensors,
+  one slice (weights only) at a time: no second model.
+- Supported today: a GPU-less laptop as **centralized** coordinator with `sl.setting: pipeline` (hosts no
+  slice: control plane only; needs RAM for the model, the Jetsons hold one slice each). Not in P2P: the driver
+  always trains slice 0 (`pipeline` refused there). Planned check on the testbed: Dell as coordinator
+  (`network.device: cpu`), 2–3 Jetsons as workers. [not run yet]
+- Gap (candidate milestone): models no machine can hold. Needs meta-device tracing/slicing, each node
+  materializing only its slice (init or sharded checkpoint), recovery from checkpoints instead of the
+  driver's copy, and `sync_back: all` refused when the data owner holds only its own slices.

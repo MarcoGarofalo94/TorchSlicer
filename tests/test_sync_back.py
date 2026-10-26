@@ -126,3 +126,41 @@ def test_client_nodes_model_ends_like_the_in_process_session(mode, algorithm):
         for w in servers + clients:
             w.stop()
     _same(got, ref)
+
+
+def test_sync_back_reads_weights_only():
+    """sync_back needs no optimizer state: with Adam it would triple what each slice sends."""
+    import io
+    from torchslicer.executors.worker import WorkerServicer
+
+    seen = []
+
+    class _Recording(WorkerServicer):
+        def get_state(self, request, context):
+            reply = super().get_state(request, context)
+            seen.append((request.weights_only, torch.load(io.BytesIO(reply.data), weights_only=True)))
+            return reply
+
+    cfg = _cfg("centralized", "pipeline")
+    cfg.training.optimizer = {"name": "Adam", "params": {"lr": 1e-3}}
+    workers = [ts.start_worker(free_port(cfg.transport.listen_offsets()), host="127.0.0.1", run_config=cfg,
+                               servicer_class=_Recording) for _ in range(3)]
+    addr = f"127.0.0.1:{free_port(cfg.transport.listen_offsets(drives=True))}"
+    ex = ts.DistributedExecutor(discovery=StaticDiscovery(peers=[w.address for w in workers]),
+                                coordinator_addr=addr, run_config=cfg)
+    model = _model()
+    try:
+        ts.slice(model, n=3, executor=ex).train(_data(), run_config=cfg)
+    finally:
+        for w in workers:
+            w.stop()
+    assert len(seen) == 3 and all(wo and st["optimizer"] is None for wo, st in seen)
+    ref = _model()
+    ts.slice(ref, n=3).train(_data(), run_config=_adam_local())
+    _same(model, ref)
+
+
+def _adam_local():
+    cfg = _cfg()
+    cfg.training.optimizer = {"name": "Adam", "params": {"lr": 1e-3}}
+    return cfg
