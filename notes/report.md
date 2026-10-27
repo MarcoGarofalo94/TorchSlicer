@@ -151,3 +151,13 @@ model, or independent copies), documented in `custom_strategy.md` §1.
 - Gap (candidate milestone): models no machine can hold. Needs meta-device tracing/slicing, each node
   materializing only its slice (init or sharded checkpoint), recovery from checkpoints instead of the
   driver's copy, and `sync_back: all` refused when the data owner holds only its own slices.
+
+### Slicing picture (2026-10-27, `refinement`)
+torchview on `nn.Sequential(*s.slices())` works as a no-code baseline (one box per slice) but uses
+its own node names and knows nothing of cuts. Shipped instead `s.view()` / `g.view()`
+(`torchslicer/viz.py`, no dependency): one row per node with params, output shape and bytes, slice
+bands, cut lines labelled with what they send, skip connections as arcs (an arc crossing a gap = why
+no cut there), module bars, tied-weight links; click a gap to move cuts, the slice table and the
+`ts.slice(...)` call update. `svg()` = static picture. Tests `tests/test_viz.py` (4), tutorial
+`custom_strategy.md` §1 "See it". Demos: `notes/report/views/`. Interactive page not yet tried in a
+browser by me (no browser in the container; JS checked with `node --check`).

@@ -549,6 +549,12 @@ class ModelGraph:
                 lines.append("  * shares tensors with an earlier node (tied weights), counted there")
         return "\n".join(lines)
 
+    def view(self, example_input=None, aux: dict | None = None, title: str | None = None):
+        """An interactive picture of the graph (``torchslicer.viz.SliceView``) where cuts are
+        placed by clicking; it shows the matching ``ts.slice(...)`` call."""
+        from ..viz import SliceView
+        return SliceView(self, example_input, aux, title)
+
     def _param_sizes(self) -> list:
         """Per node: (parameter count, bytes of parameters + buffers, shares a tensor with
         an earlier node). Each tensor is counted once, at the first node that holds it."""

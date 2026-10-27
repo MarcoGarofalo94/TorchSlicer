@@ -178,6 +178,16 @@ class SlicedModel:
             lines.append(cut + " ──")
         return "\n".join(lines)
 
+    def view(self, example_input=None, aux: dict | None = None, title: str | None = None):
+        """An interactive picture of the graph and its cuts (``torchslicer.viz.SliceView``).
+
+        Jupyter shows it inline; ``.save("split.html")`` writes the page. Click a gap to move
+        the cuts and read the matching ``ts.slice(...)`` call. ``example_input`` adds what
+        each cut sends, measured on a copy like :meth:`summary`.
+        """
+        from .viz import SliceView
+        return SliceView(self, example_input, aux, title)
+
     def slices(self, copy: bool = False) -> list:
         """The slices as modules (``SplitLayer``), in order: print one, run it with
         ``.run(x)``, count its parameters.

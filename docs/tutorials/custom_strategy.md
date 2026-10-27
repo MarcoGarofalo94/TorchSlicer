@@ -92,6 +92,21 @@ with torch.no_grad():
 print(z.shape, sum(p.numel() for p in client.parameters()))
 ```
 
+**See it.** `view()` draws the graph and its cuts as an interactive page: one row per node
+(name, type, parameters, output shape and bytes), each slice a coloured band, each cut a line
+labelled with what it sends. Skip connections are arcs on the right: a gap with an arc
+crossing it can't be cut. Bars on the left are the enclosing modules, a dashed link joins
+tied weights. Click a gap to add or remove a cut: the slice table (parameters, size, bytes
+sent) and the matching `ts.slice(...)` call update, ready to copy. In Jupyter it shows in the
+output cell; elsewhere write it with `.save("split.html")` and open it in a browser. The page
+is self-contained, nothing to install.
+
+```python
+sliced = ts.slice(model, cuts=["layer1.0", "layer3"])
+v = sliced.view(example_input=torch.randn(8, 3, 32, 32))   # v.save("split.html")
+g = ts.trace(model, expand=["layer2"]).view()              # no cuts yet: click to place them
+```
+
 ## 2. Built-in ways to cut
 
 | How | What it balances | Example |
