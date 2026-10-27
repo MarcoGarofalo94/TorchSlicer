@@ -14,24 +14,28 @@ Packed layout, ``[B, L + n_1 + ... + n_m]`` in one float dtype ``W``:
 - a value whose first dimension is ``B`` is laid out per row (``reshape(B, -1)``), so rows are
   samples; any other value (a parameter, a ``[1, T, d]`` table, a Python number) is repeated
   in every row and read back from row 0 (autograd sums the rows' gradients);
+- a ``torch.device`` crossing a cut is read back as the device of the receiving slice (where
+  the value is used); a ``torch.dtype`` as itself;
 - floating-point tensors are cast to ``W``, the widest float dtype among them (lossless, cast
   back on receipt); integer and bool tensors and Python numbers travel as their bytes, one
   byte per element of ``W``; ``None`` and tuples / lists of values (e.g. a module returning
   ``(output, weights)``) are described in the header.
 """
+import copy
 import struct
 
 import torch
 import torch.nn as nn
 
-from .model_graph import LayerNode, ModelGraph
+from .model_graph import (LayerNode, ModelGraph, _AddWrapper, _AttrWrapper, _FlattenWrapper,
+                          _FunctionWrapper, _ReshapeWrapper)
 
 _MAGIC, _VERSION = 0x5A, 1
 _HEAD = struct.Struct("<BBH")             # magic, version, number of values
 _TENSOR = struct.Struct("<BB")            # dtype code, ndim (after the kind byte)
 _COUNT = struct.Struct("<H")              # items of a tuple / list
 _DIM = struct.Struct("<I")
-_ROWS, _REPEATED, _SCALAR, _NONE, _TUPLE, _LIST = range(6)     # kinds
+_ROWS, _REPEATED, _SCALAR, _NONE, _TUPLE, _LIST, _DEVICE, _DTYPE = range(8)     # kinds
 _DTYPES = [torch.float32, torch.float64, torch.float16, torch.bfloat16, torch.int64, torch.int32,
            torch.int16, torch.int8, torch.uint8, torch.bool]
 _CODE = {d: i for i, d in enumerate(_DTYPES)}
@@ -74,6 +78,12 @@ class _SendCut(nn.Module):
             nonlocal head
             if v is None:
                 head.append(_NONE)
+            elif isinstance(v, torch.device):         # read back as the receiving side's device
+                head.append(_DEVICE)
+            elif isinstance(v, torch.dtype):
+                if v not in _CODE:
+                    raise TypeError(f"unsupported dtype value on a multi-tensor cut: {v}")
+                head += bytes([_DTYPE, _CODE[v]])
             elif isinstance(v, (tuple, list)):
                 head.append(_TUPLE if isinstance(v, tuple) else _LIST)
                 head += _COUNT.pack(len(v))
@@ -135,8 +145,10 @@ def _layout(packed):
 
     def get():
         kind, = r.take(_BYTE)
-        if kind == _NONE:
+        if kind in (_NONE, _DEVICE):
             return (kind,)
+        if kind == _DTYPE:
+            return (kind, _DTYPES[r.take(_BYTE)[0]])
         if kind in (_TUPLE, _LIST):
             count, = r.take(_COUNT)
             return (kind, [get() for _ in range(count)])
@@ -168,6 +180,10 @@ def _build(packed, spec):
     kind = spec[0]
     if kind == _NONE:
         return None
+    if kind == _DEVICE:
+        return packed.device
+    if kind == _DTYPE:
+        return spec[1]
     if kind in (_TUPLE, _LIST):
         items = [_build(packed, s) for s in spec[1]]
         return tuple(items) if kind == _TUPLE else items
@@ -198,6 +214,65 @@ class _RecvCut(nn.Module):
 
 
 # ── the graph rewrite ──────────────────────────────────────────────────────────
+
+_META_METHODS = {"size", "dim", "ndimension", "numel", "nelement", "get_device"}
+_META_ATTRS = {"shape", "device", "dtype", "ndim", "is_cuda"}
+_RANDOM = ("rand", "dropout", "bernoulli", "multinomial", "normal", "poisson", "uniform", "exponential")
+
+
+def _is_meta(module) -> bool:
+    """Reads only a tensor's metadata (``x.size(1)``, ``x.device``): no values, no gradient."""
+    if not isinstance(module, _FunctionWrapper):
+        return False
+    if module.kind == "call_method":
+        return module.target in _META_METHODS
+    return (module.target is getattr and len(module.args) == 2
+            and module.args[1] in _META_ATTRS)
+
+
+def _is_pure(module) -> bool:
+    """A traced op that computes the same thing wherever it runs, from its inputs only: a
+    library wrapper (not a user module, which may keep state), not random, no parameter."""
+    if isinstance(module, _AttrWrapper):
+        return not isinstance(module.value, nn.Parameter)
+    if isinstance(module, (_FlattenWrapper, _ReshapeWrapper, _AddWrapper, nn.Identity)):
+        return True
+    if isinstance(module, _FunctionWrapper):
+        name = module.target if isinstance(module.target, str) else getattr(module.target, "__name__", "")
+        return not any(r in name.lower() for r in _RANDOM)
+    return False
+
+
+def recomputable(graph) -> dict:
+    """``{index: "meta" | "free"}``: metadata reads, and values computed from metadata and
+    constants only (positions, causal masks, RoPE tables built in ``forward``). A free value
+    that crosses a cut is rebuilt in the receiving slice; only the metadata it needs crosses."""
+    kind = {}
+    for node in graph.nodes:
+        if _is_meta(node.module):
+            kind[node.index] = "meta"
+        elif (_is_pure(node.module) and not node.takes_input
+              and all(p in kind for p in node.predecessors)):
+            kind[node.index] = "free"
+    return kind
+
+
+def _split_free(values, nodes, kind):
+    """What crosses instead of ``values``: free values are replaced by the metadata and
+    non-free values they are built from; returns (sent, free nodes to rebuild)."""
+    sent, rebuild, stack = [], set(), list(reversed(values))
+    while stack:
+        v = stack.pop()
+        if v >= 0 and kind.get(v) == "free":
+            if v not in rebuild:
+                rebuild.add(v)
+                stack.extend(reversed(nodes[v].predecessors))
+        elif v not in sent:
+            sent.append(v)
+    if not sent:                       # something must cross: the main value, as it is
+        return [values[0]], []
+    return sent, sorted(rebuild)
+
 
 def crossing(graph, k: int) -> list:
     """Nodes whose output a node after ``k`` reads (``k`` itself first when it is one of
@@ -246,15 +321,20 @@ def nearest_valid_cuts(graph, targets: list) -> list:
     return out
 
 
-def pack_cuts(graph, cuts: list):
+def pack_cuts(graph, cuts: list, recompute: bool = True):
     """``(graph', cuts')``: ``graph`` with a send node after each cut that more than one value
     crosses (or whose single value is not the node right before it) and recv nodes after it;
     ``cuts'`` are the same cuts in ``graph'`` (after each send node). Nodes keep their modules,
-    so the new graph shares every parameter with ``graph``. Cuts that are already valid are
-    left alone, so a graph whose cuts are all valid comes back unchanged."""
+    so the new graph shares every parameter with ``graph``. With ``recompute``, a crossing
+    value built only from metadata and constants (see :func:`recomputable`) is rebuilt by a
+    copy of its nodes after the cut, and only the metadata crosses. Cuts that are already
+    valid are left alone, so a graph whose cuts are all valid comes back unchanged."""
     cuts = sorted(cuts)
-    plan = {c: crossing(graph, c) for c in cuts}
-    if all(plan[c] == [c] for c in cuts):
+    kind = recomputable(graph) if recompute else {}
+    plan, rebuild = {}, {}
+    for c in cuts:
+        plan[c], rebuild[c] = _split_free(crossing(graph, c), graph.nodes, kind)
+    if all(plan[c] == [c] and not rebuild[c] for c in cuts):
         return graph, cuts
     nodes = graph.nodes
     late_input = any(n.takes_input for n in nodes[cuts[0] + 1:]) if cuts else False
@@ -285,11 +365,17 @@ def pack_cuts(graph, cuts: list):
         values = plan[c]
         if values == [c]:
             new_cuts.append(current[c])
-            continue
-        send = add(_SendCut(), _unique(graph, f"cut{j}.send"), [current[v] for v in values])
-        new_cuts.append(send)
-        for vi, v in enumerate(values):
-            current[v] = add(_RecvCut(vi), _unique(graph, f"cut{j}.recv{vi}"), [send])
+            here = {c: current[c]}                  # the slice's input, read as it is
+        else:
+            send = add(_SendCut(), _unique(graph, f"cut{j}.send"), [current[v] for v in values])
+            new_cuts.append(send)
+            here = {v: add(_RecvCut(vi), _unique(graph, f"cut{j}.recv{vi}"), [send])
+                    for vi, v in enumerate(values)}
+        for v in rebuild[c]:                        # free values: rebuilt after the cut
+            node = nodes[v]
+            here[v] = add(copy.deepcopy(node.module), _unique(graph, f"{node.name}.cut{j}"),
+                          [here[p] for p in node.predecessors], scope=node.scope)
+        current.update(here)
     for node in new.nodes:
         for p in node.predecessors:
             new.nodes[p].successors.append(node.index)

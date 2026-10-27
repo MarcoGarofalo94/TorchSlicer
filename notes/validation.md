@@ -2085,3 +2085,11 @@ local, 1e-5 elsewhere). CUDA (A100) fp32: bitwise equal to the same model in one
     packed layout; a `Quantize`/`TopK` hook would also corrupt its header): `SlicedModel.train`
     for hooks, `LocalExecutor.setup` for privacy. Hooks at the single-tensor cuts of the same
     model work.
+- **M18 recompute (2026-10-27):** a value that crosses a cut and is built only from metadata
+  reads (`x.size(1)`, `x.device`, `x.dtype`) and constants through TorchSlicer's own op
+  wrappers (not user modules, which may keep state; nothing random, whose RNG draws would
+  change) is rebuilt by copies of its nodes in the receiving slice (`<name>.cut<k>`); only
+  the metadata crosses (a `torch.device` is read back as the receiving slice's device).
+  Decoder with an in-forward causal mask, cut between blocks: bytes per cut 17376 → 10464
+  (hidden state alone 9216; the rest is the per-row header + T), weights equal unsplit.
+  Random values (`rand_like` added to the mask) are sent, not drawn again: still exact.

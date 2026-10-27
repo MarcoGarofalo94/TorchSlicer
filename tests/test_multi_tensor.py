@@ -372,3 +372,83 @@ def test_client_nodes_train_like_the_in_process_session(cuts):
         for w in servers + clients:
             w.stop()
     _same(got, ref, atol=1e-5)
+
+
+# ── recompute: values built from metadata and constants are rebuilt, not sent ──
+
+class _Block(nn.Module):
+    def __init__(self, d):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d, 2, batch_first=True)
+        self.ff, self.n = nn.Linear(d, d), nn.LayerNorm(d)
+
+    def forward(self, h, mask):
+        return h + self.ff(self.n(h + self.attn(h, h, h, attn_mask=mask, need_weights=False)[0]))
+
+
+class TinyDecoder(nn.Module):
+    """Positions and a causal mask built in forward from the input's length and device; every
+    block reads the mask (like an LLM: what crosses a block boundary is h + mask)."""
+
+    def __init__(self, vocab=50, d=16, n=3, noise=False):
+        super().__init__()
+        self.emb, self.pos = nn.Embedding(vocab, d), nn.Embedding(64, d)
+        self.blocks = nn.ModuleList(_Block(d) for _ in range(n))
+        self.head = nn.Linear(d, vocab)
+        self.noise = noise
+
+    def forward(self, ids):
+        T = ids.size(1)
+        pos = torch.arange(T, device=ids.device)
+        mask = torch.triu(torch.full((T, T), float("-inf"), device=ids.device), 1)
+        if self.noise:                       # random: must be sent, never drawn again
+            mask = mask + torch.rand_like(mask) * 0.1
+        h = self.emb(ids) + self.pos(pos)
+        for blk in self.blocks:
+            h = blk(h, mask)
+        return self.head(h).transpose(1, 2)
+
+
+def _decoder_run(cuts, noise=False, recompute=True, monkeypatch=None):
+    torch.manual_seed(0)
+    base = TinyDecoder(noise=noise)
+    ids, y = torch.randint(0, 50, (4, 12)), torch.randint(0, 50, (4, 12))
+    ref = copy.deepcopy(base)
+    opt = torch.optim.SGD(ref.parameters(), lr=0.1)
+    torch.manual_seed(1)
+    for _ in range(3):
+        opt.zero_grad()
+        F.cross_entropy(ref(ids), y).backward()
+        opt.step()
+    model = copy.deepcopy(base)
+    s = ts.slice(model, cuts=cuts, multi_tensor=True)
+    torch.manual_seed(1)
+    hist = s.train([(ids, y)] * 3, {"name": "SGD", "params": {"lr": 0.1}}, CE, epochs=1)
+    _same(model, ref)
+    return s, hist
+
+
+def test_a_causal_mask_is_rebuilt_after_the_cut_not_sent():
+    s, hist = _decoder_run(["add_2", "add_4"])
+    names = s.graph.names()
+    assert "triu.cut0" in names and "triu.cut1" in names        # rebuilt in slices 1 and 2
+    send = s.graph.nodes[s.partitions[0].layer_indices[-1]]
+    sent = [s.graph.nodes[p].name for p in send.predecessors]
+    assert sent == ["add_2", "size", "getattr_2"]                # h, T and the device only
+    h_bytes = 3 * 4 * 12 * 16 * 4
+    assert all(h_bytes < b < 1.25 * h_bytes for b in hist[0]["bytes_fwd"])
+
+
+def test_random_values_are_sent_not_drawn_again():
+    s, _ = _decoder_run(["add_2"], noise=True)                  # exact: the noise crossed
+    send = s.graph.nodes[s.partitions[0].layer_indices[-1]]
+    assert "add" in [s.graph.nodes[p].name for p in send.predecessors]      # mask + noise
+    assert not any(n.endswith(".cut0") for n in s.graph.names())
+
+
+def test_without_recompute_the_mask_crosses():
+    from torchslicer.core.multicut import pack_cuts
+    g = ts.trace(TinyDecoder())
+    packed, _ = pack_cuts(g, [g.index_of("add_2")], recompute=False)
+    send = next(n for n in packed.nodes if isinstance(n.module, _SendCut))
+    assert "triu" in [packed.nodes[p].name for p in send.predecessors]
