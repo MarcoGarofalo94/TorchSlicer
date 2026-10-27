@@ -5,7 +5,7 @@
 1. **Trace** the model into a graph of nodes (`ts.trace(model)` does just this step).
 2. **Split**: a *strategy* (a splitter) groups the nodes into consecutive partitions.
 3. **Validate**: the partitions are checked, so that each one gets exactly one tensor from the
-   one before it.
+   one before it (unless `multi_tensor=True`: [multi_tensor.md](multi_tensor.md)).
 
 This page covers how to inspect the graph, the built-in ways to choose cuts, and how to
 write and register your own strategy.
@@ -35,7 +35,9 @@ Each node is an `nn.Module`: a child module of the model, or a wrapped functiona
 (`flatten`, `add`, `F.relu`, `x.view(...)`, ...). `<- [...]` lists the nodes it reads from.
 `cut ok` means a cut right after this node is allowed: that node's output is the only value
 the rest of the model needs, so one tensor carries everything across the cut. A cut inside a
-skip connection is never allowed (`graph.valid_cuts()` returns the allowed positions).
+skip connection is not allowed (`graph.valid_cuts()` returns the allowed positions), unless you
+pass `multi_tensor=True` to `ts.slice`, which sends every tensor that crosses it
+([multi_tensor.md](multi_tensor.md)).
 
 **Granularity.** By default the model's direct children are the nodes, and they are not traced
 into. So `layer1`..`layer4` are atomic. Use `expand=` to trace into submodules:

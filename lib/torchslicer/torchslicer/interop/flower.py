@@ -92,16 +92,17 @@ class FlowerAggregation(Algorithm):
 
 # ── TorchSlicer clients run by Flower's engine ──────────────────────────────────
 
-def initial_client_arrays(model_fn, cuts: list):
+def initial_client_arrays(model_fn, cuts: list, multi_tensor: bool = False):
     """The client slice of ``model_fn()`` as a Flower ``ArrayRecord``: the
     ``initial_arrays`` of a strategy that aggregates :func:`split_client_app` clients."""
     from flwr.app import ArrayRecord
     from ..sl.remote import _slices
-    return ArrayRecord(_slices(model_fn(), cuts)[0].state_dict())
+    return ArrayRecord(_slices(model_fn(), cuts, multi_tensor=multi_tensor)[0].state_dict())
 
 
 def split_client_app(model_fn, data_fn, server_address: str, cuts: list, optimizer: dict,
-                     local_epochs: int = 1, cut_hook_fn=None, device: str = "cpu"):
+                     local_epochs: int = 1, cut_hook_fn=None, device: str = "cpu",
+                     multi_tensor: bool = False):
     """A Flower ``ClientApp`` whose node trains the client slice of ``model_fn()`` against a
     :class:`torchslicer.SplitServer` at ``server_address`` (which holds the other slices).
 
@@ -111,7 +112,7 @@ def split_client_app(model_fn, data_fn, server_address: str, cuts: list, optimiz
     (train config, default ``local_epochs``) with a fresh optimizer and returns the slice with
     ``num-examples``; ``evaluate`` returns ``eval_loss``/``eval_acc``. With ``FedAvg`` on the
     server side this is SplitFed V2: one server copy, the client slices averaged each round.
-    ``cut_hook_fn()`` builds this node's cut hook.
+    ``cut_hook_fn()`` builds this node's cut hook; ``multi_tensor`` as in ``ts.SplitClient``.
     """
     from flwr.app import ArrayRecord, Message, MetricRecord, RecordDict
     from flwr.clientapp import ClientApp
@@ -122,7 +123,8 @@ def split_client_app(model_fn, data_fn, server_address: str, cuts: list, optimiz
     def _client(context):
         if "client" not in cache:
             cache["client"] = SplitClient(model_fn(), cuts, server_address, optimizer, device=device,
-                                          cut_hook=cut_hook_fn() if cut_hook_fn else None)
+                                          cut_hook=cut_hook_fn() if cut_hook_fn else None,
+                                          multi_tensor=multi_tensor)
         pid = int(context.node_config.get("partition-id", 0))
         n = int(context.node_config.get("num-partitions", 1))
         if cache.get("pid") != pid:

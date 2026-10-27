@@ -2101,3 +2101,16 @@ local, 1e-5 elsewhere). CUDA (A100) fp32: bitwise equal to the same model in one
   7.6e-7 (incl. `offload-cpuopt`). Only the new models were run (`run_matrix.py unet encdec
   maskdec`), so `results/*.json` were not rewritten; the existing models' code paths are
   unchanged when no cut is packed (`pack_cuts` returns the graph as is) and covered by the suite.
+- **API audit after M18 (2026-10-27):** every public entry point run on a U-Net cut with
+  `multi_tensor=True`: `slices(copy=True)` chained = the model (Δ 0), `torch.save` of the
+  slices, `summary`/`view`, strategies `uniform/params/flops/profiled/memory`, `cuts=` by
+  index and name, `expand=`, `pack=` + `multi_tensor` (no packed cut: graph left as is),
+  `plan(nodes)` with mixed speeds, cost fields in the history. Gap found and fixed:
+  `ts.SplitServer`/`ts.SplitClient` and the Flower interop (`split_client_app`,
+  `initial_client_arrays`) sliced without `multi_tensor`, so a skip cut was refused there;
+  they now take `multi_tensor=` (both sides), and a cut hook on a packed cut is refused.
+  Test `test_split_server.py::test_a_cut_several_tensors_cross_trains_like_local_with_multi_tensor`
+  (equal to local vanilla SL). Stale docs sentence in `custom_strategy.md` ("never allowed").
+  Not covered: `RunConfig` has no `multi_tensor` key (Python `ts.slice`/`ts.run(**kwargs)`
+  only). Full suite green (517 before + 1 new); `test_transport.py::test_ipc_matches_tcp_on_gpu`
+  failed once in the full run and passed alone and in its file (flaky, untouched code).

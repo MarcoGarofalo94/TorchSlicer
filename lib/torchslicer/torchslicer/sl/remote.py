@@ -21,6 +21,7 @@ executors: ``encode``/``decode_grad`` on the client, ``decode``/``encode_grad`` 
 each side with its own copy. Tensors cross as packed payloads (``pack_payload``), never
 pickled. Labels go to the server (vanilla SL). Give each side its own model instance, built
 by the same code (the slices wrap the model's layers); the server's client slice is unused.
+``multi_tensor=True`` (on both sides) cuts where several tensors cross, as in ``ts.slice``.
 """
 from __future__ import annotations
 
@@ -40,10 +41,13 @@ _MAX_MSG = 256 * 1024 * 1024
 _GRPC_OPTS = [("grpc.max_send_message_length", _MAX_MSG), ("grpc.max_receive_message_length", _MAX_MSG)]
 
 
-def _slices(model: nn.Module, cuts: list, **slice_kwargs) -> list:
+def _slices(model: nn.Module, cuts: list, cut_hook=None, **slice_kwargs) -> list:
     """The model's slices as ``SplitLayer``s, in order (no optimizers yet)."""
     from .. import slice as ts_slice
+    from ..core.multicut import refuse_at_packed_cuts
     sliced = ts_slice(model, cuts=cuts, **slice_kwargs)
+    if cut_hook is not None:
+        refuse_at_packed_cuts(sliced.graph, sliced.partitions, [0], "cut hooks")
     layers = sliced.graph.get_layers()
     parts = [[layers[j] for j in p.layer_indices] for p in sliced.partitions]
     for g in find_tied_parameters(parts):
@@ -83,8 +87,9 @@ class SplitServer:
     """The server slices of ``model`` (all but slice 0), served on ``port``."""
 
     def __init__(self, model: nn.Module, cuts: list, optimizer: dict, criterion: dict,
-                 port: int = 50070, device: str = "cpu", cut_hook=None, max_workers: int = 8):
-        self.slices = [s.to(device) for s in _slices(model, cuts)[1:]]
+                 port: int = 50070, device: str = "cpu", cut_hook=None, max_workers: int = 8,
+                 multi_tensor: bool = False):
+        self.slices = [s.to(device) for s in _slices(model, cuts, cut_hook, multi_tensor=multi_tensor)[1:]]
         self.optimizers = [_optimizer(s, optimizer) for s in self.slices]
         self.criterion = getattr(nn, criterion["name"])(**(criterion.get("params") or {}))
         self.device, self.port, self.hook = device, port, cut_hook
@@ -179,8 +184,8 @@ class SplitClient:
     """Slice 0 of ``model``, trained against a ``SplitServer`` at ``address``."""
 
     def __init__(self, model: nn.Module, cuts: list, address: str, optimizer: dict,
-                 device: str = "cpu", cut_hook=None, timeout: float = 600.0):
-        self.slice = _slices(model, cuts)[0].to(device)
+                 device: str = "cpu", cut_hook=None, timeout: float = 600.0, multi_tensor: bool = False):
+        self.slice = _slices(model, cuts, cut_hook, multi_tensor=multi_tensor)[0].to(device)
         self.optimizer_cfg = optimizer
         self.optimizer = _optimizer(self.slice, optimizer)
         self.device, self.hook, self.timeout = device, cut_hook, timeout
