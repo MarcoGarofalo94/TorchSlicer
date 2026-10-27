@@ -6,6 +6,7 @@ from .core.split_layer import SplitLayer
 import copy as _copy_module
 from .core.determinism import set_deterministic
 from .core.model_graph import ModelGraph, LayerNode, TraceError, _FlattenWrapper, _AddWrapper
+from .core.multicut import _SendCut, refuse_at_packed_cuts
 from .strategies.base import BaseSplitter, Partition
 from .strategies.uniform import UniformSplitter
 from .strategies.named import NamedCutSplitter
@@ -289,6 +290,10 @@ class SlicedModel:
         import inspect
         accepted = inspect.signature(self.executor.setup).parameters
         extra = {"planner": self.plan} if "planner" in accepted else {}
+        if any(isinstance(nd.module, _SendCut) for nd in self.graph.nodes):
+            from .sl.hooks import resolve_cut_hooks
+            hooks = resolve_cut_hooks(self.cut_hooks, len(self.partitions), cfg.sl.cut_hooks if cfg else None)
+            refuse_at_packed_cuts(self.graph, self.partitions, hooks, "cut hooks")
         if "cut_hooks" in accepted:
             extra["cut_hooks"] = self.cut_hooks
         elif self.cut_hooks:

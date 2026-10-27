@@ -242,3 +242,133 @@ def test_cluster_trains_like_unsplit(topology, setting, transport):
     ts.run(lambda: model, lambda: _batches(x, y), run_config=_cfg(topology, setting, transport),
            verbose=False, multi_tensor=True)
     _same(model, ref, atol=1e-5)
+
+
+# ── sessions, evaluation, tied weights ─────────────────────────────────────────
+
+def _cut_weights(cuts, mode, algorithm=None):
+    make, x, y = _case("unet")
+    data = _batches(x, y)
+    model = _fresh(make)
+    s = ts.slice(model, cuts=cuts, multi_tensor=True)
+    s.train(ts.ClientSession([data[:2], data[2:]], mode=mode), SGD, CE, epochs=1,
+            algorithm=algorithm() if algorithm else None)
+    return model
+
+
+@pytest.mark.parametrize("mode,algorithm", [("sequential", None), ("parallel", ts.SplitFedAlgorithm)])
+def test_client_session_trains_like_single_tensor_cuts(mode, algorithm):
+    """Same client slice (e1); the server part cut through the U-Net's skips, or not."""
+    g = ts.trace(_fresh(_case("unet")[0]))
+    _same(_cut_weights(["e1", "mid"], mode, algorithm), _cut_weights(["e1", g.names()[g.valid_cuts()[-1]]], mode, algorithm))
+
+
+def test_evaluation_runs_through_packed_cuts():
+    make, x, y = _case("unet")                     # no BatchNorm: training at lr 0 changes nothing
+    model = _fresh(make, bn=False).eval()
+    with torch.no_grad():
+        want = F.cross_entropy(model(x[:4]), y[:4]).item()
+    hist = ts.slice(_fresh(make, bn=False), n=3, multi_tensor=True).train(
+        _batches(x, y)[:1], {"name": "SGD", "params": {"lr": 0.0}}, CE, epochs=1, eval_data=_batches(x, y)[:1])
+    assert hist[0]["test_loss"] == pytest.approx(want, abs=1e-6)
+
+
+class TiedSkip(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.emb, self.f = nn.Embedding(20, 8), nn.Linear(8, 8)
+        self.head = nn.Linear(8, 20, bias=False)
+        self.head.weight = self.emb.weight
+
+    def forward(self, t):
+        e = self.emb(t)
+        return self.head(self.f(e) + e).transpose(1, 2)
+
+
+def test_tied_weights_across_packed_cuts_train_like_unsplit():
+    torch.manual_seed(0)
+    base, t, y = TiedSkip(), torch.randint(0, 20, (4, 6)), torch.randint(0, 20, (4, 6))
+    ref = copy.deepcopy(base)
+    opt = torch.optim.Adam(ref.parameters(), lr=0.01)
+    for _ in range(3):
+        opt.zero_grad()
+        F.cross_entropy(ref(t), y).backward()
+        opt.step()
+    model = copy.deepcopy(base)
+    s = ts.slice(model, cuts=["emb", "f"], multi_tensor=True)
+    assert len(s.partitions) == 3
+    s.train([(t, y)] * 3, {"name": "Adam", "params": {"lr": 0.01}}, CE, epochs=1)
+    _same(model, ref)
+    assert model.head.weight is model.emb.weight
+
+
+# ── what isn't supported at a packed cut yet ───────────────────────────────────
+
+@pytest.mark.parametrize("kw", [{"cut_hooks": {0: ts.Float16()}}, {"privacy": [ts.privacy.NormLabelAttack(cut=0)]}])
+def test_hooks_and_attacks_are_refused_at_a_packed_cut(kw):
+    make, x, y = _case("input_skip")
+    hooks = kw.pop("cut_hooks", None)
+    s = ts.slice(_fresh(make), cuts=["f"], multi_tensor=True, cut_hooks=hooks)
+    with pytest.raises(ValueError, match="packed"):
+        s.train(_batches(x, y), SGD, CE, epochs=1, **kw)
+
+
+def test_hooks_at_a_single_tensor_cut_of_the_same_model_still_work():
+    make, x, y = _case("unet")
+    s = ts.slice(_fresh(make), cuts=["e1", "mid"], multi_tensor=True, cut_hooks={0: ts.Float16()})
+    assert s.train(_batches(x, y), SGD, CE, epochs=1)[0]["bytes_fwd"][0] > 0
+
+
+# ── recovery: survivors re-split the rewritten graph at its packed cuts ────────
+
+@pytest.mark.parametrize("cuts", [None, ["e2", "d2"]])
+def test_p2p_recovers_from_a_dead_follower_through_packed_cuts(cuts, tmp_path):
+    from test_p2p import _StopAtStart, _cfg as p2p_cfg, _driver, _followers
+    make, x, y = _case("unet")
+    data = _batches(x, y)
+    ref = _unsplit(_fresh(make), data, epochs=3)
+    cfg = p2p_cfg(epochs=3, enabled=True, max_retries=1)
+    cfg.checkpoint.dir = str(tmp_path)
+    followers = _followers(cfg, 2)
+    try:
+        model = _fresh(make)
+        s = ts.slice(model, n=None if cuts else 3, cuts=cuts, multi_tensor=True, executor=_driver(cfg, followers))
+        assert sum(isinstance(n.module, _SendCut) for n in s.graph.nodes) == 2
+        s.train(data, run_config=cfg, callbacks=[_StopAtStart(followers[1], 2)])
+        assert len(s.partitions) == 2
+        _same(model, ref, atol=1e-5)
+        # the checkpoints rebuild the model: the graph is rewritten at the recorded cuts again
+        _same(ts.restore_model_from_run(_fresh(make), str(tmp_path / cfg.run_id)), ref, atol=1e-5)
+    finally:
+        for w in followers:
+            w.stop()
+
+
+# ── client nodes: each client its own node, like the in-process session ────────
+
+@pytest.mark.parametrize("cuts", [["e1", "mid"], ["e2", "d2"]])     # client cut single / packed
+def test_client_nodes_train_like_the_in_process_session(cuts):
+    from torchslicer.deploy.runner import free_port
+    from torchslicer.discovery import StaticDiscovery
+    make, x, y = _case("unet")
+    data = _batches(x, y)
+    clients_data = [data[:2], data[2:]]
+    cfg = _cfg("local", "vanilla")
+    cfg.sl.clients = 2
+    cfg.discovery.timeout = 30
+    ref = _fresh(make)
+    ts.slice(ref, cuts=cuts, multi_tensor=True).train(ts.ClientSession(clients_data), run_config=cfg)
+    offsets = cfg.transport.listen_offsets()
+    servers = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg) for _ in range(2)]
+    clients = [ts.start_worker(free_port(offsets), host="127.0.0.1", run_config=cfg, data=d, client_index=k)
+               for k, d in enumerate(clients_data)]
+    addr = f"127.0.0.1:{free_port(cfg.transport.listen_offsets(drives=True))}"
+    ex = ts.ClientNodesExecutor(discovery=StaticDiscovery(peers=[w.address for w in clients + servers]),
+                                coordinator_addr=addr, run_config=cfg)
+    got = _fresh(make)
+    try:
+        ts.slice(got, cuts=cuts, multi_tensor=True, executor=ex).train(ts.RemoteSession(2), run_config=cfg)
+    finally:
+        for w in servers + clients:
+            w.stop()
+    _same(got, ref, atol=1e-5)

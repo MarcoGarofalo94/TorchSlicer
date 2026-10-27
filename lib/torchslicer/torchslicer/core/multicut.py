@@ -215,6 +215,37 @@ def is_packed_cut(graph, k: int) -> bool:
     return isinstance(graph.nodes[k].module, _SendCut)
 
 
+def packed_cuts(graph, partitions) -> set:
+    """Cut indices ``k`` (slice ``k`` -> ``k+1``) that carry a packed multi-tensor value."""
+    return {k for k, p in enumerate(partitions[:-1]) if is_packed_cut(graph, p.layer_indices[-1])}
+
+
+def refuse_at_packed_cuts(graph, partitions, cuts, what: str) -> None:
+    """Cut hooks and privacy observers see one tensor per cut; at a packed cut that tensor is
+    the packed layout (header + every value), so they are refused there for now."""
+    bad = sorted(set(cuts) & packed_cuts(graph, partitions))
+    if bad:
+        raise ValueError(f"{what} at cut {bad[0]}: several tensors cross it (multi_tensor=True), "
+                         f"packed into one; {what} on packed cuts aren't supported yet. Use a cut "
+                         f"one tensor crosses (ts.trace(model).valid_cuts()) for this one.")
+
+
+def nearest_valid_cuts(graph, targets: list) -> list:
+    """For each target gap (increasing), the nearest of ``graph.valid_cuts()``, kept distinct
+    and increasing; ``ValueError`` when there are fewer valid cuts than targets."""
+    valid = graph.valid_cuts()
+    if len(valid) < len(targets):
+        raise ValueError(f"{len(targets) + 1} slices need {len(targets)} cuts; this graph has "
+                         f"{len(valid)} valid ones ({valid})")
+    out, lo = [], 0
+    for i, t in enumerate(targets):
+        hi = len(valid) - (len(targets) - i)          # leave room for the remaining targets
+        j = min(range(lo, hi + 1), key=lambda j: (abs(valid[j] - t), j))
+        out.append(valid[j])
+        lo = j + 1
+    return out
+
+
 def pack_cuts(graph, cuts: list):
     """``(graph', cuts')``: ``graph`` with a send node after each cut that more than one value
     crosses (or whose single value is not the node right before it) and recv nodes after it;
@@ -262,6 +293,7 @@ def pack_cuts(graph, cuts: list):
     for node in new.nodes:
         for p in node.predecessors:
             new.nodes[p].successors.append(node.index)
+    new.base_cuts = cuts                    # recorded in the run manifest to rebuild this graph
     return new, new_cuts
 
 

@@ -117,7 +117,7 @@ class RunLogger:
         }
 
     def record_model(self, model_name: str, layer_names: List[str],
-                     node_names: List[str] | None = None, expand=None) -> None:
+                     node_names: List[str] | None = None, expand=None, packed_cuts=None) -> None:
         self._manifest["model"] = {
             "class":        model_name,
             "total_layers": len(layer_names),
@@ -127,6 +127,8 @@ class RunLogger:
             self._manifest["model"]["node_names"] = list(node_names)
         if expand:
             self._manifest["model"]["expand"] = expand
+        if packed_cuts:      # multi-tensor cuts: the graph was rewritten at these cuts
+            self._manifest["model"]["packed_cuts"] = list(packed_cuts)
 
     def record_split(self, partitions, layer_names: List[str],
                      strategy_name: str = "unknown") -> None:

@@ -27,6 +27,7 @@ from ..config import NCCL_STORE_PORT_OFFSET, RunConfig, CheckpointConfig
 from ..retry import RetryPolicy
 from ..strategies.base import Partition
 from ..strategies.uniform import UniformSplitter
+from ..core.multicut import _SendCut, nearest_valid_cuts
 from ..core.tied import find_tied_parameters as _find_ties
 from ..sl.hooks import resolve_cut_hooks, tensor_nbytes
 from ..sl.roles import Placement, resolve_setting
@@ -507,7 +508,8 @@ class DistributedExecutor(BaseExecutor):
             self._run_logger.record_executor(self.executor_name)
             self._run_logger.record_config(cfg)
             self._run_logger.record_model(model_name, layer_names,
-                                          node_names=model_graph.names(), expand=model_graph.expand)
+                                          node_names=model_graph.names(), expand=model_graph.expand,
+                                          packed_cuts=getattr(model_graph, "base_cuts", None))
             self._run_logger.record_split(partitions, layer_names, strategy_name)
             self._run_logger.record_workers(self._nodes)
 
@@ -1227,6 +1229,12 @@ class DistributedExecutor(BaseExecutor):
                 _LOG.warning("recovery planner failed (%s); using uniform", e)
 
         layer_groups = self._uniform_split(list(range(len(self._stored_model_graph))), n_alive)
+        if any(isinstance(nd.module, _SendCut) for nd in self._stored_model_graph.nodes):
+            # a graph with multi-tensor cuts is valid only at its cut points: the cuts nearest
+            # to an even split (graphs without them keep the plain even split)
+            cuts = nearest_valid_cuts(self._stored_model_graph, [g[-1] for g in layer_groups[:-1]])
+            layer_groups = [p.layer_indices for p in
+                            UniformSplitter.partitions_from_cuts(self._stored_model_graph, cuts)]
         partitions = []
         for i, layer_indices in enumerate(layer_groups):
             predecessors = UniformSplitter._intra_predecessors(
@@ -1891,6 +1899,9 @@ class DistributedExecutor(BaseExecutor):
             }
             for i, indices in enumerate(self._stored_partition_indices)
         ]
+        packed = getattr(self._stored_model_graph, "base_cuts", None)
+        if packed:           # multi-tensor cuts: restore rebuilds the graph rewritten at these
+            payload["packed_cuts"] = list(packed)
 
         with open(path, "w") as handle:
             json.dump(payload, handle, indent=2)

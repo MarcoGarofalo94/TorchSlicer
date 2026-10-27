@@ -2066,3 +2066,22 @@ local, 1e-5 elsewhere). CUDA (A100) fp32: bitwise equal to the same model in one
 - **Side note, not fixed:** `mixed_precision=True` on a CPU model in a machine with a GPU does
   nothing: `SplitLayer` opens `torch.autocast("cuda")` whenever CUDA is available, whatever
   device the slice is on (`split_layer.py`, `_amp_device`).
+- **M18 coverage added (2026-10-27):** in-process `ClientSession` (sequential; parallel +
+  SplitFed) equals the same session with single-tensor cuts; client nodes (cut 0 single or
+  packed) equal the in-process session; evaluation through packed cuts; a tied weight
+  (embedding ↔ head) across two packed cuts with Adam equals unsplit and stays tied; P2P
+  recovery from a dead follower (3 → 2 slices) equals unsplit, and `restore_model_from_run`
+  rebuilds the model from its checkpoints. Needed for that:
+  - recovery's fallback split (no planner) is by node count and lands between `recv` nodes
+    (invalid): on a graph with packed cuts it now takes the valid cuts nearest to the even
+    split (`multicut.nearest_valid_cuts`). Graphs without packed cuts keep the old fallback,
+    which refuses e.g. a residual model's even split (`test_recovery_partitions_reject_*`):
+    applying the snapping everywhere would turn that refusal into a working recovery (owner
+    decision, not taken).
+  - checkpoints index the rewritten graph's nodes: `checkpoint_layouts.json` (and the run
+    manifest) record `packed_cuts` (cuts in the original graph, `ModelGraph.base_cuts`), and
+    `restore_model_from_run` redoes the rewrite.
+  - cut hooks and privacy attacks/defences at a packed cut are refused (they would see the
+    packed layout; a `Quantize`/`TopK` hook would also corrupt its header): `SlicedModel.train`
+    for hooks, `LocalExecutor.setup` for privacy. Hooks at the single-tensor cuts of the same
+    model work.

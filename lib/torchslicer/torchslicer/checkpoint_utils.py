@@ -17,19 +17,38 @@ from .core.split_layer import SplitLayer
 _CHECKPOINT_RE = re.compile(r"worker_(\d+)_epoch_(\d+)\.pt$")
 
 
-def _build_layers(model, pack: Callable | None = None, expand=None) -> list:
-    if pack is not None:
-        return list(pack(model))
-    return ModelGraph.from_module(model, expand=expand).get_layers()
+def _build_layers(model, pack: Callable | None = None, expand=None, packed_cuts=None) -> list:
+    graph = ModelGraph.from_stages(list(pack(model))) if pack is not None \
+        else ModelGraph.from_module(model, expand=expand)
+    if packed_cuts:                    # the run cut with multi_tensor=True: same rewrite
+        from .core.multicut import pack_cuts
+        graph, _ = pack_cuts(graph, packed_cuts)
+    return graph.get_layers()
+
+
+def _recorded_model(run_dir: str) -> dict:
+    """The ``model`` section of the run manifest ({} if absent)."""
+    path = os.path.join(run_dir, "run_manifest.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle).get("model", {})
+
+
+def _recorded_packed_cuts(run_dir: str):
+    """Cuts the run rewrote with ``multi_tensor=True`` (checkpoint layouts, else manifest)."""
+    path = os.path.join(run_dir, "checkpoint_layouts.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            cuts = json.load(handle).get("packed_cuts")
+        if cuts:
+            return cuts
+    return _recorded_model(run_dir).get("packed_cuts")
 
 
 def _recorded_expand(run_dir: str):
     """``expand`` used to build the graph of the run, from its manifest (None if absent)."""
-    path = os.path.join(run_dir, "run_manifest.json")
-    if not os.path.exists(path):
-        return None
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle).get("model", {}).get("expand") or None
+    return _recorded_model(run_dir).get("expand") or None
 
 
 def _checkpoint_files(run_dir: str) -> dict[int, set[int]]:
@@ -127,7 +146,8 @@ def restore_model_from_run(
 
     if expand is None and pack is None:
         expand = _recorded_expand(run_dir)
-    layers = _build_layers(model, pack=pack, expand=expand)
+    layers = _build_layers(model, pack=pack, expand=expand,
+                           packed_cuts=_recorded_packed_cuts(run_dir))
 
     for part in sorted(layout, key=lambda item: int(item["worker_index"])):
         worker_index = int(part["worker_index"])

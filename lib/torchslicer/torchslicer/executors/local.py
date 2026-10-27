@@ -10,6 +10,7 @@ from .base import BaseExecutor
 from ..core.schedule import build_schedule
 from ..core.split_layer import SplitLayer
 from ..core.tied import find_tied_parameters, non_owned_names, optimizer_parameters
+from ..core.multicut import refuse_at_packed_cuts
 from ..monitor import tracer
 from ..monitor.profiler import WorkerProfiler
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
@@ -281,7 +282,8 @@ class LocalExecutor(BaseExecutor):
             self._run_logger.record_executor("local")
             self._run_logger.record_config(cfg)
             self._run_logger.record_model(model_name, layer_names,
-                                          node_names=model_graph.names(), expand=model_graph.expand)
+                                          node_names=model_graph.names(), expand=model_graph.expand,
+                                          packed_cuts=getattr(model_graph, "base_cuts", None))
             self._run_logger.record_split(partitions, layer_names, strategy_name)
 
         # Algorithm — resolve from registry if a name was given via config
@@ -292,6 +294,8 @@ class LocalExecutor(BaseExecutor):
         self._algorithm.configure(len(partitions), self.criterion, self._placement)
 
         self._attacks, self._defences = resolve_privacy(privacy, cfg.privacy if cfg else None, n)
+        refuse_at_packed_cuts(model_graph, partitions, [a.cut for a in self._attacks + self._defences],
+                              "privacy attacks and defences")
         self._rng_devices = [device] if device is not None and device.type == "cuda" else []
         for a in self._attacks:
             if a.needs_query or a.needs_client:
