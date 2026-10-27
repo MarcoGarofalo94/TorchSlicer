@@ -15,7 +15,9 @@ _PACK_HINT = (
     "  1. Pass pack=: a function model -> list[nn.Module] whose stages each take and return one\n"
     "     tensor, e.g. ts.slice(model, n=4, pack=my_pack). Tracing is skipped entirely.\n"
     "     See docs/tutorials/pack.md and examples/pack/ (GPT-2, Llama, BERT, DeepSeek-MoE).\n"
-    "  2. Make the top-level forward() traceable by torch.fx: submodules are leaves and are not\n"
+    "  2. Pass example_input= (one batch): then ts.slice traces with torch.export when torch.fx\n"
+    "     fails (tracer=\"auto\", or force it with tracer=\"export\"). See docs/tutorials/export.md.\n"
+    "  3. Make the top-level forward() traceable by torch.fx: submodules are leaves and are not\n"
     "     traced (unless listed in expand=), so moving data-dependent control flow or extra\n"
     "     inputs into a submodule is often enough."
 )
@@ -163,6 +165,58 @@ class _AttrWrapper(nn.Module):
         return self.value
 
 
+# Tensor factories take sizes, not tensors, so torch.fx can't see a traced size passed to
+# them (``torch.ones(T, T)`` with ``T = x.size(1)``): while tracing they become graph nodes.
+_FACTORIES = ("ones", "zeros", "empty", "full", "arange", "eye", "linspace", "logspace",
+              "rand", "randn", "randint", "randperm", "tensor", "as_tensor", "scalar_tensor")
+
+
+def _has_proxy(x) -> bool:
+    import torch.fx as fx
+    if isinstance(x, fx.Proxy):
+        return True
+    if isinstance(x, (tuple, list)):
+        return any(_has_proxy(v) for v in x)
+    if isinstance(x, dict):
+        return any(_has_proxy(v) for v in x.values())
+    return False
+
+
+def _first_proxy(x):
+    import torch.fx as fx
+    if isinstance(x, fx.Proxy):
+        return x
+    for v in (x.values() if isinstance(x, dict) else x if isinstance(x, (tuple, list)) else ()):
+        p = _first_proxy(v)
+        if p is not None:
+            return p
+    return None
+
+
+class _traced_factories:
+    """Patch ``torch.<factory>`` while tracing: called with a traced value, it records a
+    ``call_function`` node (target: the real function); otherwise it runs as usual."""
+
+    def __enter__(self):
+        self._saved = {}
+        for name in _FACTORIES:
+            real = getattr(torch, name)
+
+            def patched(*args, _real=real, **kwargs):
+                if _has_proxy((args, kwargs)):
+                    proxy = _first_proxy((args, kwargs))
+                    return proxy.tracer.create_proxy("call_function", _real, args, kwargs)
+                return _real(*args, **kwargs)
+
+            self._saved[name] = real
+            setattr(torch, name, patched)
+        return self
+
+    def __exit__(self, *exc):
+        for name, real in self._saved.items():
+            setattr(torch, name, real)
+
+
 # ── graph nodes ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -179,6 +233,9 @@ class LayerNode:
     # Enclosing module calls, outermost first (``["layer3", "layer3.0"]``; a module's
     # second call is ``"name:1"``). Lets a named cut refer to an expanded module.
     scope: list = field(default_factory=list)
+    # Bytes of the node's output on the example input, when the tracer knows its shape
+    # (``tracer="export"``); ``float("inf")`` for a size known only at run time.
+    out_bytes: float | None = None
 
 
 # ── ModelGraph ─────────────────────────────────────────────────────────────────
@@ -193,6 +250,10 @@ class ModelGraph:
         self.model: nn.Module | None = None
         # ``ts.slice(..., multi_tensor=True)``: any gap may be cut (core/multicut.py packs it).
         self.multi_tensor = False
+        # ``tracer="export"``: shape and dtype of the example input, to export it again on restore.
+        self.export_input: dict | None = None
+        # Gaps that may never be cut (a tensor written in place between them and its write).
+        self.no_cut: set = set()
 
     # ── constructors ──────────────────────────────────────────────────────────
 
@@ -262,6 +323,18 @@ class ModelGraph:
                 f"{type(e).__name__}: {e}" + _PACK_HINT
             ) from e
 
+    @classmethod
+    def from_export(cls, network: nn.Module, example_input) -> "ModelGraph":
+        """Build the graph with ``torch.export`` on ``example_input`` (core/export_graph.py):
+        one node per ATen op, for models ``torch.fx`` can't trace. Raises ``TraceError``."""
+        from .export_graph import export_graph
+        cuda = isinstance(example_input, torch.Tensor) and example_input.is_cuda
+        with torch.random.fork_rng(devices=[example_input.device] if cuda else []):
+            graph = export_graph(network, example_input)     # leaves the random state alone
+        graph.export_input = {"shape": list(example_input.shape),
+                              "dtype": str(example_input.dtype).removeprefix("torch.")}
+        return graph
+
     @staticmethod
     def _normalize_expand(network: nn.Module, expand) -> "set | str":
         if expand is None:
@@ -284,6 +357,11 @@ class ModelGraph:
 
     @classmethod
     def _trace(cls, network: nn.Module, expand_set) -> "ModelGraph":
+        with _traced_factories():
+            return cls._trace_fx(network, expand_set)
+
+    @classmethod
+    def _trace_fx(cls, network: nn.Module, expand_set) -> "ModelGraph":
         import torch.fx as fx
 
         class _Tracer(fx.Tracer):
@@ -490,7 +568,8 @@ class ModelGraph:
         for node in self.nodes:
             i, preds = node.index, node.predecessors
             data[i] = node.takes_input or any(data[p] for p in preds)
-            own = (isinstance(node.module, _AttrWrapper) and isinstance(node.module.value, nn.Parameter)) \
+            own = (isinstance(node.module, _AttrWrapper)
+                   and (isinstance(node.module.value, nn.Parameter) or getattr(node.module, "stateful", False))) \
                 or any(True for _ in node.module.parameters())
             weights[i] = not data[i] and (own or any(weights[p] for p in preds))
         blocked = [False] * n
@@ -498,7 +577,8 @@ class ModelGraph:
             if weights[node.index]:
                 for k in range(node.index, max(node.successors, default=node.index)):
                     blocked[k] = True
-        return [k for k in range(n - 1) if not blocked[k]]
+        no_cut = getattr(self, "no_cut", ())
+        return [k for k in range(n - 1) if not blocked[k] and k not in no_cut]
 
     def valid_cuts(self) -> list[int]:
         """Indices ``k`` such that cutting between node ``k`` and node ``k + 1`` is allowed:
@@ -515,7 +595,8 @@ class ModelGraph:
         for i in range(n - 1, -1, -1):
             input_after[i] = input_after[i + 1] or self.nodes[i].takes_input
         for k in range(n - 1):
-            if max_consumer <= k and not input_after[k + 1] and self.nodes[k].successors:
+            if max_consumer <= k and not input_after[k + 1] and self.nodes[k].successors \
+                    and k not in getattr(self, "no_cut", ()):
                 cuts.append(k)
             succ = self.nodes[k].successors
             if succ:

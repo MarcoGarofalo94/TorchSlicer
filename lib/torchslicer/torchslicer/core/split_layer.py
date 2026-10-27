@@ -11,6 +11,8 @@ def _is_inplace(module: nn.Module) -> bool:
     """``nn.ReLU(inplace=True)`` and friends, or a wrapped in-place op such as ``x.relu_()``."""
     if getattr(module, "inplace", False) is True:
         return True
+    if type(module).__name__ == "_OpWrapper":          # an exported ATen op: relu_.default
+        return module.target._schema.is_mutable
     target = getattr(module, "target", None) if type(module).__name__ == "_FunctionWrapper" else None
     name = target if isinstance(target, str) else getattr(target, "__name__", "")
     return name.endswith("_") and not name.endswith("__")

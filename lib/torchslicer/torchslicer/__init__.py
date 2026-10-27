@@ -398,7 +398,7 @@ def _merge_expand(a, b):
 
 def _multi_tensor_partitions(graph, splitter, n):
     """The strategy cuts anywhere; then cuts that several tensors cross get send/recv nodes."""
-    from .core.multicut import nearest_valid_cuts, pack_cuts
+    from .core.multicut import cheapest_cuts, nearest_valid_cuts, pack_cuts
     anywhere = _copy_module.copy(graph)
     anywhere.multi_tensor = True
     partitions = splitter.split(anywhere, n)
@@ -408,30 +408,48 @@ def _multi_tensor_partitions(graph, splitter, n):
     cuts = [p.layer_indices[-1] for p in partitions[:-1]]
     if not set(cuts) <= set(anywhere.valid_cuts()):   # a strategy that counts nodes (uniform)
         cuts = nearest_valid_cuts(anywhere, cuts)     # cut between a weight and its reader
+    if not isinstance(splitter, NamedCutSplitter):    # exported graphs: the cheapest gap nearby
+        cuts = cheapest_cuts(anywhere, cuts)
     packed, cuts = pack_cuts(graph, cuts)
     return packed, BaseSplitter.partitions_from_cuts(packed, cuts)
 
 
-def trace(model, expand=None, pack=None) -> ModelGraph:
+def trace(model, expand=None, pack=None, *, tracer="auto", example_input=None) -> ModelGraph:
     """Build the layer graph ``ts.slice`` would split, without splitting it.
 
     ``print(ts.trace(model).summary())`` lists every node's name (use them in
-    ``cuts=``) and marks where a cut is allowed. ``expand`` and ``pack`` mean the
-    same as in :func:`slice`. ``ts.slice(graph, ...)`` then cuts exactly this graph.
+    ``cuts=``) and marks where a cut is allowed. ``expand``, ``pack``, ``tracer`` and
+    ``example_input`` mean the same as in :func:`slice`. ``ts.slice(graph, ...)`` then
+    cuts exactly this graph.
     """
+    if tracer not in ("auto", "fx", "export"):
+        raise ValueError(f"tracer must be 'auto', 'fx' or 'export', not {tracer!r}")
     if pack is not None:
         if expand:
             raise ValueError("expand= has no effect with pack=: packed stages are not traced")
         graph = ModelGraph.from_stages(list(pack(model)))
+    elif tracer == "export":
+        if example_input is None:
+            raise ValueError("tracer='export' needs example_input=: torch.export runs the model on it")
+        graph = ModelGraph.from_export(model, example_input)
     else:
-        graph = ModelGraph.from_module(model, expand=expand)
+        try:
+            graph = ModelGraph.from_module(model, expand=expand)
+        except TraceError as fx_error:
+            if tracer == "fx" or example_input is None:
+                raise
+            try:
+                graph = ModelGraph.from_export(model, example_input)
+            except TraceError as export_error:
+                raise TraceError(f"{fx_error.args[0].split(chr(10))[0]}\n"
+                                 f"{export_error.args[0]}") from export_error
     graph.model = model
     return graph
 
 
 def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
           cuts=None, expand=None, example_input=None, cut_hooks=None,
-          multi_tensor=False) -> SlicedModel:
+          multi_tensor=False, tracer="auto") -> SlicedModel:
     """Slice a model into ``n`` partitions for distributed training.
 
     Args:
@@ -475,8 +493,8 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
                   (finer cut granularity), e.g. ``["layer1", "layer2"]``, or
                   ``"all"``. Not allowed with ``pack=``.
         example_input: An input batch, for strategies that measure the model
-                  (``"flops"``, ``"profiled"``). They run on a copy, so the
-                  model's weights, buffers and RNG state are not changed.
+                  (``"flops"``, ``"profiled"``) and for ``torch.export``. They run on
+                  a copy, so the model's weights, buffers and RNG state are not changed.
         cut_hooks: What crosses the cuts: a ``ts.CutHook`` (every cut), or
                   ``{cut: hook}`` with cut ``k`` = between slice ``k`` and ``k+1``,
                   e.g. ``{0: ts.Quantize(bits=8)}``. Built in: ``Float16``,
@@ -489,6 +507,11 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
                   packs the tensors into one, and ``cut<k>.recv<i>`` nodes that unpack
                   them, so executors and transports still move one tensor (see
                   ``torchslicer.core.multicut``). Cuts one tensor crosses are unchanged.
+        tracer:   How the graph is built. ``"fx"``: ``torch.fx`` (no input needed).
+                  ``"export"``: ``torch.export`` on ``example_input``, one node per
+                  ATen op; it traces models fx can't (Hugging Face transformers).
+                  ``"auto"`` (default): fx, then export if fx fails and
+                  ``example_input`` is given. See docs/tutorials/export.md.
 
     Serialization constraint
     ------------------------
@@ -521,7 +544,8 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
     elif pack is not None:
         graph = trace(model, expand=expand, pack=pack)
     else:
-        graph = trace(model, expand=_merge_expand(expand, splitter.expand_for(model)))
+        graph = trace(model, expand=_merge_expand(expand, splitter.expand_for(model)),
+                      tracer=tracer, example_input=example_input)
     if multi_tensor:
         graph, partitions = _multi_tensor_partitions(graph, splitter, n)
     else:

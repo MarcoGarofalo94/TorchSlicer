@@ -1,8 +1,10 @@
 """Slice real architectures with `multi_tensor=True` (torchvision CNNs and vision transformers,
 segmentation models, GPT-style and encoder-decoder transformers) and check one SGD step equals
 the unsplit model's; also runs a Quantize cut hook on every cut. CPU, a few seconds per model.
+With ``--tracer export`` the graphs come from ``torch.export`` instead of ``torch.fx``
+(``expand="all"``), and tiny Hugging Face causal LMs are added when transformers is installed.
 
-    python benchmarks/multi_tensor/model_sweep.py [model ...]
+    python benchmarks/multi_tensor/model_sweep.py [--tracer fx|export] [model ...]
 """
 import copy, sys, time, warnings, traceback
 import torch, torch.nn as nn, torch.nn.functional as F
@@ -87,6 +89,26 @@ MODELS = {
     "torch_gpt": (TorchGPT, *tok),
 }
 
+class HF(nn.Module):                # Hugging Face causal LM: logits [B, vocab, T] for CrossEntropyLoss
+    def __init__(s, make):
+        super().__init__(); s.m = make()
+    def forward(s, ids):
+        return s.m(ids).logits.transpose(1, 2)
+
+try:
+    import transformers as tr
+    tr.logging.set_verbosity_error()
+    small = dict(num_hidden_layers=4, hidden_size=64, intermediate_size=128, num_attention_heads=4,
+                 num_key_value_heads=4, vocab_size=100)
+    HF_MODELS = {
+        "hf_gpt2": (lambda: HF(lambda: tr.GPT2LMHeadModel(tr.GPT2Config(n_layer=4, n_embd=64, n_head=4, vocab_size=100,
+                                                                         bos_token_id=0, eos_token_id=0))), *tok),
+        "hf_llama": (lambda: HF(lambda: tr.LlamaForCausalLM(tr.LlamaConfig(**small))), *tok),
+        "hf_mixtral": (lambda: HF(lambda: tr.MixtralForCausalLM(tr.MixtralConfig(**small, num_local_experts=4))), *tok),
+    }
+except ImportError:
+    HF_MODELS = {}
+
 def step(model, run, x, y):
     torch.manual_seed(1)
     return run(model, x, y)
@@ -95,20 +117,22 @@ def unsplit(model, x, y):
     opt = torch.optim.SGD(model.parameters(), lr=0.01)
     opt.zero_grad(); F.cross_entropy(model(x), y).backward(); opt.step()
 
-def main(names):
-    for name in names:
-        make, xf, yf = MODELS[name]
+def main(names, tracer="fx"):
+    models = {**MODELS, **HF_MODELS} if tracer == "export" else MODELS
+    for name in names or list(models):
+        make, xf, yf = models[name]
         t0 = time.time()
         try:
             torch.manual_seed(0); base = make().train()
             torch.manual_seed(2); x, y = xf(), yf()
-            g = ts.trace(base, expand="all")
+            kw = dict(expand="all") if tracer == "fx" else dict(tracer="export", example_input=x)
+            g = ts.trace(base, **kw)
             single = len(g.valid_cuts())
             ref = copy.deepcopy(base); step(ref, unsplit, x, y)
             row = f"{name:20s} nodes={len(g):4d} single-tensor cuts={single:4d}"
             for n in (2, 4):
                 m = copy.deepcopy(base)
-                s = ts.slice(m, n=n, expand="all", multi_tensor=True)
+                s = ts.slice(m, n=n, multi_tensor=True, **kw)
                 pk = len(packed_cuts(s.graph, s.partitions))
                 torch.manual_seed(1)
                 h = s.train([(x, y)], {"name": "SGD", "params": {"lr": 0.01}}, {"name": "CrossEntropyLoss"}, epochs=1, verbose=False)
@@ -117,7 +141,7 @@ def main(names):
                 row += f" | n={n}: packed {pk}/{n-1}, KiB/cut {kb}, max|d|={d:.1e}"
             # a lossy hook on every cut, packed or not, runs
             m = copy.deepcopy(base)
-            ts.slice(m, n=4, expand="all", multi_tensor=True, cut_hooks=ts.Quantize(bits=8)).train(
+            ts.slice(m, n=4, multi_tensor=True, cut_hooks=ts.Quantize(bits=8), **kw).train(
                 [(x, y)], {"name": "SGD", "params": {"lr": 0.01}}, {"name": "CrossEntropyLoss"}, epochs=1, verbose=False)
             row += " | quantize hook OK"
             print("OK  ", row, f"({time.time()-t0:.0f}s)", flush=True)
@@ -125,4 +149,10 @@ def main(names):
             print("FAIL", f"{name:20s}", f"{type(e).__name__}: {str(e).splitlines()[0][:220]}", flush=True)
 
 if __name__ == "__main__":
-    main(sys.argv[1:] or list(MODELS))
+    args = sys.argv[1:]
+    tracer = "fx"
+    if "--tracer" in args:
+        i = args.index("--tracer")
+        tracer = args[i + 1]
+        del args[i:i + 2]
+    main(args, tracer)

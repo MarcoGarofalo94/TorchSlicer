@@ -112,7 +112,7 @@ python -m torchslicer launch train.py -c run.yaml --target k8s            # or c
 
 | Area | What you get | Guide |
 |---|---|---|
-| **Split anything** | `torch.fx` tracing, named cuts, `expand=`, strategies `uniform`/`params`/`flops`/`profiled`/`memory`, custom strategies, `pack=` for untraceable models (HF LLMs, MoE), tied weights, cuts through skip connections (`multi_tensor=True`: U-Nets, encoder-decoders; masks rebuilt, not sent) | [custom_strategy](docs/tutorials/custom_strategy.md), [pack](docs/tutorials/pack.md), [multi_tensor](docs/tutorials/multi_tensor.md) |
+| **Split anything** | `torch.fx` tracing, `torch.export` for models fx can't trace (Hugging Face transformers, no `pack=`), named cuts, `expand=`, strategies `uniform`/`params`/`flops`/`profiled`/`memory`, custom strategies, `pack=` for untraceable models (HF LLMs, MoE), tied weights, cuts through skip connections (`multi_tensor=True`: U-Nets, encoder-decoders; masks rebuilt, not sent) | [custom_strategy](docs/tutorials/custom_strategy.md), [pack](docs/tutorials/pack.md), [multi_tensor](docs/tutorials/multi_tensor.md), [export](docs/tutorials/export.md) |
 | **Run anywhere** | local / centralized / P2P topologies; one script + one config on local, processes, Docker Compose, Kubernetes, bare metal | [docs/deploy](docs/deploy/README.md), [p2p](docs/tutorials/p2p.md) |
 | **Capability-aware planning** | workers report device, memory and measured GFLOPS; links measured; cuts balanced for heterogeneous speeds, memory caps and link cost | [p2p](docs/tutorials/p2p.md) |
 | **SL settings** | `pipeline` / `vanilla` / `u_shaped` roles, `CutHook`s (fp16/bf16, quantize, top-k, Gaussian noise, recorder), SL metrics | [sl_settings](docs/tutorials/sl_settings.md) |

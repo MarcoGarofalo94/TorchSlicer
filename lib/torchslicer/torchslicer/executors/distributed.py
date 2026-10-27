@@ -511,7 +511,8 @@ class DistributedExecutor(BaseExecutor):
             self._run_logger.record_config(cfg)
             self._run_logger.record_model(model_name, layer_names,
                                           node_names=model_graph.names(), expand=model_graph.expand,
-                                          packed_cuts=getattr(model_graph, "base_cuts", None))
+                                          packed_cuts=getattr(model_graph, "base_cuts", None),
+                                          export_input=getattr(model_graph, "export_input", None))
             self._run_logger.record_split(partitions, layer_names, strategy_name)
             self._run_logger.record_workers(self._nodes)
 
@@ -1884,6 +1885,7 @@ class DistributedExecutor(BaseExecutor):
         _LOG.info("run_state saved path=%s", path)
 
     def _save_checkpoint_layout(self, epoch: int, run_dir: str) -> None:
+        os.makedirs(run_dir, exist_ok=True)     # logging off: nothing else made the run dir yet
         path = os.path.join(run_dir, "checkpoint_layouts.json")
         payload = {"epochs": {}}
         if os.path.exists(path):
@@ -1905,6 +1907,9 @@ class DistributedExecutor(BaseExecutor):
         packed = getattr(self._stored_model_graph, "base_cuts", None)
         if packed:           # multi-tensor cuts: restore rebuilds the graph rewritten at these
             payload["packed_cuts"] = list(packed)
+        export_input = getattr(self._stored_model_graph, "export_input", None)
+        if export_input:     # traced with torch.export: restore exports again on this input
+            payload["export_input"] = export_input
 
         with open(path, "w") as handle:
             json.dump(payload, handle, indent=2)

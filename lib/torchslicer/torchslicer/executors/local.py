@@ -284,7 +284,8 @@ class LocalExecutor(BaseExecutor):
             self._run_logger.record_config(cfg)
             self._run_logger.record_model(model_name, layer_names,
                                           node_names=model_graph.names(), expand=model_graph.expand,
-                                          packed_cuts=getattr(model_graph, "base_cuts", None))
+                                          packed_cuts=getattr(model_graph, "base_cuts", None),
+                                          export_input=getattr(model_graph, "export_input", None))
             self._run_logger.record_split(partitions, layer_names, strategy_name)
 
         # Algorithm — resolve from registry if a name was given via config

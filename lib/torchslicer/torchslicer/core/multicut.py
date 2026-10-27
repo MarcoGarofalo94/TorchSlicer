@@ -224,6 +224,9 @@ _RANDOM = ("rand", "dropout", "bernoulli", "multinomial", "normal", "poisson", "
 
 def _is_meta(module) -> bool:
     """Reads only a tensor's metadata (``x.size(1)``, ``x.device``): no values, no gradient."""
+    from .export_graph import is_size_read
+    if is_size_read(module):
+        return True
     if not isinstance(module, _FunctionWrapper):
         return False
     if module.kind == "call_method":
@@ -236,7 +239,9 @@ def _is_pure(module) -> bool:
     """A traced op that computes the same thing wherever it runs, from its inputs only: a
     library wrapper (not a user module, which may keep state), not random, no parameter."""
     if isinstance(module, _AttrWrapper):
-        return not isinstance(module.value, nn.Parameter)
+        return not isinstance(module.value, nn.Parameter) and not getattr(module, "stateful", False)
+    if getattr(module, "side_effect", False) or getattr(module, "mutated", False):
+        return False                    # writes module state, or is written in place later
     if isinstance(module, (_FlattenWrapper, _ReshapeWrapper, _AddWrapper, nn.Identity)):
         return True
     if isinstance(module, _FunctionWrapper):
@@ -468,6 +473,31 @@ def nearest_valid_cuts(graph, targets: list) -> list:
     return out
 
 
+def cheapest_cuts(graph, targets: list) -> list:
+    """Move each target cut to the gap that sends the fewest bytes (after recompute) within
+    half the distance to its neighbours, the nearest one among equals. Needs the output
+    sizes a tracer recorded (``LayerNode.out_bytes``, ``tracer="export"``); otherwise the
+    targets come back as they are. A strategy that counts nodes then cuts an exported graph
+    of ATen ops between blocks rather than inside a layer."""
+    if not targets or any(node.out_bytes is None for node in graph.nodes):
+        return list(targets)
+    kind = recomputable(graph)
+    valid = set(graph.multi_tensor_cuts())
+
+    def cost(k):
+        sent, _ = _split_free(crossing(graph, k), graph.nodes, kind)
+        return sum(graph.nodes[v].out_bytes if v >= 0 else graph.nodes[0].out_bytes for v in sent)
+
+    out, n = [], len(graph.nodes)
+    for i, t in enumerate(targets):
+        lo = (out[-1] + 1) if out else 0
+        lo = max(lo, (t + (targets[i - 1] if i else -1)) // 2 + 1)
+        hi = min((t + (targets[i + 1] if i + 1 < len(targets) else n - 1)) // 2, n - 2)
+        gaps = [k for k in range(lo, hi + 1) if k in valid] or [t]
+        out.append(min(gaps, key=lambda k: (cost(k), abs(k - t), k)))
+    return out
+
+
 def _reads_input(graph) -> dict:
     """``{index: bool}``: whether a node's output depends on the model input (``-1``: it is)."""
     out = {-1: True}
@@ -498,7 +528,9 @@ def pack_cuts(graph, cuts: list, recompute: bool = True):
     late_input = any(n.takes_input for n in nodes[cuts[0] + 1:]) if cuts else False
     new = ModelGraph(source=graph.source)
     new.expand, new.model = graph.expand, graph.model
+    new.export_input = getattr(graph, "export_input", None)
     current: dict = {}                      # old value id -> new node index providing it here
+    placed: dict = {}                       # old node index -> its node in the new graph
 
     def add(module, name, preds, takes_input=False, scope=()):
         idx = len(new.nodes)
@@ -516,7 +548,7 @@ def pack_cuts(graph, cuts: list, recompute: bool = True):
             reads_input = node.takes_input and not late_input
             if node.takes_input and late_input:
                 preds = [current[-1]] + preds if not preds else preds
-            current[i] = add(node.module, node.name, preds, reads_input, node.scope)
+            current[i] = placed[i] = add(node.module, node.name, preds, reads_input, node.scope)
         if j == len(bounds) - 2:
             break
         c = bounds[j + 1]
@@ -537,6 +569,7 @@ def pack_cuts(graph, cuts: list, recompute: bool = True):
     for node in new.nodes:
         for p in node.predecessors:
             new.nodes[p].successors.append(node.index)
+    new.no_cut = {placed[k] for k in getattr(graph, "no_cut", ())}
     new.base_cuts = cuts                    # recorded in the run manifest to rebuild this graph
     new.base = graph                        # the model's own graph, for summaries and pictures
     return new, new_cuts

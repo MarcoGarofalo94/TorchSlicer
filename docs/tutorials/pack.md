@@ -21,8 +21,10 @@ Typical causes:
 - **Several inputs** (`forward(x, mask)`) or **several outputs** (a tuple, or a `ModelOutput`).
 - An in-place op whose result is never used (`h.mul_(2)`).
 
-## First, two cheaper fixes
+## First, cheaper fixes
 
+- Pass `example_input=` (one batch): when fx fails, `ts.slice` traces with `torch.export`,
+  which handles most Hugging Face models without a pack function ([export.md](export.md)).
 - Only the top-level `forward` is traced. Submodules are opaque leaves unless you list them in
   `expand=`. Moving control flow into a submodule is often enough.
 - If the graph traces but the cut you want isn't allowed (a skip connection crosses it), cut
