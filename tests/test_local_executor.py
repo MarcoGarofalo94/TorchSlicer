@@ -158,3 +158,33 @@ def test_linear_lr_schedule_matches_lambdalr():
         opt.zero_grad(); nn.CrossEntropyLoss()(ref(x), y).backward(); opt.step(); sched.step()
     for a, b in zip(model.parameters(), ref.parameters()):
         assert torch.allclose(a, b, atol=1e-6)
+
+
+@pytest.mark.parametrize("n_micro", [None, 2])
+def test_a_first_slice_without_parameters_trains(n_micro):
+    """Slice 0 holding only parameter-free nodes (here the model input's fan-out node) used
+    to crash the local executor looking for the device in slice 0's parameters."""
+    import copy
+    import torchslicer as ts
+
+    class Skip(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.f, self.g = nn.Linear(8, 8), nn.Linear(8, 4)
+
+        def forward(self, x):
+            return self.g(self.f(x) + x)
+
+    torch.manual_seed(0)
+    model, data = Skip(), list(_loader())
+    ref = copy.deepcopy(model)
+    opt = torch.optim.SGD(ref.parameters(), lr=0.1)
+    for x, y in data:
+        opt.zero_grad()
+        nn.functional.cross_entropy(ref(x), y).backward()
+        opt.step()
+    s = ts.slice(model, cuts=["input"])
+    assert not list(s.slices()[0].parameters())
+    s.train(data, {"name": "SGD", "params": {"lr": 0.1}}, {"name": "CrossEntropyLoss"}, epochs=1,
+            n_micro_batches=n_micro)
+    assert all(torch.allclose(p, q, atol=1e-6) for p, q in zip(model.parameters(), ref.parameters()))

@@ -611,6 +611,22 @@ shown in a Flower-based SplitFed baseline.
     attacks observe at a cut; byte metrics per cut.
   - **Test:** equivalence matrix in every mode with a U-Net and a small T5 added, cut through the skips; every existing
     cell unchanged; bytes per cut equal the sum of the crossing tensors.
+  - **Started 2026-10-27** (owner: "M18 + recompute"), branch `feat/m18-multi-tensor-cuts` forked from `refinement`
+    (f062ed7). Design (decided in session, evidence: tiny Llama exported with `torch.export`, 4 tensors cross every
+    block boundary: hidden state, causal mask, RoPE cos/sin; only the hidden state needs sending):
+    - **Graph rewrite, not a new wire contract.** `ts.slice(..., multi_tensor=True)`: every gap is a candidate; at a
+      cut several values cross, `core/multicut.py::pack_cuts` inserts `cut<k>.send` (packs the values into one
+      differentiable `[B, header + values]` tensor) and `cut<k>.recv<i>` nodes (unpack). Executors, workers, protos,
+      transports, GPipe and offload see one tensor per cut, unchanged. Values crossing several cuts are re-packed.
+      Header in-band per row (bytes as floats, exact in any float dtype); floats promoted to the widest float dtype;
+      ints/bools as bytes; non-batch values (parameters, `[1, T, d]` tables, Python numbers) repeated per row.
+    - **Plan:** (1) rewrite + local exactness ✅ (U-Net, input skip); (2) every executor/mode: GPipe, offload,
+      centralized gRPC/TCP, P2P, client nodes, recovery, sync_back, checkpoint restore, bf16, CUDA;
+      (3) cut hooks / privacy attacks at a packed cut: refuse clearly (they would see the packed layout) or apply per
+      value; (4) **recompute**: values that depend only on shapes/constants (masks, positions) are rebuilt in the
+      receiving slice instead of sent; (5) refusal messages name the crossing tensors and point to
+      `multi_tensor=True`; `summary()`/`view()` show them; (6) equivalence matrix + U-Net + small enc-dec
+      transformer, CPU and CUDA; (7) tutorial, validation.md, Status/Handoff.
 
 ## Handoff (read this first if you are a new session)
 Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-20: M13 done and merged to `main` (PR #5, 665a519), version 0.13.0; see M13 Status. Next by the milestone order: M10 multi-client engine, branch `feat/m10-*` forked from `feat/m13-baselines` (`ts.SplitServer`/`ts.SplitClient` are a start on it).** NCCL validated across two containers 2026-10-20 (validation #38–39). M7 deferred.

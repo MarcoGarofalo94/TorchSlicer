@@ -56,6 +56,15 @@ def _detach_payload(payload):
     return [t.detach() for t in payload]
 
 
+def _device(split_layers) -> torch.device:
+    """Where the slices live: the first parameter or buffer of any slice (slice 0 may hold
+    none, e.g. only parameter-free ops before a cut), else the CPU."""
+    for sl in split_layers:
+        for t in (*sl.parameters(), *sl.buffers()):
+            return t.device
+    return torch.device("cpu")
+
+
 def check_session_ties(tied_groups, placement) -> None:
     """Client states are swapped per client; a trainable parameter tied across a client and
     a server slice would then be shared by every client, so it is refused. A frozen one (e.g.
@@ -102,7 +111,7 @@ def evaluate_slices(split_layers: list, criterion, loader, hooks: dict | None = 
     current weights: forward only, no gradients, every slice in eval mode, the RNG state
     restored after. Cut ``hooks`` transform the activations as in training
     (``CutContext.direction == "eval"``; ``Recorder`` skips it); no bytes are counted."""
-    device = next(split_layers[0].parameters()).device
+    device = _device(split_layers)
     hooks = hooks or {}
     was_training = [sl.training for sl in split_layers]
     for sl in split_layers:
@@ -256,8 +265,7 @@ class LocalExecutor(BaseExecutor):
         memory    = cfg.profile.memory    if cfg else False
 
         # For local execution the "device" is whatever the split_layers are on
-        device = next(iter(self.split_layers[0].parameters()), torch.tensor(0)).device \
-            if self.split_layers else None
+        device = _device(self.split_layers) if self.split_layers else None
 
         self._profilers = [
             WorkerProfiler(verbosity=verbosity, memory=memory, device=device)
@@ -678,7 +686,7 @@ class LocalExecutor(BaseExecutor):
     # ── standard (non-GPipe) batch ─────────────────────────────────────────────
 
     def _standard_batch(self, inputs, labels, batch_id: int) -> float:
-        device = next(self.split_layers[0].parameters()).device
+        device = _device(self.split_layers)
         main, aux = _unpack_inputs(inputs)
         main   = main.to(device)
         labels = labels.to(device)
@@ -816,7 +824,7 @@ class LocalExecutor(BaseExecutor):
         Each micro-batch loss is scaled by 1/M so accumulated gradients match
         the magnitude of a full-batch gradient.
         """
-        device = next(self.split_layers[0].parameters()).device
+        device = _device(self.split_layers)
         main, aux = _unpack_inputs(inputs)
         main   = main.to(device)
         labels = labels.to(device)

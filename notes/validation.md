@@ -2037,3 +2037,32 @@ Found while walking through the features (`notes/report.md`, F1).
   `tests/test_sync_back.py` (centralized pipeline/vanilla/u_shaped, P2P vanilla/u_shaped,
   gRPC/TCP, hosted, none, client nodes sequential and SplitFed parallel; equal to the local
   run), plus weight checks in P2P recovery (re-split slices) and distributed tied weights.
+
+## M18: multi-tensor cuts (2026-10-27, branch `feat/m18-multi-tensor-cuts`)
+
+Design in `notes/roadmap.md` M18. `ts.slice(..., multi_tensor=True)`: a cut that several values
+cross gets `cut<k>.send` / `cut<k>.recv<i>` nodes (`core/multicut.py`), so executors and
+transports still move one tensor. Checked (`tests/test_multi_tensor.py`, 24 tests): U-Net
+(BatchNorm, skips at every level), a model reading its input at the end (+ a parameter
+crossing), an encoder-decoder (every decoder layer cross-attends the encoder output; a tuple
+`(out, weights)` and a Python int cross); local n=2..4, GPipe, cpu/disk offload, centralized
+gRPC pipeline, centralized u_shaped TCP, P2P vanilla TCP: final weights equal unsplit (1e-6
+local, 1e-5 elsewhere). CUDA (A100) fp32: bitwise equal to the same model in one slice.
+- **53. The local executor crashed when slice 0 has no parameters** (`StopIteration`, since M0):
+  it read the device from slice 0's first parameter (`_standard_batch`, `_gpipe_batch`,
+  `evaluate`, profilers). E.g. `cuts=["input"]` on a model whose input fans out. Found when
+  cutting the encoder-decoder after its input node. Fix: `_device(split_layers)`, the first
+  parameter or buffer of any slice, else CPU. Test
+  `test_local_executor.py::test_a_first_slice_without_parameters_trains` (standard, GPipe).
+- **Behaviour (not a bug): bf16 results depend on the memory layout of what crosses a cut.**
+  CUDA + `mixed_precision`, encoder-decoder cut through the decoder: forward differs from one
+  slice from `dec.0.ff` on, weights by 6e-4 after 8 SGD steps (U-Net, input-skip: bitwise
+  equal). Cause: the unsplit model feeds the attention output to `ff` as a transposed view;
+  after the cut it is a contiguous tensor, and cuBLAS picks another bf16 GEMM for it (fp32:
+  equal). All values were checked to cross unchanged (dtype and bits). Any cut can change a
+  tensor's layout (a real network always delivers contiguous tensors), so bf16 equivalence
+  across cuts holds to rounding, not bitwise. Not fixed: keeping strides across processes
+  would only make the simulator bitwise-equal.
+- **Side note, not fixed:** `mixed_precision=True` on a CPU model in a machine with a GPU does
+  nothing: `SplitLayer` opens `torch.autocast("cuda")` whenever CUDA is available, whatever
+  device the slice is on (`split_layer.py`, `_amp_device`).

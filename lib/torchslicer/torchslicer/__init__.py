@@ -378,6 +378,19 @@ def _merge_expand(a, b):
     return a + [x for x in b if x not in a] or None
 
 
+def _multi_tensor_partitions(graph, splitter, n):
+    """The strategy cuts anywhere; then cuts that several tensors cross get send/recv nodes."""
+    from .core.multicut import pack_cuts
+    anywhere = _copy_module.copy(graph)
+    anywhere.multi_tensor = True
+    partitions = splitter.split(anywhere, n)
+    flat = [i for p in partitions for i in p.layer_indices]
+    if flat != list(range(len(graph))) or any(not p.layer_indices for p in partitions):
+        splitter.validate(graph, partitions)          # not contiguous: the usual error
+    packed, cuts = pack_cuts(graph, [p.layer_indices[-1] for p in partitions[:-1]])
+    return packed, BaseSplitter.partitions_from_cuts(packed, cuts)
+
+
 def trace(model, expand=None, pack=None) -> ModelGraph:
     """Build the layer graph ``ts.slice`` would split, without splitting it.
 
@@ -396,7 +409,8 @@ def trace(model, expand=None, pack=None) -> ModelGraph:
 
 
 def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
-          cuts=None, expand=None, example_input=None, cut_hooks=None) -> SlicedModel:
+          cuts=None, expand=None, example_input=None, cut_hooks=None,
+          multi_tensor=False) -> SlicedModel:
     """Slice a model into ``n`` partitions for distributed training.
 
     Args:
@@ -447,6 +461,12 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
                   e.g. ``{0: ts.Quantize(bits=8)}``. Built in: ``Float16``,
                   ``BFloat16``, ``Quantize``, ``TopK``, ``CircularConv``, ``GaussianNoise``,
                   ``ClipNoise``, ``Recorder``, ``Chain``. See docs/tutorials/sl_settings.md.
+        multi_tensor: Allow cuts that several tensors cross (a skip connection, a U-Net
+                  level, the model input read by a later slice). Every gap becomes a
+                  valid cut; at such a cut the graph gets a ``cut<k>.send`` node that
+                  packs the tensors into one, and ``cut<k>.recv<i>`` nodes that unpack
+                  them, so executors and transports still move one tensor (see
+                  ``torchslicer.core.multicut``). Cuts one tensor crosses are unchanged.
 
     Serialization constraint
     ------------------------
@@ -480,7 +500,10 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
         graph = trace(model, expand=expand, pack=pack)
     else:
         graph = trace(model, expand=_merge_expand(expand, splitter.expand_for(model)))
-    partitions = splitter.split(graph, n)
+    if multi_tensor:
+        graph, partitions = _multi_tensor_partitions(graph, splitter, n)
+    else:
+        partitions = splitter.split(graph, n)
     splitter.validate(graph, partitions)
     return SlicedModel(
         graph, partitions,

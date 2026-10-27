@@ -191,6 +191,8 @@ class ModelGraph:
         self.expand: list | str = []
         # The model this graph was traced from (set by ``ts.trace``), for ``ts.slice(graph)``.
         self.model: nn.Module | None = None
+        # ``ts.slice(..., multi_tensor=True)``: any gap may be cut (core/multicut.py packs it).
+        self.multi_tensor = False
 
     # ── constructors ──────────────────────────────────────────────────────────
 
@@ -485,6 +487,8 @@ class ModelGraph:
         tensor carries everything across the boundary.
         """
         n = len(self.nodes)
+        if getattr(self, "multi_tensor", False):
+            return list(range(n - 1))
         cuts = []
         max_consumer = -1         # highest index consuming the output of a node < k
         input_after = [False] * (n + 1)
