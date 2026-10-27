@@ -2093,3 +2093,11 @@ local, 1e-5 elsewhere). CUDA (A100) fp32: bitwise equal to the same model in one
   Decoder with an in-forward causal mask, cut between blocks: bytes per cut 17376 → 10464
   (hidden state alone 9216; the rest is the per-row header + T), weights equal unsplit.
   Random values (`rand_like` added to the mask) are sent, not drawn again: still exact.
+- **M18 equivalence matrix (2026-10-27):** models `unet` (GroupNorm, skips at every level),
+  `encdec` (cross-attention to the encoder output in every decoder layer), `maskdec` (causal
+  mask + positions built in forward, rebuilt after each cut), all `ts.slice(n=3,
+  multi_tensor=True)`, 2 epochs SGD momentum vs unsplit. CPU (`MATRIX_NCCL=1`, gloo): 45/45 OK,
+  max |Δ| 6e-7 in-process, 0 distributed. CUDA (A100, no NCCL: one GPU): 42/42 OK, max |Δ|
+  7.6e-7 (incl. `offload-cpuopt`). Only the new models were run (`run_matrix.py unet encdec
+  maskdec`), so `results/*.json` were not rewritten; the existing models' code paths are
+  unchanged when no cut is packed (`pack_cuts` returns the graph as is) and covered by the suite.

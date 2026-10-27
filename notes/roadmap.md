@@ -620,15 +620,22 @@ shown in a Flower-based SplitFed baseline.
       transports, GPipe and offload see one tensor per cut, unchanged. Values crossing several cuts are re-packed.
       Header in-band per row (bytes as floats, exact in any float dtype); floats promoted to the widest float dtype;
       ints/bools as bytes; non-batch values (parameters, `[1, T, d]` tables, Python numbers) repeated per row.
-    - **Plan:** (1) rewrite + local exactness ✅ (U-Net, input skip); (2) every executor/mode: GPipe, offload,
-      centralized gRPC/TCP, P2P, client nodes, recovery, sync_back, checkpoint restore, bf16, CUDA;
-      (3) cut hooks / privacy attacks at a packed cut: refuse clearly (they would see the packed layout) or apply per
-      value; (4) **recompute**: values that depend only on shapes/constants (masks, positions) are rebuilt in the
-      receiving slice instead of sent; (5) refusal messages name the crossing tensors and point to
-      `multi_tensor=True`; `summary()`/`view()` show them; (6) equivalence matrix + U-Net + small enc-dec
-      transformer, CPU and CUDA; (7) tutorial, validation.md, Status/Handoff.
+    - **Plan / status (2026-10-27):** (1) rewrite + local exactness ✅; (2) every executor/mode ✅: GPipe, offload
+      cpu/disk, centralized gRPC/TCP, P2P, `ClientSession`, client nodes, P2P recovery (fallback snaps to valid cuts),
+      checkpoint restore (`packed_cuts` recorded), tied weights, eval, CUDA fp32 bitwise; bf16 equal to rounding
+      (layout, validation.md M18); (3) cut hooks / privacy at a packed cut: **refused** (per-value hooks = follow-up);
+      (4) recompute ✅ (metadata-only values rebuilt; mask 17376 → 10464 B/cut, h alone 9216); (5) messages,
+      `summary()`, `view()` ✅; (6) equivalence matrix ✅ `unet`/`encdec`/`maskdec` (`multi_tensor=True`): CPU 45/45, CUDA 42/42 OK;
+      (7) tutorial `docs/tutorials/multi_tensor.md` ✅, validation.md #53 + M18 notes ✅.
+    - **Follow-ups (not done):** cut hooks per packed value; capability-aware planning on the base graph (today it
+      re-plans among the rewritten graph's cuts); recovery fallback snapping for every graph (owner decision: turns
+      an existing refusal into a working recovery); the `torch.export` tracer (M17) on top of this, then HF models
+      without `pack=`; header overhead (per row) could be per tensor for large batches of small values.
 
 ## Handoff (read this first if you are a new session)
+**2026-10-27: M18 (multi-tensor cuts + recompute) done on `feat/m18-multi-tensor-cuts`** (forked from `refinement`,
+not pushed): see M18 status above; 517 tests, matrix new models CPU 45/45, CUDA 42/42. Open owner decisions:
+recovery fallback snapping for every graph; version bump.
 Last updated 2026-10-18, M12 done incl. step 4 (version 0.12.0, branch `feat/m12-privacy`, pushed); next: M13 (owner: "do both", 2026-10-18). **2026-10-20: M13 done and merged to `main` (PR #5, 665a519), version 0.13.0; see M13 Status. Next by the milestone order: M10 multi-client engine, branch `feat/m10-*` forked from `feat/m13-baselines` (`ts.SplitServer`/`ts.SplitClient` are a start on it).** NCCL validated across two containers 2026-10-20 (validation #38–39). M7 deferred.
 - **Where things stand:**
   - Done, pushed to `origin`: M0 (`feat/m0-foundations`), M1 (`feat/m1-split-anything`),
