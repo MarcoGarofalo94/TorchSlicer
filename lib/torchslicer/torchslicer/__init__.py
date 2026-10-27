@@ -172,7 +172,8 @@ class SlicedModel:
             sent = self.graph.nodes[last].predecessors if isinstance(self.graph.nodes[last].module, _SendCut) else None
             if p.index < len(self.partitions) - 1 and sent is not None:
                 names = [self._sent_name(i) for i in sent]
-                cut = (f"  ── cut {p.index} after {names[0]}: {len(names)} values packed "
+                after = self.graph.nodes[shown[-1]].name if shown else names[0]
+                cut = (f"  ── cut {p.index} after {after}: {len(names)} values packed "
                        f"({', '.join(names)})")
             elif p.index < len(self.partitions) - 1:
                 cut = f"  ── cut {p.index} after {self.graph.nodes[last].name}"

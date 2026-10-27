@@ -31,5 +31,5 @@ addr = f"{host}:{port}"
 ex = DistributedExecutor(discovery=CoordinatorDiscovery(run_id=cfg.run_id),
                          coordinator_addr=addr, coordinator_bind_addr=addr, run_config=cfg)
 model, pack = M.build(name)
-h = ts.slice(model, n=M.N_PARTS, executor=ex, pack=pack).train(M.loader(name), run_config=cfg)
+h = ts.slice(model, n=M.N_PARTS, executor=ex, pack=pack, **M.slice_kwargs(name)).train(M.loader(name), run_config=cfg)
 print(json.dumps({"losses": [e["loss"] for e in h]}), flush=True)

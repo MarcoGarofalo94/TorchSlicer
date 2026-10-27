@@ -17,6 +17,7 @@ model, pack = M.build(name)
 p2p.build_model = lambda: model
 p2p.get_dataset = lambda *a, **k: M.loader(name)
 p2p.get_pack = lambda: pack
+p2p.get_split = lambda: M.slice_kwargs(name)
 sys.argv = [sys.argv[0], port]
 history = p2p.serve()
 if history:   # driver

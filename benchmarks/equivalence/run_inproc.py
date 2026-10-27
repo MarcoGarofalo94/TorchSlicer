@@ -65,7 +65,7 @@ def sliced(name, gpipe, offload=None):
         if kw["mode"] == "disk":
             kw["directory"] = tempfile.mkdtemp(prefix="ts-offload-")
         ex = ts.OffloadExecutor(device=M.DEVICE, **kw)
-    s = ts.slice(model, n=M.N_PARTS, pack=pack, executor=ex)
+    s = ts.slice(model, n=M.N_PARTS, pack=pack, executor=ex, **M.slice_kwargs(name))
     h = s.train(M.loader(name), M.OPTIMIZER, M.CRITERION, epochs=M.EPOCHS,
                 use_gpipe=gpipe, n_micro_batches=2 if gpipe else None)
     if offload and offload.get("mode") == "disk":

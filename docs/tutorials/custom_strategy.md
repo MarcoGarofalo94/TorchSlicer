@@ -47,6 +47,8 @@ g = ts.trace(model, expand="all")        # down to the built-in torch.nn layers
 
 Inside a fully expanded residual block only the block boundaries are valid cuts. The nodes
 inside are listed, but not marked `cut ok`.
+To cut where several tensors cross (inside a block, through a U-Net's skips), pass
+`multi_tensor=True` to `ts.slice`: see [multi_tensor.md](multi_tensor.md).
 
 **Sizes.** `summary(params=True)` adds each node's parameter count and size (parameters +
 buffers; a tied weight is counted once, at its first node). With `example_input=` it also

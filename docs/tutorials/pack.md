@@ -26,7 +26,8 @@ Typical causes:
 - Only the top-level `forward` is traced. Submodules are opaque leaves unless you list them in
   `expand=`. Moving control flow into a submodule is often enough.
 - If the graph traces but the cut you want isn't allowed (a skip connection crosses it), cut
-  somewhere else. `ts.trace(model).summary()` marks the valid cuts. See
+  somewhere else, or pass `multi_tensor=True` to send every tensor that crosses it
+  ([multi_tensor.md](multi_tensor.md)). `ts.trace(model).summary()` marks the valid cuts. See
   [custom_strategy.md](custom_strategy.md).
 
 ## The `pack` contract
