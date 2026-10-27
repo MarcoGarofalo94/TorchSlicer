@@ -147,4 +147,6 @@ class BaseSplitter(ABC):
         names = [model_graph.nodes[k].name or str(k) for k in model_graph.valid_cuts()]
         if len(names) > 20:
             names = names[:10] + ["..."] + names[-10:]
-        return f"\nValid cuts are after: {names}" if names else "\nThis graph has no valid cut points."
+        hint = f"\nValid cuts are after: {names}" if names else "\nThis graph has no valid cut points."
+        return hint + ("\nTo cut where several tensors cross, pass multi_tensor=True to ts.slice "
+                       "(they are packed into one).")

@@ -84,3 +84,19 @@ def test_view_page_escapes_names_and_its_script_parses(tmp_path):
     js = tmp_path / "page.js"
     js.write_text(re.search(r"<script>(.*)</script>", page, re.S).group(1))
     subprocess.run([node, "--check", str(js)], check=True)
+
+
+def test_view_of_multi_tensor_cuts_draws_the_models_graph_and_what_each_cut_sends():
+    from test_multi_tensor import TinyDecoder
+    torch.manual_seed(0)
+    s = ts.slice(TinyDecoder(), cuts=["add_2", "add_4"], multi_tensor=True)
+    d = _data(s.view(example_input=torch.randint(0, 50, (4, 12))).html())
+    g = ts.trace(TinyDecoder())
+    assert [n["name"] for n in d["nodes"]] == g.names()                  # no send/recv rows
+    assert d["multi"] and d["valid"] == list(range(len(g) - 1)) and d["single"] == g.valid_cuts()
+    k = g.index_of("add_2")
+    assert d["cuts"] == [k, g.index_of("add_4")]
+    assert d["sends"][k] == ["add_2", "size", "getattr_2"]             # the mask is rebuilt
+    assert d["sendBytes"][k] == 4 * 12 * 16 * 4
+    assert not _data(g.view().html())["multi"]
+    assert _data(g.view(multi_tensor=True).html())["valid"] == list(range(len(g) - 1))

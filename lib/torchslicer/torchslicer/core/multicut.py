@@ -380,6 +380,7 @@ def pack_cuts(graph, cuts: list, recompute: bool = True):
         for p in node.predecessors:
             new.nodes[p].successors.append(node.index)
     new.base_cuts = cuts                    # recorded in the run manifest to rebuild this graph
+    new.base = graph                        # the model's own graph, for summaries and pictures
     return new, new_cuts
 
 

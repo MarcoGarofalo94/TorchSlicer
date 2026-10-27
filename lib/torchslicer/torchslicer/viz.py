@@ -50,14 +50,20 @@ class SliceView:
     / ``save(path)`` give the interactive page, ``svg()`` the static picture.
     """
 
-    def __init__(self, obj, example_input=None, aux=None, title=None):
+    def __init__(self, obj, example_input=None, aux=None, title=None, multi_tensor=None):
         sliced = obj if hasattr(obj, "partitions") else None
         graph = sliced.graph if sliced else obj
+        cuts = [p.layer_indices[-1] for p in sliced.partitions[:-1]] if sliced else []
+        base = getattr(graph, "base", None)
+        if base is not None:            # cut with multi_tensor=True: draw the model's own graph
+            graph, cuts = base, list(graph.base_cuts)
+        if multi_tensor is None:
+            multi_tensor = base is not None or getattr(graph, "multi_tensor", False)
         self.graph = graph
         nodes = graph.nodes
         sizes = graph._param_sizes()
         outs = graph._output_sizes(example_input, aux) if example_input is not None else None
-        cuts = [p.layer_indices[-1] for p in sliced.partitions[:-1]] if sliced else []
+        sends, send_bytes = self._sends(graph, outs)
         model = getattr(sliced, "_model_name", None) or type(getattr(graph, "model", graph)).__name__
 
         first_holder, tied = {}, set()                 # nodes sharing a tensor (tied weights)
@@ -78,12 +84,36 @@ class SliceView:
                        "tied": sizes[n.index][2],
                        "shape": outs[n.index][0] if outs else None,
                        "out": outs[n.index][1] if outs else None} for n in nodes],
-            "valid": graph.valid_cuts(),
+            "valid": list(range(len(nodes) - 1)) if multi_tensor else graph.valid_cuts(),
+            "single": graph.valid_cuts(),
+            "multi": bool(multi_tensor),
+            "sends": sends,
+            "sendBytes": send_bytes,
             "cuts": cuts,
             "arcs": arcs,
             "tied": sorted(tied),
         }
         self._svg = self._layout(nodes, edges, arcs, tied, example_input)
+
+    @staticmethod
+    def _sends(graph, outs):
+        """Per gap: the names of what a cut there sends (after recomputation), and its bytes."""
+        from .core.multicut import _split_free, crossing, recomputable
+        kind = recomputable(graph)
+        names, nbytes = [], []
+        for k in range(len(graph) - 1):
+            sent, _ = _split_free(crossing(graph, k), graph.nodes, kind)
+            names.append(["input" if v < 0 else graph.nodes[v].name for v in sent])
+            nbytes.append(sum(outs[v][1] for v in sent if v >= 0) if outs else None)
+        return names, nbytes
+
+    def _cut_label(self, j, g):
+        d, r = self.data, self.data["nodes"][g]
+        sent = d["sends"][g]
+        if len(sent) > 1 or sent != [r["name"]]:
+            size = f" · {_human_bytes(d['sendBytes'][g])}" if d["sendBytes"][g] is not None else ""
+            return f"cut {j} → {len(sent)} values packed{size}"
+        return f"cut {j} → " + (f"{r['shape']} · {_human_bytes(r['out'])}" if r["shape"] else f"after {r['name']}")
 
     # ── static layout (Python), so the picture exists without JS ──────────────
     def _layout(self, nodes, edges, arcs, tied, example_input):
@@ -182,11 +212,7 @@ class SliceView:
         for g in range(n - 1):
             gy = y(g) + ROW + GAP / 2
             cls = ("ok" if g in d["valid"] else "no") + (" on" if g in cuts else "")
-            label = ""
-            if g in cuts:
-                r = rows[g]
-                label = (f"cut {cuts.index(g)} → " +
-                         (f"{r['shape']} · {_human_bytes(r['out'])}" if r["shape"] else f"after {r['name']}"))
+            label = self._cut_label(cuts.index(g), g) if g in cuts else ""
             out.append(f'<g class="gap {cls}" data-g="{g}">'
                        f'<rect class="ghit" x="{PAD}" y="{gy - GAP / 2 - 3}" width="{x_arc - PAD}" '
                        f'height="{GAP + 6}"/>'
@@ -308,11 +334,13 @@ function render(){
     g.classList.toggle("on", on);
     if (on) { const k=[...cuts].sort((a,b)=>a-b).indexOf(i), n=D.nodes[i];
       const t=g.querySelector(".pill text"), r=g.querySelector(".pill rect");
-      t.textContent = `cut ${k} → ${n.shape ? n.shape + " · " + hb(n.out) : "after " + n.name}`;
+      t.textContent = packed(i) ? `cut ${k} → ${D.sends[i].length} values packed${D.sendBytes[i] != null ? " · " + hb(D.sendBytes[i]) : ""}`
+        : `cut ${k} → ${n.shape ? n.shape + " · " + hb(n.out) : "after " + n.name}`;
       r.setAttribute("width", t.getComputedTextLength() + 16); } });
   let rows = "<tr><th>slice</th><th>nodes</th><th>params</th><th>size</th><th class=barcell>share of params</th><th>sends</th></tr>";
   sl.forEach(([lo,hi],k)=>{ let p=0,b=0; for(let i=lo;i<=hi;i++){p+=D.nodes[i].params;b+=D.nodes[i].bytes;}
-    const send = hi < N-1 ? (D.nodes[hi].out != null ? hb(D.nodes[hi].out) : "1 tensor") : "output";
+    const send = hi >= N-1 ? "output" : packed(hi) ? `${D.sends[hi].length} values${D.sendBytes[hi] != null ? ", " + hb(D.sendBytes[hi]) : ""}`
+        : (D.nodes[hi].out != null ? hb(D.nodes[hi].out) : "1 tensor");
     const ties = D.tied.filter(([a,c])=>a<lo && c>=lo && c<=hi).length;
     rows += `<tr><td><span class=sw style="background:var(--k${k%6})"></span>slice ${k}${ties?" <span style='color:var(--tied)'>(tied replica)</span>":""}</td>
       <td>${lo}–${hi} (${hi-lo+1})</td><td>${fmt(p)}</td><td>${hb(b)}</td>
@@ -320,15 +348,21 @@ function render(){
   document.getElementById("slices").innerHTML = rows;
   const cs=[...cuts].sort((a,b)=>a-b);
   const arg = D.packed ? "[" + cs.join(", ") + "]" : "[" + cs.map(i=>JSON.stringify(D.nodes[i].name)).join(", ") + "]";
+  const mt = cs.some(packed) ? ", multi_tensor=True" : "";
   document.getElementById("code").textContent = cs.length
-    ? `ts.slice(model, cuts=${arg}${D.packed ? ", pack=..." : ""})` : "no cuts: one slice";
+    ? `ts.slice(model, cuts=${arg}${D.packed ? ", pack=..." : ""}${mt})` : "no cuts: one slice";
 }
 const tip = document.getElementById("tip");
+function packed(g){ return D.sends[g].length > 1 || D.sends[g][0] !== D.nodes[g].name; }
 function crossing(g){ return D.arcs.map((a,k)=>[a,k]).filter(([[u,v]])=>u<=g && v>g && u!==g); }
 document.querySelectorAll(".gap").forEach(el=>{ const g=+el.dataset.g;
   el.addEventListener("click", ()=>{ if(!valid.has(g)) return; cuts.has(g)?cuts.delete(g):cuts.add(g); render(); });
   el.addEventListener("mousemove", ev=>{ let msg;
-    if (valid.has(g)) msg = (cuts.has(g) ? "remove the cut" : "cut") + ` after ${D.nodes[g].name}` +
+    if (valid.has(g) && packed(g)) {
+      crossing(g).forEach(([,k])=>document.getElementById("arc"+k).classList.add("hl"));
+      msg = (cuts.has(g) ? "remove the cut" : "cut") + ` after ${D.nodes[g].name}: sends ${D.sends[g].join(", ")}` +
+        ` packed into one tensor` + (D.sendBytes[g] != null ? `, ${hb(D.sendBytes[g])} per batch` : "");
+    } else if (valid.has(g)) msg = (cuts.has(g) ? "remove the cut" : "cut") + ` after ${D.nodes[g].name}` +
         (D.nodes[g].shape ? `: sends ${D.nodes[g].shape}, ${hb(D.nodes[g].out)} per batch` : "");
     else { const c = crossing(g);
       c.forEach(([,k])=>document.getElementById("arc"+k).classList.add("hl"));

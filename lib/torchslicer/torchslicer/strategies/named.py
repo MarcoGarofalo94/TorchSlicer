@@ -31,9 +31,16 @@ class NamedCutSplitter(BaseSplitter):
             if k not in valid:
                 before = [model_graph.nodes[v].name for v in valid if v < k][-1:]
                 after = [model_graph.nodes[v].name for v in valid if v > k][:1]
+                if k == len(model_graph) - 1:
+                    why = "it is the last node: nothing follows it"
+                else:
+                    from ..core.multicut import crossing
+                    values = ["the model input" if v < 0 else model_graph.nodes[v].name
+                              for v in crossing(model_graph, k)]
+                    why = (f"{len(values)} values would cross it ({', '.join(values)}), not one. "
+                           f"ts.slice(..., multi_tensor=True) sends them together")
                 raise ValueError(
-                    f"Can't cut after {name!r} (node {k}): more than one value would cross the cut "
-                    f"(e.g. a skip connection spans it), or a later node reads the model input. "
+                    f"Can't cut after {name!r} (node {k}): {why}. "
                     f"Nearest valid cuts: before={before}, after={after}."
                     f"{self._cut_hint(model_graph)}"
                 )

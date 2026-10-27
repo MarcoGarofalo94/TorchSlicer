@@ -6,7 +6,7 @@ from .core.split_layer import SplitLayer
 import copy as _copy_module
 from .core.determinism import set_deterministic
 from .core.model_graph import ModelGraph, LayerNode, TraceError, _FlattenWrapper, _AddWrapper
-from .core.multicut import _SendCut, refuse_at_packed_cuts
+from .core.multicut import _RecvCut, _SendCut, refuse_at_packed_cuts
 from .strategies.base import BaseSplitter, Partition
 from .strategies.uniform import UniformSplitter
 from .strategies.named import NamedCutSplitter
@@ -165,9 +165,16 @@ class SlicedModel:
             if params:
                 line += f", {_human_bytes(sum(sizes[i][1] for i in p.layer_indices))}"
             lines.append(line)
-            lines.extend("      " + row for row in _wrap(self._group_names(p.layer_indices), 96))
+            shown = [i for i in p.layer_indices
+                     if not isinstance(self.graph.nodes[i].module, (_SendCut, _RecvCut))]
+            lines.extend("      " + row for row in _wrap(self._group_names(shown), 96))
             last = p.layer_indices[-1]
-            if p.index < len(self.partitions) - 1:
+            sent = self.graph.nodes[last].predecessors if isinstance(self.graph.nodes[last].module, _SendCut) else None
+            if p.index < len(self.partitions) - 1 and sent is not None:
+                names = [self._sent_name(i) for i in sent]
+                cut = (f"  ── cut {p.index} after {names[0]}: {len(names)} values packed "
+                       f"({', '.join(names)})")
+            elif p.index < len(self.partitions) - 1:
                 cut = f"  ── cut {p.index} after {self.graph.nodes[last].name}"
             elif outs:
                 cut = "  ── output"
@@ -184,7 +191,8 @@ class SlicedModel:
 
         Jupyter shows it inline; ``.save("split.html")`` writes the page. Click a gap to move
         the cuts and read the matching ``ts.slice(...)`` call. ``example_input`` adds what
-        each cut sends, measured on a copy like :meth:`summary`.
+        each cut sends, measured on a copy like :meth:`summary`. Cut with
+        ``multi_tensor=True``, it shows the model's own graph and every gap is clickable.
         """
         from .viz import SliceView
         return SliceView(self, example_input, aux, title)
@@ -206,6 +214,14 @@ class SlicedModel:
         return [SplitLayer([layers[j] for j in p.layer_indices], is_last=(p.index == last),
                            predecessors=p.predecessors)
                 for p in self.partitions]
+
+    def _sent_name(self, i: int) -> str:
+        """A value sent at a packed cut, named after the node it comes from (through recv)."""
+        node = self.graph.nodes[i]
+        if isinstance(node.module, _RecvCut):
+            send = self.graph.nodes[node.predecessors[0]]
+            return self._sent_name(send.predecessors[node.module.index])
+        return node.name
 
     def _group_names(self, indices: list) -> list:
         """Node names of one slice, a module whose nodes are all in it shown once."""

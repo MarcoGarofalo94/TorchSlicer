@@ -553,11 +553,13 @@ class ModelGraph:
                 lines.append("  * shares tensors with an earlier node (tied weights), counted there")
         return "\n".join(lines)
 
-    def view(self, example_input=None, aux: dict | None = None, title: str | None = None):
+    def view(self, example_input=None, aux: dict | None = None, title: str | None = None,
+             multi_tensor: bool = False):
         """An interactive picture of the graph (``torchslicer.viz.SliceView``) where cuts are
-        placed by clicking; it shows the matching ``ts.slice(...)`` call."""
+        placed by clicking; it shows the matching ``ts.slice(...)`` call. ``multi_tensor``:
+        every gap can be cut, labelled with what it would send (``ts.slice(multi_tensor=True)``)."""
         from ..viz import SliceView
-        return SliceView(self, example_input, aux, title)
+        return SliceView(self, example_input, aux, title, multi_tensor)
 
     def _param_sizes(self) -> list:
         """Per node: (parameter count, bytes of parameters + buffers, shares a tensor with
