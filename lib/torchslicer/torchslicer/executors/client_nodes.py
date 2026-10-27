@@ -39,6 +39,7 @@ from ..transport.grpc.worker import worker_service_pb2
 from ..monitor.process_logger import get_logger
 from ..core.split_layer import SplitLayer
 from ..sl.hooks import resolve_cut_hooks
+from ..core.multicut import wrap_packed_hooks
 from ..sl.metrics import CommMeter
 from ..sl.roles import Placement
 from .distributed import (DistributedExecutor, WorkerFailureError, build_tied_configs,
@@ -722,6 +723,7 @@ class ClientNodesExecutor(DistributedExecutor):
         self._meter = CommMeter(n)
         self._placement = Placement(self._setting, n)
         self.partitions = partitions
+        self._hooks = wrap_packed_hooks(self._hooks, self._stored_model_graph, partitions)
         self._log_plan(self._stored_model_graph, partitions)
         self._stored_layers = all_layers
         self._stored_partition_indices = [list(p.layer_indices) for p in partitions]

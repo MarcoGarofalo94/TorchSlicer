@@ -126,6 +126,8 @@ def run(model_fn, data_fn=None, *, run_config: RunConfig | None = None, role: st
         set_deterministic()
     topology, role = resolve_role(cfg)
     n = int(cfg.discovery.n_workers)
+    if cfg.planning.multi_tensor:
+        slice_kwargs.setdefault("multi_tensor", True)
     _LOG.info("run topology=%s role=%s n=%s run_id=%s", topology, role, n, cfg.run_id)
     # who reads the data: the driving node, or with client nodes, each client
     needs_data = role in ("client", "all") or (role not in ("worker", "follower") and not cfg.sl.client_nodes)

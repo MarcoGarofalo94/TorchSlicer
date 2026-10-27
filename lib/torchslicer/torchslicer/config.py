@@ -228,6 +228,9 @@ class PlanningConfig:
     measure_network: bool = True       # RTT + bandwidth executor → each worker
     measure_links:   bool = False      # RTT + bandwidth worker i → worker i+1
     probe_bytes:     int  = 1 << 20    # payload of each bandwidth probe
+    # Cut anywhere, sending every tensor that crosses a cut (ts.slice(multi_tensor=True)),
+    # for runs started from a config (ts.run, ts.run_p2p, the launcher); a kwarg wins.
+    multi_tensor:    bool = False
 
 
 @dataclass
@@ -717,6 +720,7 @@ _ENV_OVERRIDES: tuple[_EnvOverride, ...] = (
     ("PLANNING_HETEROGENEOUS",   lambda cfg, v: setattr(cfg.planning, "heterogeneous",   _parse_bool(v))),
     ("PLANNING_MEASURE_NETWORK", lambda cfg, v: setattr(cfg.planning, "measure_network", _parse_bool(v))),
     ("PLANNING_MEASURE_LINKS",   lambda cfg, v: setattr(cfg.planning, "measure_links",   _parse_bool(v))),
+    ("PLANNING_MULTI_TENSOR",    lambda cfg, v: setattr(cfg.planning, "multi_tensor",    _parse_bool(v))),
     # ── deploy ─────────────────────────────────────────────────────────────────
     ("TOPOLOGY", lambda cfg, v: setattr(cfg.deploy, "topology", v.strip().lower())),
     ("ROLE",     lambda cfg, v: setattr(cfg.deploy, "role",     v.strip().lower())),

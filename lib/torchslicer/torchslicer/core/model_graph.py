@@ -480,6 +480,26 @@ class ModelGraph:
             return inside[-1]
         raise KeyError(f"no graph node named {name!r}. Nodes: {self.names()}")
 
+    def multi_tensor_cuts(self) -> list[int]:
+        """The cuts ``ts.slice(multi_tensor=True)`` may use: every gap but those a value
+        computed from weights alone would cross (a parameter, or a table built from one, such
+        as a relative position bias): it would be sent, once per sample, every batch, and its
+        gradient sent back, while the cut belongs on one side of it and its reader."""
+        n = len(self.nodes)
+        data, weights = {}, {}
+        for node in self.nodes:
+            i, preds = node.index, node.predecessors
+            data[i] = node.takes_input or any(data[p] for p in preds)
+            own = (isinstance(node.module, _AttrWrapper) and isinstance(node.module.value, nn.Parameter)) \
+                or any(True for _ in node.module.parameters())
+            weights[i] = not data[i] and (own or any(weights[p] for p in preds))
+        blocked = [False] * n
+        for node in self.nodes:
+            if weights[node.index]:
+                for k in range(node.index, max(node.successors, default=node.index)):
+                    blocked[k] = True
+        return [k for k in range(n - 1) if not blocked[k]]
+
     def valid_cuts(self) -> list[int]:
         """Indices ``k`` such that cutting between node ``k`` and node ``k + 1`` is allowed:
         node ``k``'s output is the only value any later node needs from nodes ``<= k``,
@@ -488,7 +508,7 @@ class ModelGraph:
         """
         n = len(self.nodes)
         if getattr(self, "multi_tensor", False):
-            return list(range(n - 1))
+            return self.multi_tensor_cuts()
         cuts = []
         max_consumer = -1         # highest index consuming the output of a node < k
         input_after = [False] * (n + 1)
@@ -557,7 +577,8 @@ class ModelGraph:
              multi_tensor: bool = False):
         """An interactive picture of the graph (``torchslicer.viz.SliceView``) where cuts are
         placed by clicking; it shows the matching ``ts.slice(...)`` call. ``multi_tensor``:
-        every gap can be cut, labelled with what it would send (``ts.slice(multi_tensor=True)``)."""
+        every gap ``multi_tensor_cuts()`` allows can be cut, labelled with what it would send
+        (``ts.slice(multi_tensor=True)``)."""
         from ..viz import SliceView
         return SliceView(self, example_input, aux, title, multi_tensor)
 

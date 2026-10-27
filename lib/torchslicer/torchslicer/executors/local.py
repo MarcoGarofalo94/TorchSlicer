@@ -10,7 +10,7 @@ from .base import BaseExecutor
 from ..core.schedule import build_schedule
 from ..core.split_layer import SplitLayer
 from ..core.tied import find_tied_parameters, non_owned_names, optimizer_parameters
-from ..core.multicut import refuse_at_packed_cuts
+from ..core.multicut import refuse_at_packed_cuts, wrap_packed_hooks
 from ..monitor import tracer
 from ..monitor.profiler import WorkerProfiler
 from ..monitor.process_logger import get_logger, configure as configure_process_logging
@@ -250,7 +250,8 @@ class LocalExecutor(BaseExecutor):
         cfg = run_config
         sl_cfg = cfg.sl if cfg else None
         self._placement = Placement(resolve_setting(sl_cfg.setting if sl_cfg else "", "local"), n)
-        self._hooks = resolve_cut_hooks(cut_hooks, n, sl_cfg.cut_hooks if sl_cfg else None)
+        self._hooks = wrap_packed_hooks(resolve_cut_hooks(cut_hooks, n, sl_cfg.cut_hooks if sl_cfg else None),
+                                        model_graph, partitions)
         self._meter = CommMeter(n)
         self._link = ((sl_cfg.link_bandwidth_mbps, sl_cfg.link_latency_ms) if sl_cfg else (0.0, 0.0))
         self._client_states = (sl_cfg.client_states if sl_cfg else "") or "cpu"

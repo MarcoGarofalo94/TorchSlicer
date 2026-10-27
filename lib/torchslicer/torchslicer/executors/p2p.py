@@ -136,6 +136,8 @@ def run_p2p(model_fn, data_fn, *, port: int | None = None, is_driver: bool | Non
         followers = peers[1:]   # the driver's entry is spelled differently (e.g. alias)
     executor = P2PExecutor(peers=followers, address=address, bind_addr=f"[::]:{port}",
                            run_config=cfg)
+    if cfg.planning.multi_tensor:
+        slice_kwargs.setdefault("multi_tensor", True)
     sliced = ts_slice(model_fn(), n=len(followers) + executor.hosted_slices, executor=executor,
                       **slice_kwargs)
     _LOG.info("p2p driver start run_id=%s\n%s", cfg.run_id, sliced.summary())

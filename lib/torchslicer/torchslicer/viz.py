@@ -84,7 +84,7 @@ class SliceView:
                        "tied": sizes[n.index][2],
                        "shape": outs[n.index][0] if outs else None,
                        "out": outs[n.index][1] if outs else None} for n in nodes],
-            "valid": list(range(len(nodes) - 1)) if multi_tensor else graph.valid_cuts(),
+            "valid": graph.multi_tensor_cuts() if multi_tensor else graph.valid_cuts(),
             "single": graph.valid_cuts(),
             "multi": bool(multi_tensor),
             "sends": sends,

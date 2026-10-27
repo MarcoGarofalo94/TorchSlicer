@@ -165,8 +165,8 @@ class SplitLayer(nn.Module):
     ) -> torch.Tensor | None:
         if self._is_last:
             loss.backward()
-        else:
-            out.backward(gradient=prev_g)
+        elif out.requires_grad:    # else nothing here needs a gradient (a slice that only
+            out.backward(gradient=prev_g)     # builds a mask from the input's shape)
         return self.x.grad if self.x is not None else None
 
     # ── optimize ──────────────────────────────────────────────────────────────

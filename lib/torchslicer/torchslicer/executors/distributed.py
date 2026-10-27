@@ -30,6 +30,7 @@ from ..strategies.uniform import UniformSplitter
 from ..core.multicut import _SendCut, nearest_valid_cuts
 from ..core.tied import find_tied_parameters as _find_ties
 from ..sl.hooks import resolve_cut_hooks, tensor_nbytes
+from ..core.multicut import wrap_packed_hooks
 from ..sl.roles import Placement, resolve_setting
 from ..sl.metrics import CommMeter
 from ..sl.clients import (ClientSession, SplitLayerClientState, algorithm_round_end,
@@ -498,6 +499,7 @@ class DistributedExecutor(BaseExecutor):
             if len(partitions) != n:
                 raise RuntimeError(f"planner returned {len(partitions)} partitions for {n} nodes")
         self.partitions = partitions
+        self._hooks = wrap_packed_hooks(self._hooks, model_graph, partitions)
         self._log_plan(model_graph, partitions)
 
         # Initialise RunLogger now that we have run_id and worker info
@@ -1312,6 +1314,7 @@ class DistributedExecutor(BaseExecutor):
         partitions = self._build_recovery_partitions(
             n_alive, self._nodes if cfg.planning.heterogeneous else None)
         self.partitions = partitions
+        self._hooks = wrap_packed_hooks(self._hooks, self._stored_model_graph, partitions)
         self._log_plan(self._stored_model_graph, partitions)
 
         # Update stored partition state so subsequent _load_all_slices is consistent

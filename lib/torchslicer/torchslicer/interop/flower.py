@@ -97,7 +97,7 @@ def initial_client_arrays(model_fn, cuts: list, multi_tensor: bool = False):
     ``initial_arrays`` of a strategy that aggregates :func:`split_client_app` clients."""
     from flwr.app import ArrayRecord
     from ..sl.remote import _slices
-    return ArrayRecord(_slices(model_fn(), cuts, multi_tensor=multi_tensor)[0].state_dict())
+    return ArrayRecord(_slices(model_fn(), cuts, multi_tensor=multi_tensor)[0][0].state_dict())
 
 
 def split_client_app(model_fn, data_fn, server_address: str, cuts: list, optimizer: dict,

@@ -6,7 +6,7 @@ from .core.split_layer import SplitLayer
 import copy as _copy_module
 from .core.determinism import set_deterministic
 from .core.model_graph import ModelGraph, LayerNode, TraceError, _FlattenWrapper, _AddWrapper
-from .core.multicut import _RecvCut, _SendCut, refuse_at_packed_cuts
+from .core.multicut import _RecvCut, _SendCut
 from .strategies.base import BaseSplitter, Partition
 from .strategies.uniform import UniformSplitter
 from .strategies.named import NamedCutSplitter
@@ -193,7 +193,7 @@ class SlicedModel:
         Jupyter shows it inline; ``.save("split.html")`` writes the page. Click a gap to move
         the cuts and read the matching ``ts.slice(...)`` call. ``example_input`` adds what
         each cut sends, measured on a copy like :meth:`summary`. Cut with
-        ``multi_tensor=True``, it shows the model's own graph and every gap is clickable.
+        ``multi_tensor=True``, it shows the model's own graph and every candidate gap is clickable.
         """
         from .viz import SliceView
         return SliceView(self, example_input, aux, title)
@@ -307,10 +307,6 @@ class SlicedModel:
         import inspect
         accepted = inspect.signature(self.executor.setup).parameters
         extra = {"planner": self.plan} if "planner" in accepted else {}
-        if any(isinstance(nd.module, _SendCut) for nd in self.graph.nodes):
-            from .sl.hooks import resolve_cut_hooks
-            hooks = resolve_cut_hooks(self.cut_hooks, len(self.partitions), cfg.sl.cut_hooks if cfg else None)
-            refuse_at_packed_cuts(self.graph, self.partitions, hooks, "cut hooks")
         if "cut_hooks" in accepted:
             extra["cut_hooks"] = self.cut_hooks
         elif self.cut_hooks:
@@ -402,14 +398,17 @@ def _merge_expand(a, b):
 
 def _multi_tensor_partitions(graph, splitter, n):
     """The strategy cuts anywhere; then cuts that several tensors cross get send/recv nodes."""
-    from .core.multicut import pack_cuts
+    from .core.multicut import nearest_valid_cuts, pack_cuts
     anywhere = _copy_module.copy(graph)
     anywhere.multi_tensor = True
     partitions = splitter.split(anywhere, n)
     flat = [i for p in partitions for i in p.layer_indices]
     if flat != list(range(len(graph))) or any(not p.layer_indices for p in partitions):
         splitter.validate(graph, partitions)          # not contiguous: the usual error
-    packed, cuts = pack_cuts(graph, [p.layer_indices[-1] for p in partitions[:-1]])
+    cuts = [p.layer_indices[-1] for p in partitions[:-1]]
+    if not set(cuts) <= set(anywhere.valid_cuts()):   # a strategy that counts nodes (uniform)
+        cuts = nearest_valid_cuts(anywhere, cuts)     # cut between a weight and its reader
+    packed, cuts = pack_cuts(graph, cuts)
     return packed, BaseSplitter.partitions_from_cuts(packed, cuts)
 
 
@@ -485,7 +484,8 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
                   ``ClipNoise``, ``Recorder``, ``Chain``. See docs/tutorials/sl_settings.md.
         multi_tensor: Allow cuts that several tensors cross (a skip connection, a U-Net
                   level, the model input read by a later slice). Every gap becomes a
-                  valid cut; at such a cut the graph gets a ``cut<k>.send`` node that
+                  valid cut, except between a weight and its reader
+                  (``graph.multi_tensor_cuts()``); at such a cut the graph gets a ``cut<k>.send`` node that
                   packs the tensors into one, and ``cut<k>.recv<i>`` nodes that unpack
                   them, so executors and transports still move one tensor (see
                   ``torchslicer.core.multicut``). Cuts one tensor crosses are unchanged.

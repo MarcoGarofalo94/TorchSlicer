@@ -77,26 +77,25 @@ def test_clients_share_the_server_copy():
     assert any(not torch.equal(a, b) for a, b in zip(before, (p for s in server.slices for p in s.parameters())))
 
 
-def test_a_cut_several_tensors_cross_trains_like_local_with_multi_tensor():
+@pytest.mark.parametrize("hook", [None, "circular"])
+def test_a_cut_several_tensors_cross_trains_like_local_with_multi_tensor(hook):
     from test_multi_tensor import UNet
 
     def unet():
         torch.manual_seed(0)
         return UNet()
 
+    mk = (lambda: ts.CircularConv(ratio=2, seed=2)) if hook else (lambda: None)
     g = torch.Generator().manual_seed(1)
     data = [(torch.randn(4, 3, 16, 16, generator=g), torch.randint(0, 3, (4, 16, 16), generator=g))
             for _ in range(3)]
     with pytest.raises(ValueError, match="multi_tensor=True"):
         ts.SplitClient(unet(), cuts=["e2"], address="127.0.0.1:1", optimizer=OPT)
-    with pytest.raises(ValueError, match="cut hooks at cut 0"):
-        ts.SplitClient(unet(), cuts=["e2"], address="127.0.0.1:1", optimizer=OPT,
-                       cut_hook=ts.CircularConv(ratio=4, seed=2), multi_tensor=True)
     server = ts.SplitServer(unet(), cuts=["e2"], optimizer=OPT, criterion=CRIT, port=_port(),
-                            multi_tensor=True).start()
+                            cut_hook=mk(), multi_tensor=True).start()
     try:
         client = ts.SplitClient(unet(), cuts=["e2"], address=f"127.0.0.1:{server.port}",
-                                optimizer=OPT, multi_tensor=True)
+                                optimizer=OPT, cut_hook=mk(), multi_tensor=True)
         client.fit(data, epochs=2)
     finally:
         server.stop()
@@ -104,7 +103,8 @@ def test_a_cut_several_tensors_cross_trains_like_local_with_multi_tensor():
     cfg = ts.RunConfig()
     cfg.training.optimizer, cfg.training.criterion = OPT, CRIT
     cfg.training.epochs, cfg.logging.enabled, cfg.sl.setting = 2, False, "vanilla"
-    ts.slice(ref, cuts=["e2"], multi_tensor=True).train(data, run_config=cfg)
+    ts.slice(ref, cuts=["e2"], multi_tensor=True, cut_hooks={0: mk()} if hook else None).train(
+        data, run_config=cfg)
     got = list(client.slice.parameters()) + [p for s in server.slices for p in s.parameters()]
     want = list(ref.parameters())
     assert len(got) == len(want)

@@ -37,7 +37,10 @@ class NamedCutSplitter(BaseSplitter):
                     from ..core.multicut import crossing
                     values = ["the model input" if v < 0 else model_graph.nodes[v].name
                               for v in crossing(model_graph, k)]
-                    why = (f"{len(values)} values would cross it ({', '.join(values)}), not one. "
+                    why = (f"a weight, or a value built from weights only, would cross it "
+                           f"({', '.join(values)}): cut on one side of a weight and its reader"
+                           if getattr(model_graph, "multi_tensor", False) else
+                           f"{len(values)} values would cross it ({', '.join(values)}), not one. "
                            f"ts.slice(..., multi_tensor=True) sends them together")
                 raise ValueError(
                     f"Can't cut after {name!r} (node {k}): {why}. "

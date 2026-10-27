@@ -41,13 +41,13 @@ _MAX_MSG = 256 * 1024 * 1024
 _GRPC_OPTS = [("grpc.max_send_message_length", _MAX_MSG), ("grpc.max_receive_message_length", _MAX_MSG)]
 
 
-def _slices(model: nn.Module, cuts: list, cut_hook=None, **slice_kwargs) -> list:
-    """The model's slices as ``SplitLayer``s, in order (no optimizers yet)."""
+def _slices(model: nn.Module, cuts: list, cut_hook=None, **slice_kwargs) -> tuple[list, object]:
+    """The model's slices as ``SplitLayer``s, in order (no optimizers yet), and the hook to
+    run on cut 0 (wrapped when several tensors cross it)."""
     from .. import slice as ts_slice
-    from ..core.multicut import refuse_at_packed_cuts
+    from ..core.multicut import wrap_packed_hooks
     sliced = ts_slice(model, cuts=cuts, **slice_kwargs)
-    if cut_hook is not None:
-        refuse_at_packed_cuts(sliced.graph, sliced.partitions, [0], "cut hooks")
+    hook = wrap_packed_hooks({0: cut_hook}, sliced.graph, sliced.partitions)[0] if cut_hook else None
     layers = sliced.graph.get_layers()
     parts = [[layers[j] for j in p.layer_indices] for p in sliced.partitions]
     for g in find_tied_parameters(parts):
@@ -56,7 +56,7 @@ def _slices(model: nn.Module, cuts: list, cut_hook=None, **slice_kwargs) -> list
                              "SplitServer/SplitClient cannot keep the copies equal")
     n = len(parts)
     return [SplitLayer(parts[i], is_last=(i == n - 1), predecessors=p.predecessors or None)
-            for i, p in enumerate(sliced.partitions)]
+            for i, p in enumerate(sliced.partitions)], hook
 
 
 def _optimizer(module: nn.Module, cfg: dict):
@@ -89,7 +89,8 @@ class SplitServer:
     def __init__(self, model: nn.Module, cuts: list, optimizer: dict, criterion: dict,
                  port: int = 50070, device: str = "cpu", cut_hook=None, max_workers: int = 8,
                  multi_tensor: bool = False):
-        self.slices = [s.to(device) for s in _slices(model, cuts, cut_hook, multi_tensor=multi_tensor)[1:]]
+        slices, cut_hook = _slices(model, cuts, cut_hook, multi_tensor=multi_tensor)
+        self.slices = [s.to(device) for s in slices[1:]]
         self.optimizers = [_optimizer(s, optimizer) for s in self.slices]
         self.criterion = getattr(nn, criterion["name"])(**(criterion.get("params") or {}))
         self.device, self.port, self.hook = device, port, cut_hook
@@ -185,7 +186,8 @@ class SplitClient:
 
     def __init__(self, model: nn.Module, cuts: list, address: str, optimizer: dict,
                  device: str = "cpu", cut_hook=None, timeout: float = 600.0, multi_tensor: bool = False):
-        self.slice = _slices(model, cuts, cut_hook, multi_tensor=multi_tensor)[0].to(device)
+        slices, cut_hook = _slices(model, cuts, cut_hook, multi_tensor=multi_tensor)
+        self.slice = slices[0].to(device)
         self.optimizer_cfg = optimizer
         self.optimizer = _optimizer(self.slice, optimizer)
         self.device, self.hook, self.timeout = device, cut_hook, timeout

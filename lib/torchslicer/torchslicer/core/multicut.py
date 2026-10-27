@@ -190,7 +190,9 @@ def _build(packed, spec):
     _, dtype, shape, start, width = spec
     cols = packed[:, start:start + width] if kind == _ROWS else packed[:1, start:start + width]
     if dtype.is_floating_point and kind != _SCALAR:
-        t = cols.to(dtype)
+        # its own memory, not a view of the received tensor (a leaf): an in-place op on it
+        # (ReLU(inplace=True) right after the cut) would otherwise be an autograd error
+        t = cols.to(dtype, copy=True)
     else:                                  # bytes: an own contiguous buffer to view as dtype
         t = cols.detach().to(torch.uint8).flatten().clone().view(dtype)
     if kind == _ROWS:
@@ -295,9 +297,154 @@ def packed_cuts(graph, partitions) -> set:
     return {k for k, p in enumerate(partitions[:-1]) if is_packed_cut(graph, p.layer_indices[-1])}
 
 
+# ── cut hooks on a packed cut ──────────────────────────────────────────────────
+
+def _leaves(spec, out):
+    if spec[0] in (_TUPLE, _LIST):
+        for s in spec[1]:
+            _leaves(s, out)
+    elif spec[0] in (_ROWS, _REPEATED, _SCALAR):
+        out.append(spec)
+    return out
+
+
+def _parts(packed):
+    """(hooked leaf specs, header width, packed width): the per-sample floating-point values
+    are what a hook sees; the header, integer values and repeated values pass as they are."""
+    leaves = [leaf for v in _layout(packed) for leaf in _leaves(v, [])]
+    head = leaves[0][3] if leaves else packed.shape[1]
+    width = max([head] + [leaf[3] + leaf[4] for leaf in leaves])
+    sel = [leaf for leaf in leaves if leaf[0] == _ROWS and leaf[1].is_floating_point]
+    return sel, head, width
+
+
+def _keep(sel, width):
+    """Column ranges of a packed tensor that are not hooked."""
+    out, at = [], 0
+    for _, _, _, start, w in sorted(sel, key=lambda s: s[3]):
+        if start > at:
+            out.append((at, start))
+        at = start + w
+    if width > at:
+        out.append((at, width))
+    return out
+
+
+class PackedCutHook:
+    """Runs a cut hook on a packed cut (``multi_tensor=True``), on what the cut carries rather
+    than on the packed layout. The hook gets the per-sample floating-point values: the value
+    itself, in its shape and dtype, when there is one (a transformer's hidden state, the mask
+    rebuilt after the cut), else all of them flattened into one ``[B, N]`` tensor (so a
+    per-sample hook such as ``ClipNoise`` bounds everything one sample sends). The header,
+    integer and bool values and values repeated in every row cross unchanged.
+
+    The payload is ``[rest, tag, *hook payload]``: ``rest`` holds the columns the hook does
+    not see (header first, so the receiver reads the layout from it), ``tag`` says whether
+    the hook returned a list. The gradient of a packed tensor has no header (it is zero
+    there), so the receiving side keeps the header of each batch it decoded and writes it into
+    the ``rest`` of the gradient it sends back. Executors wrap hooks on packed cuts with this
+    (``wrap_packed_hooks``); it is not meant to be built by hand."""
+
+    _MAX_PENDING = 4096        # decoded batches awaiting their gradient (eval never sends one)
+
+    def __init__(self, hook):
+        self.hook = hook
+        self._heads = {}
+
+    def __getattr__(self, name):           # Recorder.records, ClipNoise.clip, ...
+        if name == "hook":
+            raise AttributeError(name)
+        return getattr(self.hook, name)
+
+    def __getstate__(self):
+        return {"hook": self.hook, "_heads": {}}
+
+    @staticmethod
+    def _view(t, sel):
+        if len(sel) == 1:
+            _, dtype, shape, start, w = sel[0]
+            return t[:, start:start + w].to(dtype).reshape(t.shape[0], *shape)
+        return torch.cat([t[:, s[3]:s[3] + s[4]] for s in sel], dim=1)
+
+    @staticmethod
+    def _rest(t, sel, width):
+        return torch.cat([t[:, a:b] for a, b in _keep(sel, width)], dim=1)
+
+    @staticmethod
+    def _merge(rest, part, sel, width):
+        out = rest.new_empty(rest.shape[0], width)
+        at = 0
+        for a, b in _keep(sel, width):
+            out[:, a:b] = rest[:, at:at + b - a]
+            at += b - a
+        part = part.reshape(rest.shape[0], -1).to(out.dtype)
+        at = 0
+        for s in sel:
+            out[:, s[3]:s[3] + s[4]] = part[:, at:at + s[4]]
+            at += s[4]
+        return out
+
+    @staticmethod
+    def _pack(rest, payload):
+        is_list = not isinstance(payload, torch.Tensor)
+        tag = torch.tensor([int(is_list)], dtype=torch.int64, device=rest.device)
+        return [rest, tag, *(payload if is_list else [payload])]
+
+    @staticmethod
+    def _unpack(payload):
+        rest, tag, *inner = payload
+        return rest, (inner if int(tag[0]) == 1 else inner[0]) if int(tag[0]) >= 0 else None
+
+    def encode(self, x, ctx):
+        sel, _, width = _parts(x)
+        if not sel:
+            return [x, torch.tensor([-1], dtype=torch.int64, device=x.device)]
+        return self._pack(self._rest(x, sel, width), self.hook.encode(self._view(x, sel), ctx))
+
+    def decode(self, payload, ctx):
+        rest, inner = self._unpack(payload)
+        if inner is None:
+            return rest
+        sel, head, width = _parts(rest)
+        if ctx.direction != "eval":
+            if len(self._heads) >= self._MAX_PENDING:
+                self._heads.pop(next(iter(self._heads)))
+            self._heads[ctx.batch_id] = rest[:1, :head]
+        return self._merge(rest, self.hook.decode(inner, ctx), sel, width)
+
+    def encode_grad(self, g, ctx):
+        header = self._heads.pop(ctx.batch_id, None)
+        if header is None:                     # nothing was hooked on the way forward
+            return [g, torch.tensor([-1], dtype=torch.int64, device=g.device)]
+        g = g.clone()
+        g[:, :header.shape[1]] = header.to(g)
+        sel, _, width = _parts(g)
+        return self._pack(self._rest(g, sel, width), self.hook.encode_grad(self._view(g, sel), ctx))
+
+    def decode_grad(self, payload, ctx):
+        rest, inner = self._unpack(payload)
+        if inner is None:
+            return rest
+        sel, head, width = _parts(rest)
+        out = self._merge(rest, self.hook.decode_grad(inner, ctx), sel, width)
+        out[:, :head] = 0                      # the header carries no gradient
+        return out
+
+
+def wrap_packed_hooks(hooks: dict, graph, partitions) -> dict:
+    """``{cut: hook}`` with the hooks on packed cuts wrapped in ``PackedCutHook`` (and the
+    ones on cuts that are no longer packed, after a re-plan, unwrapped)."""
+    packed = packed_cuts(graph, partitions)
+    out = {}
+    for k, h in hooks.items():
+        inner = h.hook if isinstance(h, PackedCutHook) else h
+        out[k] = PackedCutHook(inner) if k in packed else inner
+    return out
+
+
 def refuse_at_packed_cuts(graph, partitions, cuts, what: str) -> None:
-    """Cut hooks and privacy observers see one tensor per cut; at a packed cut that tensor is
-    the packed layout (header + every value), so they are refused there for now."""
+    """Privacy observers see one tensor per cut; at a packed cut that tensor is the packed
+    layout (header + every value), so they are refused there for now."""
     bad = sorted(set(cuts) & packed_cuts(graph, partitions))
     if bad:
         raise ValueError(f"{what} at cut {bad[0]}: several tensors cross it (multi_tensor=True), "
@@ -321,6 +468,14 @@ def nearest_valid_cuts(graph, targets: list) -> list:
     return out
 
 
+def _reads_input(graph) -> dict:
+    """``{index: bool}``: whether a node's output depends on the model input (``-1``: it is)."""
+    out = {-1: True}
+    for node in graph.nodes:
+        out[node.index] = node.takes_input or any(out[p] for p in node.predecessors)
+    return out
+
+
 def pack_cuts(graph, cuts: list, recompute: bool = True):
     """``(graph', cuts')``: ``graph`` with a send node after each cut that more than one value
     crosses (or whose single value is not the node right before it) and recv nodes after it;
@@ -331,9 +486,12 @@ def pack_cuts(graph, cuts: list, recompute: bool = True):
     valid are left alone, so a graph whose cuts are all valid comes back unchanged."""
     cuts = sorted(cuts)
     kind = recomputable(graph) if recompute else {}
+    data = _reads_input(graph)
     plan, rebuild = {}, {}
     for c in cuts:
         plan[c], rebuild[c] = _split_free(crossing(graph, c), graph.nodes, kind)
+        # a value computed from the input first: the packed tensor takes its batch size
+        plan[c].sort(key=lambda v: not data[v])
     if all(plan[c] == [c] and not rebuild[c] for c in cuts):
         return graph, cuts
     nodes = graph.nodes

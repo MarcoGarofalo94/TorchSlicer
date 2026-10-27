@@ -2116,9 +2116,11 @@ class WorkerServicer(
                 if moe is not None:
                     out.backward(grad_in, retain_graph=True)
                     moe.backward()
-                else:
+                elif out.requires_grad:   # else nothing here needs a gradient (SplitLayer.backward)
                     out.backward(grad_in)
                 grad = x_ref.grad if x_ref is not None else None
+                if grad is None and x_ref is not None and x_ref.requires_grad:
+                    grad = torch.zeros_like(x_ref)    # the input reached nothing differentiable
             if is_last_micro:
                 with self._profiler.phase("optimizer"):
                     self._optimize(batch_id)

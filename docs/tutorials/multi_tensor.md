@@ -59,7 +59,11 @@ SlicedModel(UNet, strategy=named, 3 slices, 7,379 params)
 The first cut sends `e2`'s output and `e1`'s (the skip the decoder reads at the end); the
 second sends `d2`'s and `e1`'s again, passed on by slice 1. A strategy works the same way:
 with `multi_tensor=True` every gap is a candidate, so `ts.slice(model, n=4,
-multi_tensor=True)` or `strategy="params"` can cut anywhere.
+multi_tensor=True)` or `strategy="params"` can cut anywhere, except between a weight and the
+node that reads it (`graph.multi_tensor_cuts()` lists the candidates). A parameter, or a
+table built only from parameters (a relative position bias), is not sent across a cut: it
+would cross once per sample, every batch, with its gradient back. Strategies that count
+nodes (`uniform`) move such a cut to the nearest candidate; `cuts=` refuses it.
 
 Training is unchanged and exact: the sliced model trains like the unsplit one.
 
@@ -68,6 +72,15 @@ x, y = torch.randn(8, 3, 32, 32), torch.randint(0, 3, (8, 32, 32))
 history = sliced.train([(x, y)], {"name": "SGD", "params": {"lr": 0.05}},
                        {"name": "CrossEntropyLoss"}, epochs=1)
 print(history[0]["bytes_fwd"])               # bytes sent forward at each cut
+```
+
+In a run started from a config file (`ts.run`, `python -m torchslicer launch`), set it in
+the YAML instead (or with the env var `PLANNING_MULTI_TENSOR=true`); a `multi_tensor=` passed
+to `ts.run` wins:
+
+```yaml
+planning:
+  multi_tensor: true
 ```
 
 ## What is sent
@@ -131,15 +144,29 @@ numbers, so their results are sent.
 ## See it
 
 `sliced.view(example_input=x)` draws the model's own graph with the cuts; each packed cut
-says how many values it sends and how many bytes. With `multi_tensor=True` every gap can be
-clicked, and the page writes the matching `ts.slice(..., multi_tensor=True)` call.
+says how many values it sends and how many bytes. With `multi_tensor=True` every candidate
+gap can be clicked, and the page writes the matching `ts.slice(..., multi_tensor=True)` call.
 `ts.trace(model).view(multi_tensor=True)` does the same before slicing.
+
+## Cut hooks
+
+Cut hooks (`Float16`, `Quantize`, `TopK`, `CircularConv`, `GaussianNoise`, `ClipNoise`,
+`Recorder`, your own) work on these cuts too, and see what the cut carries rather than the
+packed layout. The hook gets the per-sample floating-point values: the value itself, in its
+own shape, when there is one (a language model's hidden state, its mask rebuilt after the
+cut), else all of them flattened into one `[batch, N]` tensor. So a per-sample hook such as
+`ClipNoise` bounds everything one sample sends across the cut. The header, integer and bool
+values, and values repeated in every row cross unchanged.
+
+```python
+sliced = ts.slice(UNet(), cuts=["e2", "d2"], multi_tensor=True, cut_hooks=ts.Quantize(bits=8))
+```
 
 ## Not yet
 
-- Cut hooks (compression, noise, `ClipNoise`) and privacy attacks or defences can't be placed
-  on a packed cut: they would see the packed layout. Use them on cuts one tensor crosses;
-  `ts.slice` and `train` refuse the others with a clear error.
+- Privacy attacks and defences can't be placed on a cut that several tensors cross: they
+  would see the packed layout. Use them on cuts one tensor crosses; `train` refuses the
+  others with a clear error.
 - Capability-aware planning (strategies taking `nodes=`) and recovery re-plan among the cuts
   of the rewritten graph: the original cut points and the cuts one tensor crosses.
 - Under bf16 mixed precision, results across any cut can differ from one slice by rounding:

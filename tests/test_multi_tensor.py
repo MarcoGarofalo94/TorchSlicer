@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 import torchslicer as ts
 from torchslicer.config import RunConfig
-from torchslicer.core.multicut import _RecvCut, _SendCut, crossing, pack_cuts
+from torchslicer.core.multicut import _RecvCut, _SendCut, crossing, pack_cuts, packed_cuts
 
 SGD = {"name": "SGD", "params": {"lr": 0.05, "momentum": 0.9}}
 CE = {"name": "CrossEntropyLoss"}
@@ -244,6 +244,20 @@ def test_cluster_trains_like_unsplit(topology, setting, transport):
     _same(model, ref, atol=1e-5)
 
 
+def test_the_config_turns_multi_tensor_on_for_ts_run(tmp_path, monkeypatch):
+    make, x, y = _case("unet")
+    ref = _unsplit(_fresh(make), _batches(x, y))
+    (tmp_path / "c.yaml").write_text("planning:\n  multi_tensor: true\n")
+    assert RunConfig.load(str(tmp_path / "c.yaml")).planning.multi_tensor
+    monkeypatch.setenv("PLANNING_MULTI_TENSOR", "false")
+    assert not RunConfig.load(str(tmp_path / "c.yaml")).planning.multi_tensor
+    cfg = _cfg("centralized", "pipeline")
+    cfg.planning.multi_tensor = True
+    model = _fresh(make)
+    ts.run(lambda: model, lambda: _batches(x, y), run_config=cfg, verbose=False, cuts=["e2", "d2"])
+    _same(model, ref, atol=1e-5)
+
+
 # ── sessions, evaluation, tied weights ─────────────────────────────────────────
 
 def _cut_weights(cuts, mode, algorithm=None):
@@ -302,21 +316,167 @@ def test_tied_weights_across_packed_cuts_train_like_unsplit():
     assert model.head.weight is model.emb.weight
 
 
-# ── what isn't supported at a packed cut yet ───────────────────────────────────
+# ── real architectures (torchvision): every cut through their skips is exact ───
 
-@pytest.mark.parametrize("kw", [{"cut_hooks": {0: ts.Float16()}}, {"privacy": [ts.privacy.NormLabelAttack(cut=0)]}])
-def test_hooks_and_attacks_are_refused_at_a_packed_cut(kw):
-    make, x, y = _case("input_skip")
-    hooks = kw.pop("cut_hooks", None)
-    s = ts.slice(_fresh(make), cuts=["f"], multi_tensor=True, cut_hooks=hooks)
-    with pytest.raises(ValueError, match="packed"):
-        s.train(_batches(x, y), SGD, CE, epochs=1, **kw)
+def _tv(name):
+    tvm = pytest.importorskip("torchvision.models")
+    return {"resnet18": lambda: tvm.resnet18(num_classes=10),
+            "regnet": lambda: tvm.regnet_y_400mf(num_classes=10),     # in-place ReLU after cuts
+            "swin": lambda: tvm.swin_t(num_classes=10)}[name]         # weights read in forward
 
 
-def test_hooks_at_a_single_tensor_cut_of_the_same_model_still_work():
+@pytest.mark.parametrize("name", ["resnet18", "regnet", "swin"])
+def test_torchvision_models_cut_through_their_skips_train_like_unsplit(name):
+    torch.manual_seed(0)
+    base = _tv(name)().train()
+    g = torch.Generator().manual_seed(2)
+    x, y = torch.randn(4, 3, 64, 64, generator=g), torch.randint(0, 10, (4,), generator=g)
+    ref = copy.deepcopy(base)
+    torch.manual_seed(1)
+    _unsplit(ref, [(x, y)])
+    model = copy.deepcopy(base)
+    s = ts.slice(model, n=4, expand="all", multi_tensor=True)
+    assert packed_cuts(s.graph, s.partitions)
+    torch.manual_seed(1)
+    h = s.train([(x, y)], SGD, CE, epochs=1)
+    _same(model, ref, atol=1e-6)
+    # no weight crosses a cut, and the batch is the data's: a cut is a few activations
+    assert max(h[0]["bytes_fwd"]) < 2 * 2**20
+
+
+def test_a_weight_or_a_table_built_from_weights_never_crosses_a_cut():
+    class Biased(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w, self.table = nn.Parameter(torch.randn(6, 6)), nn.Parameter(torch.randn(6))
+            self.out = nn.Linear(6, 3)
+
+        def forward(self, x):
+            bias = self.table * 2                    # built from a weight only
+            h = torch.relu(x @ self.w) + bias
+            return self.out(h + x)
+
+    g = ts.trace(Biased())
+    anywhere = g.multi_tensor_cuts()
+    # input | table, mul | w | matmul, relu | add ...: mul (from a weight) is read by add, w by
+    # matmul, so only the gaps after input, add and add_1 are left (x crosses those as data)
+    assert [g.nodes[k].name for k in anywhere] == ["input", "add", "add_1"]
+    s = ts.slice(Biased(), n=3, multi_tensor=True)           # uniform counts nodes: snapped
+    assert set(s.graph.base_cuts) <= set(anywhere)
+    with pytest.raises(ValueError, match="a weight"):
+        ts.slice(Biased(), cuts=["mul"], multi_tensor=True)
+
+
+def test_a_slice_that_only_builds_the_mask_needs_no_backward():
+    torch.manual_seed(0)
+    ids, y = torch.randint(0, 50, (4, 12)), torch.randint(0, 50, (4, 12))
+    ref = TinyDecoder()
+    model = copy.deepcopy(ref)
+    opt = torch.optim.SGD(ref.parameters(), **SGD["params"])
+    F.cross_entropy(ref(ids), y).backward()
+    opt.step()
+    s = ts.slice(model, cuts=["triu", "add_2"], multi_tensor=True)
+    assert not list(s.slices()[0].parameters())              # slice 0: positions and the mask
+    s.train([(ids, y)], SGD, CE, epochs=1)
+    _same(model, ref)
+
+
+# ── cut hooks on a packed cut: the hook sees the values, not the layout ──────────
+
+class _Seen(ts.CutHook):
+    """Identity that records what it is given."""
+
+    def __init__(self):
+        self.seen = []
+
+    def encode(self, x, ctx):
+        self.seen.append((ctx.direction, tuple(x.shape), x.dtype))
+        return x
+
+    def encode_grad(self, g, ctx):
+        self.seen.append((ctx.direction, tuple(g.shape), g.dtype))
+        return g
+
+
+@pytest.mark.parametrize("name", MODELS)
+def test_an_identity_hook_on_packed_cuts_leaves_training_exact(name):
+    make, x, y = _case(name)
+    ref = _unsplit(_fresh(make), _batches(x, y))
+    model = _fresh(make)
+    hook = _Seen()
+    s = ts.slice(model, n=3, multi_tensor=True, cut_hooks=hook)
+    assert packed_cuts(s.graph, s.partitions)
+    s.train(_batches(x, y), SGD, CE, epochs=1)
+    _same(model, ref)
+    assert {d for d, _, _ in hook.seen} == {"forward", "backward"}
+
+
+def test_the_hook_sees_the_one_value_in_its_shape_or_all_values_flattened():
+    hook = _Seen()
+    torch.manual_seed(0)
+    ids, y = torch.randint(0, 50, (4, 12)), torch.randint(0, 50, (4, 12))
+    s = ts.slice(TinyDecoder(), cuts=["add_2"], multi_tensor=True, cut_hooks={0: hook})
+    s.train([(ids, y)], SGD, CE, epochs=1)
+    # the hidden state; the mask is rebuilt and the length crosses as bytes, unhooked
+    assert hook.seen == [("forward", (4, 12, 16), torch.float32), ("backward", (4, 12, 16), torch.float32)]
     make, x, y = _case("unet")
-    s = ts.slice(_fresh(make), cuts=["e1", "mid"], multi_tensor=True, cut_hooks={0: ts.Float16()})
-    assert s.train(_batches(x, y), SGD, CE, epochs=1)[0]["bytes_fwd"][0] > 0
+    hook = _Seen()
+    s = ts.slice(_fresh(make), cuts=["e2"], multi_tensor=True, cut_hooks={0: hook})
+    s.train(_batches(x, y)[:1], SGD, CE, epochs=1)
+    # e2 [4, 8, 4, 4] and e1 [4, 4, 8, 8] as one [4, 128 + 256] tensor per direction
+    assert hook.seen == [("forward", (4, 384), torch.float32), ("backward", (4, 384), torch.float32)]
+
+
+def test_a_per_sample_hook_bounds_everything_one_sample_sends():
+    make, x, y = _case("unet")
+    hook = ts.Recorder(what=("forward",))
+    s = ts.slice(_fresh(make), cuts=["e2"], multi_tensor=True,
+                 cut_hooks={0: ts.Chain([ts.ClipNoise(clip=0.5, noise_multiplier=0.0), hook])})
+    s.train(_batches(x, y)[:1], SGD, CE, epochs=1)
+    z = hook.records[0][2]
+    assert z.shape == (4, 384) and torch.all(z.norm(dim=1) <= 0.5 + 1e-5)
+
+
+def _hooked(run, hook_fn, **kw):
+    make, x, y = _case("unet")
+    model = _fresh(make, bn=False)
+    run(model, _batches(x, y), hook_fn, **kw)
+    return model
+
+
+def _local_run(model, data, hook_fn, n_micro=1):
+    ts.slice(model, cuts=["e2", "d2"], multi_tensor=True, cut_hooks=hook_fn()).train(
+        data, SGD, CE, epochs=1, n_micro_batches=n_micro)
+
+
+@pytest.mark.parametrize("hook_fn", [lambda: ts.Quantize(bits=8), lambda: ts.CircularConv(ratio=2, seed=3),
+                                     lambda: ts.Chain([ts.Float16(), ts.TopK(ratio=0.5, grad=True)])])
+def test_a_lossy_hook_on_packed_cuts_trains_the_same_everywhere(hook_fn):
+    ref = _hooked(_local_run, hook_fn)
+    plain = _hooked(_local_run, lambda: None)
+    assert any(not torch.allclose(a, b) for a, b in zip(ref.parameters(), plain.parameters()))
+    _same(_hooked(_local_run, hook_fn, n_micro=2), ref, atol=1e-5)   # GPipe: micro-batches of 2
+
+    def cluster(model, data, hook_fn, topology, setting, transport):
+        ts.run(lambda: model, lambda: data, run_config=_cfg(topology, setting, transport), verbose=False,
+               cuts=["e2", "d2"], multi_tensor=True, cut_hooks=hook_fn())
+    for topo in [("centralized", "pipeline", "grpc"), ("p2p", "vanilla", "tcp")]:
+        _same(_hooked(cluster, hook_fn, topology=topo[0], setting=topo[1], transport=topo[2]), ref, atol=1e-5)
+
+
+def test_hook_bytes_at_a_packed_cut_are_what_the_hook_sends():
+    make, x, y = _case("unet")
+    plain = ts.slice(_fresh(make), cuts=["e2"], multi_tensor=True).train(_batches(x, y), SGD, CE, epochs=1)
+    half = ts.slice(_fresh(make), cuts=["e2"], multi_tensor=True, cut_hooks=ts.Float16()).train(
+        _batches(x, y), SGD, CE, epochs=1)
+    assert 0.45 < half[0]["bytes_fwd"][0] / plain[0]["bytes_fwd"][0] < 0.6
+
+
+def test_attacks_are_refused_at_a_packed_cut():
+    make, x, y = _case("input_skip")
+    s = ts.slice(_fresh(make), cuts=["f"], multi_tensor=True)
+    with pytest.raises(ValueError, match="packed"):
+        s.train(_batches(x, y), SGD, CE, epochs=1, privacy=[ts.privacy.NormLabelAttack(cut=0)])
 
 
 # ── recovery: survivors re-split the rewritten graph at its packed cuts ────────
