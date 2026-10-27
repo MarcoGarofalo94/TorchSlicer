@@ -597,6 +597,16 @@ shown in a Flower-based SplitFed baseline.
     export tracer gives the same partitions as fx on every model fx handles today, and traces at least one
     model that currently needs `pack=` (record which ones still don't). Benchmark eager vs compiled step time
     and compile time on the M9 transport models (mean ± std, ≥3 seeds); a slowdown is a valid result.
+  - **Export tracer started 2026-10-27** (owner: "address the torch.export and the ones"), branch
+    `feat/m17-export-tracer` forked from `feat/m18-multi-tensor-cuts` (328fff6). Done: `tracer=`
+    (`auto` = fx then export with `example_input`), ATen graph with scopes and byte sizes,
+    `cheapest_cuts`, mode-dependent ops, in-place writes (`no_cut`), restore, tutorial
+    `docs/tutorials/export.md`, `tests/test_export_tracer.py`, sweep `--tracer export`; factories under fx.
+    HF GPT-2/Llama/Mixtral slice without `pack=`, bitwise. Deviation from the planned test: export
+    graphs are ATen-level, so partitions differ from fx's; equality is checked on training results
+    instead. Not done: per-slice `torch.compile`, comm/compute overlap, FLOPs costs from the symbolic
+    shapes (only bytes used), grouping ATen nodes back into modules, multi-input models,
+    `nn.TransformerEncoder` under export (torch limitation), maxvit_t export time.
 - **M18, multi-tensor cuts** (added 2026-10-22, owner decision; after the FGCS special-issue paper, not placed in the
   order yet). Today exactly one tensor crosses each cut (`BaseSplitter.validate()`), so U-Net-style encoder-decoder
   CNNs (skips at every level: only cuts near the ends are valid), encoder-decoder transformers (T5, Whisper, BART:
@@ -639,6 +649,7 @@ shown in a Flower-based SplitFed baseline.
       without `pack=`; header overhead (per row) could be per tensor for large batches of small values.
 
 ## Handoff (read this first if you are a new session)
+**2026-10-27: M17 export tracer on `feat/m17-export-tracer`** (from the M18 branch, not pushed): see M17 above; validation.md #58–#62.
 **2026-10-27: M18 (multi-tensor cuts + recompute) done on `feat/m18-multi-tensor-cuts`** (forked from `refinement`,
 not pushed): see M18 status above; 532 tests (cut hooks at packed cuts, `planning.multi_tensor`, 18-model sweep
 with fixes #54–#57), matrix new models CPU 45/45 (rerun after the fixes), CUDA 42/42. Open owner decisions:

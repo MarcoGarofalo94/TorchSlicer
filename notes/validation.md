@@ -2159,3 +2159,66 @@ local, 1e-5 elsewhere). CUDA (A100) fp32: bitwise equal to the same model in one
     Proxy ints); `x.new_ones(T, T)` is. HF models: still TraceError (need `pack=` / M17 tracer).
   Matrix rerun after the fixes (CPU, MATRIX_NCCL=1, unet/encdec/maskdec): 45/45 OK. Full suite 532
   passed, 1 skipped.
+
+## M17: the `torch.export` tracer, and tensor factories under fx (2026-10-27, branch `feat/m17-export-tracer`)
+
+Owner: "now create new branch and address the torch.export and the ones". Branch forked from
+`feat/m18-multi-tensor-cuts` (328fff6). Compiled slices (the other half of M17) not started.
+
+- **Factories under fx ("the ones"):** `torch.ones(T, T)` with `T = x.size(1)` raised TraceError (a C
+  factory gets Proxy ints, no `__torch_function__`). Fix: `_traced_factories` patches `torch.ones/zeros/
+  empty/full/arange/eye/linspace/logspace/rand*/tensor/as_tensor/scalar_tensor` while tracing: with a
+  Proxy argument they record a `call_function` node on the real function (pickles by reference), else
+  run as usual; restored after tracing. Under `multi_tensor` such a mask is recomputed after the cut
+  (`ones.cut0`). Test `test_factories_called_with_traced_sizes_become_graph_nodes`.
+- **The export tracer** (`core/export_graph.py`, `ts.slice/trace(tracer="auto"|"fx"|"export",
+  example_input=)`; `auto` default = fx, then export when fx raises and `example_input` is given, so
+  graphs of fx-traceable models are unchanged). Non-strict `torch.export` (training IR) of
+  `_Root(model, key)` (output reduced to one tensor: tensor / `"logits"` / the only tensor; found by
+  one eval forward under no_grad), `Dim.AUTO` on every input dim, whole build under `fork_rng`, the
+  model's mode restored. One node per ATen op (`_OpWrapper`), params as `_AttrWrapper` (the model's
+  own Parameter objects, resolved by FQN) placed before each user; `_InputGuard` node 0; `scope` from
+  `nn_module_stack` (named cuts by module name); `LayerNode.out_bytes` from the symbolic shapes.
+- **Exactness (one SGD step vs unsplit, CPU):** HF GPT-2 / Llama / Mixtral (tiny, transformers 5.20.1)
+  bitwise at n=2,3,4 with dropout, no `pack=`; torchvision sweep `--tracer export`: resnet18/50,
+  mobilenet_v3_small, efficientnet_b0, densenet121, convnext_tiny, regnet_y_400mf, shufflenet_v2,
+  squeezenet, googlenet, vit_b_16, swin_t, fcn_resnet50, lraspp, minigpt all within 6e-8 (most 0).
+  Export cannot trace `nn.TransformerEncoder`/`nn.Transformer` (torch's `_detect_is_causal_mask`
+  compares mask values: GuardOnDataDependentSymNode); fx can, `auto` uses fx. maxvit_t (224 px) did
+  not finish exporting in the sweep's 40 min budget; not investigated further.
+  BN running stats + `num_batches_tracked` equal; eval through the slices = `model.eval()` output.
+  Centralized gRPC, P2P TCP, GPipe, offload cpu/disk (CUDA), CUDA local (exported on CPU) equal.
+- **Bugs found while building it (fixed before landing):**
+  - **#58 view on a layout the export didn't see.** `x.contiguous().view(...)` is traced as a bare
+    `aten.view` when the fake kernels say `x` is contiguous (`contiguous()` dispatches nothing then);
+    on a P2P worker (`use_deterministic_algorithms`) another SDPA kernel returned another layout and
+    `view` raised "view size is not compatible". Fix: `aten.view.default` runs as `aten.reshape`
+    (the same view where view works, a copy where it would fail). Test: P2P cluster + restore tests.
+  - **#59 checkpoint layout written into a missing dir** (pre-existing, not export): with
+    `checkpoint.enabled` and `logging.enabled: false`, `DistributedExecutor.teardown` wrote
+    `checkpoint_layouts.json` into `checkpoint.dir/run_id`, which nothing had created: FileNotFoundError
+    at the end of a finished run. Fix: `_save_checkpoint_layout` makes the dir. Test
+    `test_restore_exports_the_model_again`.
+  - **#60 uniform cuts inside a layer on an ATen graph.** Counting ATen nodes put GPT-2's cut after
+    `tanh` in the MLP (73 KiB vs 8 KiB hidden), Mixtral's in the expert routing (1.1 MB). Fix:
+    `cheapest_cuts`: with `out_bytes` known, each strategy cut (not `cuts=`) moves to the gap sending
+    the fewest bytes (after recompute) within half the distance to its neighbours, ties to the
+    nearest. Now hidden + header (8.9 KiB) everywhere. Unknown (unbacked) sizes count as infinite.
+  - **#61 a size read from a tensor in block 0 by every later block.** Export binds a symbolic size
+    (`2*B` of MHA's head reshape) to `sym_size(t)` placed before its first use in block 1, so `t` (a
+    [B, T, d] tensor) crossed the cut (15.8 KiB vs 4.0). Fix: size reads move right after their
+    tensor; only the number crosses (header). Also `_localize_sizes` re-reads a size from the
+    nearest tensor that has it.
+  - **#62 in-place writes into intermediates.** swin's mask `m[h, w] = count` is `fill_` on a slice
+    of a `new_zeros` with the result unused: first refused, then handled: a write into a tensor read
+    later is kept live (fixpoint), the written tensor is never recomputed after a cut (`mutated`),
+    and gaps between it and its write are `ModelGraph.no_cut` (a copy sent across would miss the
+    write); `no_cut` survives `pack_cuts`. fx refuses the same code (Proxy item assignment), so no
+    silent drop there. Test `test_a_tensor_written_in_place_is_never_cut_from_its_write`.
+  - Test-only: RNG check took `torch.randn` for the example after reading the RNG state.
+- Mode handling (the graph is the training forward): dropout / feature/alpha dropout / batch_norm
+  `train` flag and SDPA `dropout_p` follow the slice's `training`; in-place buffer updates with an
+  unused result (BN `num_batches_tracked += 1`) are skipped in eval; other `self.training` branches
+  are frozen (documented). `device=` constants follow the slice (non-persistent `_device` buffer).
+- Restore: `export_input` (shape, dtype) recorded in the manifest and in `checkpoint_layouts.json`;
+  `restore_model_from_run` exports again on zeros of that shape (bitwise equal in the test).
