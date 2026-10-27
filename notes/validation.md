@@ -2114,3 +2114,48 @@ local, 1e-5 elsewhere). CUDA (A100) fp32: bitwise equal to the same model in one
   Not covered: `RunConfig` has no `multi_tensor` key (Python `ts.slice`/`ts.run(**kwargs)`
   only). Full suite green (517 before + 1 new); `test_transport.py::test_ipc_matches_tcp_on_gpu`
   failed once in the full run and passed alone and in its file (flaky, untouched code).
+- **Cut hooks at packed cuts (2026-10-27, owner: "need to support cut hooks"):** `PackedCutHook`
+  (`core/multicut.py`) wraps the hook of a packed cut (`wrap_packed_hooks`, in every executor once
+  the partitions are final, and again after a re-plan / recovery; `SplitServer`/`SplitClient`). The
+  hook sees the per-sample float values: the value itself in its shape and dtype when there is one
+  (decoder cut: the hidden state `[4, 12, 16]`, the mask is rebuilt), else all of them flattened to
+  `[B, N]` (U-Net: e2 + e1 = `[4, 384]`), so `ClipNoise` bounds the joint per-sample norm (DP
+  semantics of the whole message). Header, int/bool and repeated values pass unchanged. Payload
+  `[rest, tag, *hook payload]`; the gradient of a packed tensor is zero on the header, so the
+  receiving side keeps each decoded batch's header (by batch id, capped at 4096 for eval) and writes
+  it into the gradient's `rest`. Tests: identity hook exact on 3 models; Quantize / CircularConv /
+  Float16+TopK(grad) equal local = GPipe = centralized gRPC = P2P TCP; Float16 halves the bytes;
+  SplitServer + CircularConv = local. Config key `planning.multi_tensor` (env
+  `PLANNING_MULTI_TENSOR`) for `ts.run` / `run_p2p` / the launcher.
+- **18-model sweep (2026-10-27):** torchvision resnet18/50, mobilenet_v3_small, efficientnet_b0,
+  densenet121, convnext_tiny, regnet_y_400mf, shufflenet_v2, squeezenet, googlenet, vit_b_16 (64px),
+  swin_t, maxvit_t, fcn_resnet50, lraspp_mobilenet_v3; a hand-written GPT (SDPA, causal mask, tied
+  head), `nn.Transformer` enc-dec, `nn.TransformerEncoder` GPT with dropout. `expand="all"`,
+  `ts.slice(n=2|4, multi_tensor=True)`, one SGD step vs unsplit: all within 9e-7 (most bitwise),
+  Quantize(8) on every cut runs. Single-tensor cuts available without M18: fcn/lraspp 1 of ~190
+  gaps, densenet 24 of 431, minigpt 5 of 103. Bugs found (all M18, fixed):
+  - **#54 recv returned a view of the received tensor (silent wrong gradients).** `_build` did
+    `cols.to(dtype)`, a no-op for the wire dtype, so a value was a view into the slice's input leaf;
+    `ReLU(inplace=True)` right after the cut: 8 models raised "a view of a leaf Variable ... in-place",
+    and regnet_y_400mf trained **silently wrong** (max |Δ| 1.7e-3 vs unsplit, 0 after the fix).
+    Fix: `cols.to(dtype, copy=True)`. Test: torchvision resnet18/regnet/swin exactness.
+  - **#55 batch size taken from a parameter.** The packed batch was the first dim of the first
+    crossing value; on swin_t the uniform cut fell after `attn.proj.weight` [384, 384], so batch = 384
+    and every other value was repeated 384 times: 763 MB at one cut. Fix: `pack_cuts` orders values
+    so one computed from the input comes first (`_reads_input`).
+  - **#56 weights crossing a cut.** `multi_tensor=True` allowed every gap, including between a
+    parameter (`_AttrWrapper`) or a table built only from weights (swin's relative position bias)
+    and its reader: sent once per sample every batch, gradient back. Fix: `ModelGraph.multi_tensor_cuts()`
+    blocks those gaps; `uniform` (counts nodes, ignores valid cuts) is snapped with
+    `nearest_valid_cuts`; `cuts=` refuses with "a weight ... would cross it". swin_t last cut
+    763 MB → 9.6 MB (#55) → 193 KiB. Test `test_a_weight_or_a_table_built_from_weights_never_crosses_a_cut`.
+  - **#57 a slice whose output needs no gradient crashed in backward** ("element 0 of tensors does not
+    require grad"): uniform cut a TransformerEncoder GPT so slice 0 only built the causal mask from
+    the input's shape. Not M18-specific (any parameter-free slice on integer input). Fix:
+    `SplitLayer.backward` and the worker's backward skip `out.backward` when `out` doesn't require
+    grad; the worker sends zeros when its input reached nothing differentiable. Test
+    `test_a_slice_that_only_builds_the_mask_needs_no_backward`.
+  - Not a bug: `torch.ones(T, T)` with `T` from `x.shape` is not traceable by torch.fx (factory with
+    Proxy ints); `x.new_ones(T, T)` is. HF models: still TraceError (need `pack=` / M17 tracer).
+  Matrix rerun after the fixes (CPU, MATRIX_NCCL=1, unet/encdec/maskdec): 45/45 OK. Full suite 532
+  passed, 1 skipped.
