@@ -324,15 +324,22 @@ class ModelGraph:
             ) from e
 
     @classmethod
-    def from_export(cls, network: nn.Module, example_input) -> "ModelGraph":
-        """Build the graph with ``torch.export`` on ``example_input`` (core/export_graph.py):
-        one node per ATen op, for models ``torch.fx`` can't trace. Raises ``TraceError``."""
+    def from_export(cls, network: nn.Module, example_input, prefer: str = "export",
+                    expand=None) -> "ModelGraph":
+        """Build the graph on ``example_input`` with ``torch.export`` (one node per ATen op)
+        and ``torch.fx``, module by module (core/hybrid.py): each module is opened by the
+        ``prefer``red tracer, else by the other one, else kept whole. With ``prefer="fx"``,
+        ``expand`` says which modules to open (``"all"`` for ``prefer="export"``). Raises
+        ``TraceError``."""
         from .export_graph import export_graph
+        expand_set = "all" if prefer == "export" else cls._normalize_expand(network, expand)
         cuda = isinstance(example_input, torch.Tensor) and example_input.is_cuda
         with torch.random.fork_rng(devices=[example_input.device] if cuda else []):
-            graph = export_graph(network, example_input)     # leaves the random state alone
+            graph = export_graph(network, example_input, prefer, expand_set)  # leaves the random state alone
         graph.export_input = {"shape": list(example_input.shape),
                               "dtype": str(example_input.dtype).removeprefix("torch.")}
+        if prefer != "export":
+            graph.export_input.update(prefer=prefer, expand=graph.expand)
         return graph
 
     @staticmethod

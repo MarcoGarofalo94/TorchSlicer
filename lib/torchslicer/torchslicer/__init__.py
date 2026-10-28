@@ -438,8 +438,8 @@ def trace(model, expand=None, pack=None, *, tracer="auto", example_input=None) -
         except TraceError as fx_error:
             if tracer == "fx" or example_input is None:
                 raise
-            try:
-                graph = ModelGraph.from_export(model, example_input)
+            try:      # fx first, torch.export for the modules fx can't open
+                graph = ModelGraph.from_export(model, example_input, prefer="fx", expand=expand)
             except TraceError as export_error:
                 raise TraceError(f"{fx_error.args[0].split(chr(10))[0]}\n"
                                  f"{export_error.args[0]}") from export_error
@@ -510,8 +510,11 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
         tracer:   How the graph is built. ``"fx"``: ``torch.fx`` (no input needed).
                   ``"export"``: ``torch.export`` on ``example_input``, one node per
                   ATen op; it traces models fx can't (Hugging Face transformers).
-                  ``"auto"`` (default): fx, then export if fx fails and
-                  ``example_input`` is given. See docs/tutorials/export.md.
+                  A submodule export can't trace is opened with fx instead, or
+                  kept whole. ``"auto"`` (default): fx; if it fails and
+                  ``example_input`` is given, fx again with export for each module
+                  fx can't open (``expand`` says which to open). See
+                  docs/tutorials/export.md.
 
     Serialization constraint
     ------------------------

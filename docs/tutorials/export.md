@@ -51,12 +51,69 @@ and TorchSlicer's own modules, so workers need nothing but `torchslicer` and `to
 
 `tracer=` takes `"fx"`, `"export"` or `"auto"`, in `ts.slice` and `ts.trace`:
 
-- `"auto"` (the default) traces with fx; if fx fails and you passed `example_input=`, it
-  traces with export. Models fx handles get the same graph as before.
-- `"export"` always uses export. Use it when your model wraps another one as a child, as
-  `CausalLM` above: fx doesn't trace into children (unless `expand=`), so it "succeeds" with
-  the whole wrapped model as one node.
+- `"auto"` (the default) traces with fx. If fx fails and you passed `example_input=`, it
+  traces again, module by module: fx where it can, export for each module fx can't open
+  (next section). Models fx handles get the same graph as before.
+- `"export"` exports the whole model, and uses fx only for the submodules export can't
+  trace. Use it when your model wraps another one as a child, as `CausalLM` above: fx
+  doesn't trace into children (unless `expand=`), so it "succeeds" with the whole wrapped
+  model as one node.
 - `"fx"` never uses export.
+
+## Mixing fx and export
+
+Each tracer fails on code the other one handles. fx reads `forward` symbolically, so it
+can't branch on a size (`if x.shape[1] > 8:`) or pass `**kwargs` on; export runs `forward`
+on fake tensors, so it can't read a tensor's values (`nn.TransformerEncoder` checks
+whether its mask is causal; an op from a C++ extension has no shape function). A model
+can have both kinds of code in different modules:
+
+```python
+class Windowed(nn.Module):                  # fx can't: a branch on the length
+    def __init__(self):
+        super().__init__()
+        self.mlp = nn.Sequential(nn.Linear(32, 64), nn.GELU(), nn.Linear(64, 32))
+
+    def forward(self, h):
+        if h.shape[1] > 8:
+            h = h + F.pad(h, (0, 0, 1, 0))[:, :h.shape[1]]
+        return h + self.mlp(h)
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.emb = nn.Embedding(64, 32)
+        self.mid = nn.Sequential(Windowed(), Windowed())
+        layer = nn.TransformerEncoderLayer(32, 2, 64, batch_first=True)
+        self.enc = nn.TransformerEncoder(layer, 2)   # export can't: it reads the mask's values
+        self.head = nn.Linear(32, 64)
+
+    def forward(self, ids):
+        T = ids.size(1)
+        mask = torch.full((T, T), float("-inf")).triu(1)
+        return self.head(self.enc(self.mid(self.emb(ids)), mask=mask)).transpose(1, 2)
+
+model, ids = Model(), torch.randint(0, 64, (8, 16))
+sliced = ts.slice(model, n=4, multi_tensor=True, expand="all", example_input=ids)
+```
+
+TorchSlicer opens each module with one tracer: the preferred one (fx for `"auto"`, export
+for `"export"`), and if that fails on the module's own code, the other one. Here fx traces
+`Model` and `mid`, export traces each `Windowed`, and `enc`, which neither can open,
+stays one node. It goes as deep as needed: an exported module whose child export can't
+trace has that child traced with fx, whose own children fx can't open are exported, and
+so on. Which module stopped a tracer is read from where the error was raised.
+
+- A module export traces is traced on the inputs it got in an eager run of the model on
+  `example_input` (so `Windowed` above is exported on its hidden state).
+- Sizes that module's export assumed (`T > 8` above) are checked at run time, before the
+  module's first op: an input outside them raises an error that says to trace again,
+  instead of taking the wrong branch.
+- A module kept whole inside an exported graph is traced as one opaque call, with output
+  shapes inferred from the eager run; if a later input gives other shapes, it raises the
+  same kind of error.
+- `summary()` and `valid_cuts()` show the result: cuts can fall inside any module some
+  tracer opened (`cuts=["mid.1.l1"]`), not inside one kept whole.
 
 ## What the graph looks like
 
@@ -100,8 +157,8 @@ is fixed at its training value.
 `ts.restore_model_from_run(model, run_dir)` exports the model again with the recorded input
 shape, so it gets the same graph; nothing to pass.
 
-## When export fails too
+## When both fail
 
-Export can't trace control flow on values (`if x.sum() > 0:`), or a model with several
-inputs. Then use `pack=` ([pack.md](pack.md)). `ts.TraceError` says which tracer failed and
-why.
+A module neither tracer can open stays one node; if that is the whole model (fx fails on
+`forward`, and so does export), `ts.TraceError` says why each failed. Export can't take a
+model with several inputs either. Then use `pack=` ([pack.md](pack.md)).
