@@ -2222,3 +2222,48 @@ Owner: "now create new branch and address the torch.export and the ones". Branch
   are frozen (documented). `device=` constants follow the slice (non-persistent `_device` buffer).
 - Restore: `export_input` (shape, dtype) recorded in the manifest and in `checkpoint_layouts.json`;
   `restore_model_from_run` exports again on zeros of that shape (bitwise equal in the test).
+
+### M17: fx and export mixed, module by module (2026-10-28, branch `feat/m17-export-tracer`)
+- Owner asked for a general mix (fx up to a block, export inside it, back to fx, ...). Design
+  (`core/hybrid.py`): each module call is opened by the preferred tracer (`"auto"`: fx;
+  `"export"`: export), else by the other, else kept whole. fx regions block a child whose own
+  code fx can't trace (a leaf; then exported on the inputs it got in an eager run of the
+  enclosing module); export regions turn a child export can't trace into a `torchslicer::opaque`
+  custom op (fake impl: output shapes inferred from an eager call as functions of the input
+  sizes), then open it with fx. The culprit is the innermost module frame in the traceback. All
+  regions are inlined in execution order into one fx graph; `export_graph.convert` turns it into a
+  `ModelGraph` (export nodes as before, fx nodes with `_node_to_module`, kept-whole calls as
+  `_CallWrapper` / `_OpaqueCall`). Structured outputs: `_Struct` resolves `out[0]` / `out.logits`
+  to the leaf, `_rebuild` otherwise. Restore: `export_input` records `prefer`/`expand`.
+- Pure export graphs are unchanged: node-by-node dump (names, types, predecessors, scopes,
+  out_bytes, modules, no_cut) equal to the previous commit on resnet18, swin_t, minigpt, hf_gpt2,
+  hf_llama, densenet121, fcn_resnet50; hf_mixtral differs only in `(2*B)*T` vs `(2*T)*B` (factor
+  order of one symbolic product; old code is deterministic, so it is the new export wrapper's
+  symbol numbering).
+- Sweep with `--tracer export`: `torch_gpt` and `torch_encdec` (export failed before:
+  `nn.TransformerEncoder`'s causal-mask check) now exact (0.0), the encoder kept whole.
+- Bugs found:
+  - **#63 culprit read from a stale exception.** `ts.trace` runs the mixed tracer inside the
+    `except` handling fx's failure; Python chains that error as `__context__` of every new one,
+    so the culprit search found `mid.0` (from fx's failure) for export's failure in `enc`, and
+    gave up. Fix: exceptions in flight when the build starts (`sys.exception()` chain) are not
+    searched.
+  - **#64 a nested export silently wrong outside the sizes it assumed.** A block with
+    `if T > 8:` exported on T=16 inside an fx graph ran the T > 8 branch for T=5: only the root
+    input had a guard. Fix: every nested export's inputs get a `_check_input` node: fixed sizes,
+    ranges from `range_constraints`, and equalities between inputs (a size that is one symbol
+    for two inputs, e.g. an int argument equal to a tensor's length). Kept-whole calls inside an
+    export check their output shapes against the inferred rule (`_OpaqueCall`). Tests
+    `test_structured_outputs_ints_and_shared_modules`, `test_inferred_shapes_are_checked_when_the_input_changes`.
+  - Cosmetic: a failed export prints its partial graph to stderr (torch `_trace.py`); attempts
+    now buffer stderr and drop that dump.
+- Tests `tests/test_hybrid_tracer.py` (26): auto exports what fx can't open, export keeps whole
+  what neither opens, alternation fx -> export -> fx -> export (`torch.fx.wrap`ped value read),
+  training equals unsplit (3 models x 2 tracers x n=2,4), a named cut inside an exported block,
+  cuts send the hidden state, tuple outputs + int and keyword arguments + a module called twice,
+  inferred-shape check, model/RNG/mode untouched and the opaque patch removed, centralized gRPC +
+  P2P TCP, restore for both tracers.
+- Limits: a module kept whole inside an export has output shapes inferred from one eager call
+  (an output size that is a function other than "equal to an input size" is fixed, and checked);
+  non-tensor outputs of exported modules are constants from the eager run; eager runs are in eval
+  mode, so a module whose shapes differ in training would mislead the export.

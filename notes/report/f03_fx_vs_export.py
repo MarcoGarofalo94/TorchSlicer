@@ -8,8 +8,9 @@ cuts land, what crosses them, and whether training stays exact.
 3. Same named cuts, both graphs: what crosses, and training equals unsplit.
 4. Language models (multi_tensor=True): fx vs export on a model fx can trace; GPT-2 with pack=
    vs export (no pack).
-5. Mixing them: a model with one block only export can open and one only fx can trace. What works
-   today, and what doesn't.
+5. Mixing them, module by module: a model with blocks only export can open and a block only fx can
+   trace. Which tracer opened which module, where cuts can go, training equals unsplit; then a
+   model that alternates fx -> export -> fx -> export.
 
 Run: .venv/bin/python notes/report/f03_fx_vs_export.py
 """
@@ -241,23 +242,113 @@ for label, make in [("pack=pack_gpt2", lambda m: ts.slice(m, n=3, pack=pack_gpt2
           f"max |w - unsplit| = {max_diff(m, ref):.1e}")
 
 # ── 5. Mixing the tracers ──────────────────────────────────────────────────────
-section("5. Hybrid: Windowed needs export, nn.TransformerEncoder needs fx")
-x = IDS
-for label, kw in [("fx", dict(tracer="fx")),
-                  ('fx, expand=["mid"]', dict(tracer="fx", expand=["mid"])),
-                  ('fx, expand=["mid.0"]', dict(tracer="fx", expand=["mid.0"])),
-                  ('fx, expand=["enc"]', dict(tracer="fx", expand=["enc"])),
-                  ("export", dict(tracer="export", example_input=x)),
-                  ("auto", dict(example_input=x))]:
+section("5a. Hybrid: Windowed needs export, nn.TransformerEncoder can't be opened by either")
+from torchslicer.core.export_graph import _OpWrapper    # noqa: E402
+from torchslicer.core.hybrid import _OpaqueCall, _check_input   # noqa: E402
+
+
+def origin(node):
+    """Which tracer made a node: an ATen op from export, a module/function call from fx, or a
+    module kept whole."""
+    m = node.module
+    if isinstance(m, _OpaqueCall):
+        return "kept whole (opaque in export)"
+    if isinstance(m, _OpWrapper):
+        return "export"
+    if getattr(m, "target", None) is _check_input:
+        return "size check"
+    return "fx" if type(m).__module__.startswith(("torch.nn", "torchslicer.core.model_graph")) else "other"
+
+
+def by_module(g, modules):
+    rows = {}
+    for path in modules:
+        nodes = [n for n in g.nodes if path in n.scope or n.name == path]
+        kinds = sorted({origin(n) for n in nodes if type(n.module).__name__ != "_AttrWrapper"})
+        rows[path] = f"{len(nodes):3d} nodes, {', '.join(kinds)}"
+    return rows
+
+
+x, HYBRID = IDS, Hybrid()
+for label, kw in [("fx", dict(tracer="fx", expand="all")),
+                  ('auto, expand="all"', dict(expand="all", example_input=x)),
+                  ("export", dict(tracer="export", example_input=x))]:
     try:
-        g = ts.trace(fresh(Hybrid()), **kw)
-        print(f"  {label:22s} {len(g):3d} nodes: {g.names()}")
+        g = ts.trace(fresh(HYBRID), **kw)
     except Exception as e:
-        print(f"  {label:22s} {short(e)}")
-print("""
-- fx traces Hybrid with its children as nodes; expand=["mid"] opens the Sequential, so a cut can
-  go between the two Windowed blocks. Inside a Windowed block (`if T > 8`) or inside the encoder,
-  fx fails.
-- export can open Windowed, but fails on the whole model because of the encoder.
-- What would cut everywhere: fx for the model, export for Windowed. Not supported today: a graph
-  comes from one tracer.""")
+        print(f"  {label:20s} {short(e)}")
+        continue
+    print(f"  {label:20s} {len(g):3d} nodes, source={g.source}, single-tensor cuts {len(g.valid_cuts())}, "
+          f"multi-tensor gaps {len(g.multi_tensor_cuts())}")
+    for path, row in by_module(g, ["emb", "mid.0", "mid.1", "enc", "head"]).items():
+        print(f"      {path:6s} {row}")
+
+print("\nTraining, n=4, multi_tensor=True, and a named cut inside mid.1 (between its l1 and l2):")
+ref = train_unsplit(fresh(HYBRID), TOK_DATA)
+for label, make in [('auto, expand="all", n=4', lambda m: ts.slice(m, n=4, multi_tensor=True, expand="all", example_input=IDS)),
+                    ("export, n=4", lambda m: ts.slice(m, n=4, multi_tensor=True, tracer="export", example_input=IDS)),
+                    ('auto, cuts=["mid.0", "mid.1.l1"]', lambda m: ts.slice(m, cuts=["mid.0", "mid.1.l1"], multi_tensor=True,
+                                                                     expand="all", example_input=IDS))]:
+    m = fresh(HYBRID)
+    s = make(m)
+    train_sliced(s, TOK_DATA)
+    print(f"  {label:32s} cuts send {kib(cut_bytes(s, IDS))}, max |w - unsplit| = {max_diff(m, ref):.1e}")
+
+print("\nSizes the exported blocks assumed are checked: Windowed was exported at T=16, so T > 8.")
+g = ts.trace(fresh(HYBRID), expand="all", example_input=IDS)
+for T in (12, 5):
+    try:
+        g.run_nodes(torch.randint(0, VOCAB, (4, T)))
+        print(f"  T={T:2d}: runs")
+    except ValueError as e:
+        print(f"  T={T:2d}: {short(e)}")
+
+section("5b. Alternating as deep as needed: fx -> export -> fx -> export")
+
+
+@torch.fx.wrap
+def gate(h):
+    """Reads a value: export can't trace it; fx keeps it as one call."""
+    return h * (1.0 if float(h.abs().amax()) > 0 else 0.0)
+
+
+class Gated(nn.Module):              # fx can trace it (gate is a leaf for fx); export can't
+    def __init__(self, d=32):
+        super().__init__()
+        self.inner, self.lin = Windowed(d), nn.Linear(d, d)
+
+    def forward(self, h):
+        return gate(self.lin(self.inner(h)))
+
+
+class Outer(nn.Module):              # fx can't (a branch on a size): exported, Gated inside
+    def __init__(self, d=32):
+        super().__init__()
+        self.pre, self.gated, self.post = nn.Linear(d, d), Gated(d), nn.Linear(d, d)
+
+    def forward(self, h):
+        if h.shape[1] > 4:
+            h = torch.relu(self.pre(h))
+        return self.post(self.gated(h))
+
+
+class Deep(nn.Module):
+    def __init__(self, vocab=VOCAB, d=32):
+        super().__init__()
+        self.emb, self.outer, self.head = nn.Embedding(vocab, d), Outer(d), nn.Linear(d, vocab)
+
+    def forward(self, ids):
+        return self.head(self.outer(self.emb(ids))).transpose(1, 2)
+
+
+DEEP = Deep()
+g = ts.trace(fresh(DEEP), expand="all", example_input=IDS)
+for path in ["emb", "outer", "outer.gated", "outer.gated.inner", "head"]:
+    inside = [n for n in g.nodes if (path in n.scope or n.name == path)
+              and not any(c in n.scope for c in ["outer.gated", "outer.gated.inner"] if c != path and c.startswith(path))]
+    kinds = sorted({origin(n) for n in inside if type(n.module).__name__ != "_AttrWrapper"})
+    print(f"  {path:18s} own nodes: {len(inside):3d}, made by {', '.join(kinds)}")
+ref = train_unsplit(fresh(DEEP), TOK_DATA)
+m = fresh(DEEP)
+train_sliced(ts.slice(m, n=4, multi_tensor=True, expand="all", example_input=IDS), TOK_DATA)
+print(f"  n=4, multi_tensor: max |w - unsplit| = {max_diff(m, ref):.1e}")

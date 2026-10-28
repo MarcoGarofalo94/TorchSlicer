@@ -606,7 +606,13 @@ shown in a Flower-based SplitFed baseline.
     graphs are ATen-level, so partitions differ from fx's; equality is checked on training results
     instead. Not done: per-slice `torch.compile`, comm/compute overlap, FLOPs costs from the symbolic
     shapes (only bytes used), grouping ATen nodes back into modules, multi-input models,
-    `nn.TransformerEncoder` under export (torch limitation), maxvit_t export time.
+    maxvit_t export time.
+  - **fx and export mixed, module by module (2026-10-28)** (owner: "combine both ... a general
+    solution"): `core/hybrid.py`; `auto` = fx, then (on failure, with `example_input`) fx per module
+    with export for the modules fx can't open; `export` = export with fx for the submodules export
+    can't trace (opaque op with shapes from an eager call), alternating to any depth, kept whole when
+    neither opens a module. Nested exports guard their input sizes. `nn.TransformerEncoder` now works
+    under export (kept whole). validation.md #63–#64; `tests/test_hybrid_tracer.py`; notebook F3.
 - **M18, multi-tensor cuts** (added 2026-10-22, owner decision; after the FGCS special-issue paper, not placed in the
   order yet). Today exactly one tensor crosses each cut (`BaseSplitter.validate()`), so U-Net-style encoder-decoder
   CNNs (skips at every level: only cuts near the ends are valid), encoder-decoder transformers (T5, Whisper, BART:
@@ -649,7 +655,7 @@ shown in a Flower-based SplitFed baseline.
       without `pack=`; header overhead (per row) could be per tensor for large batches of small values.
 
 ## Handoff (read this first if you are a new session)
-**2026-10-27: M17 export tracer on `feat/m17-export-tracer`** (from the M18 branch, not pushed): see M17 above; validation.md #58–#62.
+**2026-10-28: M17 fx/export mixed per module on `feat/m17-export-tracer`** (pushed up to 980a5b9; the mix after it): see M17 above; validation.md #58–#64.
 **2026-10-27: M18 (multi-tensor cuts + recompute) done on `feat/m18-multi-tensor-cuts`** (forked from `refinement`,
 not pushed): see M18 status above; 532 tests (cut hooks at packed cuts, `planning.multi_tensor`, 18-model sweep
 with fixes #54–#57), matrix new models CPU 45/45 (rerun after the fixes), CUDA 42/42. Open owner decisions:
