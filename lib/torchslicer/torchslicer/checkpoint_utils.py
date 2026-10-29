@@ -21,10 +21,10 @@ def _build_layers(model, pack: Callable | None = None, expand=None, packed_cuts=
                   export_input=None) -> list:
     if pack is not None:
         graph = ModelGraph.from_stages(list(pack(model)))
-    elif export_input:                 # the run traced with torch.export: same input shape
-        example = torch.zeros(export_input["shape"], dtype=getattr(torch, export_input["dtype"]))
-        graph = ModelGraph.from_export(model, example, export_input.get("prefer", "export"),
-                                       export_input.get("expand"))
+    elif export_input:                 # the run traced on an example input: same shapes
+        from .core.inputs import example
+        graph = ModelGraph.from_export(model, example(export_input), export_input.get("prefer", "export"),
+                                       export_input.get("expand"), export_input.get("mix", True))
     else:
         graph = ModelGraph.from_module(model, expand=expand)
     if packed_cuts:                    # the run cut with multi_tensor=True: same rewrite

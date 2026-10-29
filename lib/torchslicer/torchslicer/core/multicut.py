@@ -529,6 +529,7 @@ def pack_cuts(graph, cuts: list, recompute: bool = True):
     new = ModelGraph(source=graph.source)
     new.expand, new.model = graph.expand, graph.model
     new.export_input = getattr(graph, "export_input", None)
+    new.inputs = getattr(graph, "inputs", None)
     current: dict = {}                      # old value id -> new node index providing it here
     placed: dict = {}                       # old node index -> its node in the new graph
 

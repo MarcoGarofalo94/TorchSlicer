@@ -153,7 +153,9 @@ With LoRA, call `ts.peft_unwrap(model)` before packing.
 
 **Extra inputs.** If the DataLoader yields a dict, `"input_ids"` (or the first key) is the main
 tensor and the other keys are passed by name to stage 0. Stage 0 must be an `AuxInputStage`.
-Every later stage gets a single tensor.
+Every later stage gets a single tensor. Without `pack=`, a traced model takes several inputs
+anywhere, a mask read by every layer included: pass one batch as `example_input=`
+([export.md](export.md#models-with-several-inputs)).
 
 ## What still works with `pack=`
 

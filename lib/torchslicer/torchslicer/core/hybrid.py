@@ -20,6 +20,7 @@ which ``export_graph.convert`` turns into a ``ModelGraph``.
 from __future__ import annotations
 
 import contextlib
+import copy
 import inspect
 import io
 import operator
@@ -31,7 +32,7 @@ import torch.nn as nn
 from torch.utils import _pytree as pytree
 
 from .export_graph import _check_input
-from .model_graph import TraceError, _CallWrapper, _fill, _traced_factories
+from .model_graph import TraceError, _CallWrapper, _fill, _kept_attributes, _traced_factories
 
 
 # ── the opaque op: a module call export can't trace ────────────────────────────
@@ -110,16 +111,7 @@ class _OpaqueCall(_CallWrapper):
     def forward(self, *inputs):
         args, kwargs = _fill(self.args, inputs), _fill(self.kwargs, inputs)
         out = self.module(*args, **kwargs)
-        leaves = pytree.tree_leaves((args, kwargs))
-        outs = [o for o in pytree.tree_leaves(out) if isinstance(o, torch.Tensor)]
-        for o, (_, dims) in zip(outs, self.rules):
-            want = [_size(r, leaves) for r in dims]
-            if list(o.shape) != want:
-                raise RuntimeError(
-                    f"{type(self.module).__name__} returned shape {tuple(o.shape)}, but the graph "
-                    f"was traced assuming {tuple(want)} (inferred from one eager call, since "
-                    f"torch.export couldn't trace this module): trace again with an "
-                    f"example_input of the shape you run")
+        _check_shapes(type(self.module).__name__, out, args, kwargs, self.rules)
         return out
 
 
@@ -184,14 +176,22 @@ def _culprit(error, modules: dict, outer=()):
     """The innermost module of ``modules`` ({id: path}) whose code was running when
     ``error`` was raised, looking through chained exceptions but not ``outer`` (those
     being handled when tracing started: Python chains them to every new exception)."""
-    found, seen = None, {id(e) for e in outer}
+    return _culprit_call(error, modules, outer)[0]
+
+
+def _culprit_call(error, modules: dict, outer=()):
+    """``(path, method)``: as ``_culprit``, and the method of that module that was running
+    (``"forward"`` for its forward, or code that isn't one of its class's methods)."""
+    found, seen = (None, "forward"), {id(e) for e in outer}
     while error is not None and id(error) not in seen:
         seen.add(id(error))
         tb = error.__traceback__
         while tb is not None:
             owner = tb.tb_frame.f_locals.get("self")
             if id(owner) in modules:
-                found = modules[id(owner)]
+                name = tb.tb_frame.f_code.co_name
+                method = getattr(type(owner), name, None)
+                found = (modules[id(owner)], name if inspect.isfunction(method) else "forward")
             tb = tb.tb_next
         error = error.__cause__ or error.__context__
     return found
@@ -232,6 +232,84 @@ def _capture(module: nn.Module, example: tuple, wanted: dict) -> dict:
     return calls
 
 
+def _capture_method(module: nn.Module, example: tuple, owner: nn.Module, name: str) -> list:
+    """[(args, kwargs, output), ...]: every call of ``owner.<name>`` in one eager run of
+    ``module`` on ``example`` (as ``_capture``)."""
+    calls, real = [], getattr(owner, name)
+
+    def record(*args, **kwargs):
+        out = real(*args, **kwargs)
+        calls.append((args, kwargs, out))
+        return out
+
+    modes = [(m, m.training) for m in module.modules()]
+    setattr(owner, name, record)
+    try:
+        module.eval()
+        with torch.no_grad(), torch.random.fork_rng(devices=_devices(example)):
+            module(*example[0], **example[1])
+    finally:
+        delattr(owner, name)
+        for m, mode in modes:
+            m.training = mode
+    return calls
+
+
+def _stub(owner: nn.Module) -> nn.Module:
+    """``owner`` without its submodules, parameters, buffers and hooks: what a method that
+    uses none of them needs (its configuration)."""
+    stub = copy.copy(owner)
+    for k, v in list(stub.__dict__.items()):
+        if k in ("_modules", "_parameters", "_buffers") or (k.endswith("hooks") and isinstance(v, dict)):
+            stub.__dict__[k] = type(v)()
+    return stub
+
+
+def _same(a, b) -> bool:
+    la, lb = pytree.tree_leaves(a), pytree.tree_leaves(b)
+    if len(la) != len(lb):
+        return False
+    for x, y in zip(la, lb):
+        if isinstance(x, torch.Tensor) or isinstance(y, torch.Tensor):
+            if not (isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor) and x.shape == y.shape
+                    and x.dtype == y.dtype and torch.equal(x, y)):
+                return False
+        elif x != y:
+            return False
+    return True
+
+
+def _check_shapes(what: str, out, args, kwargs, rules):
+    leaves = pytree.tree_leaves((args, kwargs))
+    outs = [o for o in pytree.tree_leaves(out) if isinstance(o, torch.Tensor)]
+    for o, (_, dims) in zip(outs, rules):
+        want = [_size(r, leaves) for r in dims]
+        if list(o.shape) != want:
+            raise RuntimeError(
+                f"{what} returned shape {tuple(o.shape)}, but the graph was traced assuming "
+                f"{tuple(want)} (inferred from one eager call, since torch.export couldn't trace "
+                f"it): trace again with an example_input of the shape you run")
+
+
+class _MethodCall(nn.Module):
+    """A method of a module (not its forward) that torch.export couldn't trace (a loop over
+    a tensor's values, ``.tolist()``), kept as one call, on a copy of the module without its
+    submodules and weights: on the example, the copy gave the same result."""
+
+    def __init__(self, owner: nn.Module, name: str, rules):
+        super().__init__()
+        self.owner, self.name, self.rules = _stub(owner), name, rules
+        self.__name__ = name           # how torch.fx names the node
+
+    def forward(self, *args, **kwargs):
+        out = getattr(self.owner, self.name)(*args, **kwargs)
+        _check_shapes(f"{type(self.owner).__name__}.{self.name}", out, args, kwargs, self.rules)
+        return out
+
+    def extra_repr(self):
+        return f"{type(self.owner).__name__}.{self.name}"
+
+
 class _Region:
     """One module call traced by one tracer, before inlining."""
 
@@ -269,9 +347,11 @@ class _Call(nn.Module):
 
 
 class Builder:
-    def __init__(self, network: nn.Module, prefer: str, expand):
+    def __init__(self, network: nn.Module, prefer: str, expand, mix: bool = True):
         self.network = network
         self.order = ["export", "fx"] if prefer == "export" else ["fx", "export"]
+        self.mix = mix                 # False: the preferred tracer only, else a leaf
+        self.names = None              # the inputs' names, for a model with several
         self.expand = expand           # set of module paths, or "all"
         self.graph = fx.Graph()
         self.consts: dict = {}         # get_attr targets that aren't the model's (export's constants)
@@ -282,23 +362,32 @@ class Builder:
 
     # ── entry point ───────────────────────────────────────────────────────────
 
-    def build(self, example_input, key):
-        """Trace the model on ``example_input``; the graph's output is ``out[key]``
-        (``key`` None: the output itself)."""
+    def build(self, call, key, names=None):
+        """Trace the model called with ``call`` (``(args, kwargs)`` of one batch); the
+        graph's output is ``out[key]`` (``key`` None: the output itself). ``names``: a model
+        with several inputs, one per tensor of ``call``: a placeholder each, in that order,
+        each checked against the sizes an export of the whole model assumed."""
         net = self.network
-        with torch.no_grad(), torch.random.fork_rng(devices=_devices(example_input)):
+        args, kwargs = call
+        with torch.no_grad(), torch.random.fork_rng(devices=_devices(call)):
             was = net.training
             net.eval()
             try:
-                out = net(example_input)
+                out = net(*args, **kwargs)
             finally:
                 net.train(was)
-        placeholder = self.graph.placeholder("input")
-        example = ((example_input,), {}, out)
+        self.names = names
+        leaves, spec = pytree.tree_flatten(call)
+        tensors = [i for i, v in enumerate(leaves) if isinstance(v, torch.Tensor)]
+        values = list(leaves)
+        for j, i in enumerate(tensors):
+            values[i] = self.graph.placeholder("input" if names is None else f"input_{j}")
+        example = (args, kwargs, out)
         was = net.training
         net.train()                    # the graph is the training-mode forward
         try:
-            value = self.open(net, "", ((placeholder,), {}), example, self.order, self.expand, [], key=key)
+            value = self.open(net, "", pytree.tree_unflatten(values, spec), example, self.order,
+                              self.expand, [], key=key)
         finally:
             net.train(was)
         if isinstance(value, _Leaf):
@@ -318,6 +407,8 @@ class Builder:
         call in an eager run, with its output) and inline it. Returns the output's value:
         a graph value, a constant, or a ``_Struct``."""
         errors = []
+        if not self.mix:
+            order = [k for k in order if k == self.order[0]]
         for kind in order:
             try:
                 if kind == "fx":
@@ -346,6 +437,7 @@ class Builder:
         leaves, spec = pytree.tree_flatten(example[2])
         if spec.is_leaf():
             return node
+        node.meta["ts_struct"] = True
         flat = []
         for i, leaf in enumerate(leaves):
             if isinstance(leaf, torch.Tensor):
@@ -360,7 +452,7 @@ class Builder:
         """A graph value for ``v`` (a ``_Struct`` is rebuilt by a node)."""
         if isinstance(v, _Struct):
             node = self.graph.call_function(_rebuild, (v.spec, *[self._value(x) for x in v.flat]))
-            node.meta.update(ts_kind="fx", ts_scope=[])
+            node.meta.update(ts_kind="fx", ts_scope=[], ts_struct=True)
             return node
         return v
 
@@ -397,7 +489,7 @@ class Builder:
         while True:
             tracer = _RegionTracer(path, expand, blocked)
             try:
-                with _traced_factories():
+                with _traced_factories(), _kept_attributes(module):
                     graph = tracer.trace(module, concrete_args=concrete or None)
                 break
             except Exception as e:
@@ -471,26 +563,30 @@ class Builder:
         inputs = tuple(leaves[i] for i in dynamic)
         shapes = (tuple({d: Dim.AUTO for d in range(v.dim())} if isinstance(v, torch.Tensor) else Dim.AUTO
                         for v in inputs),)
-        subtree = {id(m): _join(path, n) for n, m in module.named_modules() if n}
-        opaque, caps = set(), {}
+        subtree = {id(m): _join(path, n) for n, m in module.named_modules()}
+        opaque, caps = set(), {}       # module paths, and (path, method) for other methods
         while True:
             saved = self._patch(opaque, caps, module, example)
-            err = io.StringIO()
+            err, failed = io.StringIO(), None
             try:
-                with contextlib.redirect_stderr(err):   # a failed export prints its partial graph
-                    ep = torch.export.export(wrapper, inputs, dynamic_shapes=shapes, strict=False)
+                with contextlib.redirect_stderr(err), _kept_attributes(module):  # a failed export
+                    ep = torch.export.export(wrapper, inputs, dynamic_shapes=shapes, strict=False)  # prints its partial graph
                 sys.stderr.write(err.getvalue())
-                break
             except Exception as e:
                 partial = str(getattr(e, "partial_fx_graph", "") or "")
                 sys.stderr.write(err.getvalue().replace(partial + "\n", "") if partial else err.getvalue())
-                culprit = _culprit(e, subtree, self.outer)
-                if culprit is None or culprit in opaque:
-                    raise _Untraceable(_short(e))
-                opaque.add(culprit)      # its own code defeats export: opaque, opened with fx
+                failed = e
             finally:
-                for m in saved:
-                    del m.forward
+                for m, name in saved:
+                    delattr(m, name)
+            if failed is None:
+                break
+            culprit, method = _culprit_call(failed, subtree, self.outer)
+            if method != "forward" and self._method_ok(module, example, culprit, method, caps):
+                culprit = (culprit, method)     # that method alone: one call, on a stub
+            if culprit is None or culprit == path or culprit in opaque:
+                raise _Untraceable(_short(failed)) from failed
+            opaque.add(culprit)          # its own code defeats export: opaque, opened with fx
 
         gm = ep.module()
         graph = gm.graph
@@ -511,7 +607,7 @@ class Builder:
             outputs = [next(it) if isinstance(v, torch.Tensor) else v for v in out_leaves]
         region = _Region("export", path, graph, {p: values[i] for p, i in zip(placeholders, dynamic)},
                          outputs, out_spec)
-        if path == "":
+        if path == "" and self.names is None:
             region.input_dims = _input_dims(placeholders[0], ep)
         else:      # the sizes this export assumed for its inputs, checked at run time
             seen = {}
@@ -560,22 +656,41 @@ class Builder:
                 pass
         return False
 
+    def _method_ok(self, module, example, path, name, caps) -> bool:
+        """Can ``path.<name>`` (not a forward) be one call on a stub of its module? Yes if,
+        in an eager run, the stub gives what the module does (it uses no weight)."""
+        if path is None:
+            return False
+        owner = self.network.get_submodule(path)
+        calls = _capture_method(module, example, owner, name)
+        try:
+            with torch.no_grad():
+                stub = _stub(owner)
+                if not calls or not all(_same(getattr(stub, name)(*a, **k), out) for a, k, out in calls):
+                    return False
+        except Exception:
+            return False
+        caps[(path, name)] = calls
+        return True
+
     def _patch(self, opaque, caps, module, example) -> list:
-        """Make each module in ``opaque`` call the opaque op for the export to come."""
+        """Make each module (forward) or method in ``opaque`` call the opaque op for the
+        export to come; ``[(object, attribute)]`` to delete afterwards."""
         if not opaque:
             return []
-        missing = {self.network.get_submodule(p): p for p in opaque if p not in caps}
+        missing = {self.network.get_submodule(p): p for p in opaque if isinstance(p, str) and p not in caps}
         if missing:
             caps.update(_capture(module, example, missing))
         patched = []
-        for fqn in opaque:
+        for key in opaque:
+            fqn, name = (key, "forward") if isinstance(key, str) else key
             m = self.network.get_submodule(fqn)
-            m.forward = self._opaque_forward(fqn, caps[fqn])
-            patched.append(m)
+            setattr(m, name, self._opaque_forward(fqn, caps[key], None if name == "forward" else name))
+            patched.append((m, name))
         return patched
 
     @staticmethod
-    def _opaque_forward(fqn, calls):
+    def _opaque_forward(fqn, calls, method=None):
         count = [0]
 
         def forward(*args, **kwargs):
@@ -595,6 +710,7 @@ class Builder:
             info = _Opaque(fqn, k, spec, [None if i in tensors or i in ints else v for i, v in enumerate(leaves)],
                            tensors, ints, out_spec, out_leaves, _shape_rules(e_leaves, tensors + ints, outs),
                            device)
+            info.method = method
             key = len(_OPAQUE)
             _OPAQUE[key] = info
             result = iter(torch.ops.torchslicer.opaque(key, [leaves[i] for i in tensors],
@@ -604,11 +720,14 @@ class Builder:
         return forward
 
     def _export_sub(self, info, node, caps):
-        """Open a module call export couldn't trace (the opaque op ``node``) with fx."""
+        """Open a module call export couldn't trace (the opaque op ``node``) with fx; a
+        method's call stays one node."""
         def open_sub(env, scope):
             leaves = info.fill([env[a] for a in node.args[1]], [env[a] for a in node.args[2]])
             args, kwargs = pytree.tree_unflatten(leaves, info.spec)
             sub = self.network.get_submodule(info.path)
+            if info.method is not None:
+                return self._method_node(sub, info, args, kwargs, scope)
             value = self.open(sub, info.path, (args, kwargs), caps[info.path][info.k], ["fx"], "all",
                               scope, rules=info.rules)
             if not isinstance(value, _Struct):
@@ -616,14 +735,32 @@ class Builder:
             return [v for v, o in zip(value.flat, info.out_leaves) if isinstance(o, torch.Tensor)]
         return open_sub
 
+    def _method_node(self, owner, info, args, kwargs, scope) -> list:
+        """One node calling ``owner.<method>`` (a ``_MethodCall``); its output tensors."""
+        args, kwargs = fx.node.map_aggregate((args, kwargs), self._value)
+        node = self.graph.call_function(_MethodCall(owner, info.method, info.rules), tuple(args), dict(kwargs))
+        node.meta.update(ts_kind="fx", ts_scope=list(scope))
+        self.kinds.add("leaf")
+        if info.out_spec.is_leaf():
+            return [node]
+        node.meta["ts_struct"] = True
+        items = []
+        for i, leaf in enumerate(info.out_leaves):
+            if isinstance(leaf, torch.Tensor):
+                item = self.graph.call_function(_leaf_item, (node, i))
+                item.meta.update(ts_kind="fx", ts_scope=list(scope))
+                items.append(item)
+        return items
+
     # ── inlining ──────────────────────────────────────────────────────────────
 
     def _inline(self, region: _Region, scope: list) -> list:
         env = dict(region.inputs)
         offsets, seen = dict(self.calls), {}
         for p, (dims, refs) in region.guards.items():
-            check = self.graph.call_function(_check_input, (env[p], dims, f"input {list(region.inputs).index(p)} of {region.path}",
-                                                            *[env[r] for r in refs]))
+            i = list(region.inputs).index(p)
+            what = f"input {self.names[i]!r}" if region.path == "" else f"input {i} of {region.path}"
+            check = self.graph.call_function(_check_input, (env[p], dims, what, *[env[r] for r in refs]))
             check.meta.update(ts_kind="fx", ts_scope=list(scope))
             env[p] = check
 

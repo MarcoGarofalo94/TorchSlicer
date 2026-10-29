@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 from ..algorithm.base import BackwardPolicy
+from ..core.inputs import split_inputs
 from ..core.split_layer import SplitLayer
 from ..core.tied import find_tied_parameters, optimizer_parameters
 
@@ -131,22 +132,8 @@ def _serialize_tensor(t: torch.Tensor):
 # ── config builders ────────────────────────────────────────────────────────────
 
 def _unpack_inputs(inputs):
-    """Unpack batch inputs into ``(main_tensor, aux_dict)``.
-
-    See ``local._unpack_inputs`` for full documentation.
-    """
-    if isinstance(inputs, torch.Tensor):
-        return inputs, {}
-    if isinstance(inputs, dict):
-        main_key = "input_ids" if "input_ids" in inputs else next(iter(inputs))
-        return inputs[main_key], {k: v for k, v in inputs.items() if k != main_key}
-    if (isinstance(inputs, (list, tuple))
-            and len(inputs) == 2
-            and isinstance(inputs[1], dict)):
-        return inputs[0], inputs[1]
-    if isinstance(inputs, (list, tuple)):
-        return inputs[0], {}
-    return inputs, {}
+    """``(main tensor, {name: tensor})`` of a batch's inputs (core/inputs.py)."""
+    return split_inputs(inputs)
 
 
 def build_tied_configs(partitions_layers: list, addresses: list) -> list:

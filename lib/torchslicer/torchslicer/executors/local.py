@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from .base import BaseExecutor
+from ..core.inputs import split_inputs
 from ..core.schedule import build_schedule
 from ..core.split_layer import SplitLayer
 from ..core.tied import find_tied_parameters, non_owned_names, optimizer_parameters
@@ -81,28 +82,8 @@ def check_session_ties(tied_groups, placement) -> None:
 
 
 def _unpack_inputs(inputs):
-    """Unpack batch inputs into ``(main_tensor, aux_dict)``.
-
-    Supports three DataLoader conventions:
-
-    * ``torch.Tensor``           → ``(inputs, {})``
-    * ``dict``                   → ``(inputs["input_ids"], rest)`` — key
-      ``"input_ids"`` is the main tensor; everything else is aux.  If
-      ``"input_ids"`` is absent, the first key is treated as main.
-    * ``(Tensor, dict)``         → ``(inputs[0], inputs[1])``
-    """
-    if isinstance(inputs, torch.Tensor):
-        return inputs, {}
-    if isinstance(inputs, dict):
-        main_key = "input_ids" if "input_ids" in inputs else next(iter(inputs))
-        return inputs[main_key], {k: v for k, v in inputs.items() if k != main_key}
-    if (isinstance(inputs, (list, tuple))
-            and len(inputs) == 2
-            and isinstance(inputs[1], dict)):
-        return inputs[0], inputs[1]
-    if isinstance(inputs, (list, tuple)):
-        return inputs[0], {}
-    return inputs, {}
+    """``(main tensor, {name: tensor})`` of a batch's inputs (core/inputs.py)."""
+    return split_inputs(inputs)
 
 
 

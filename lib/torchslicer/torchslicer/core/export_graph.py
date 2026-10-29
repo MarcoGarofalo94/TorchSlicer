@@ -229,43 +229,54 @@ def _localize_sizes(graph, max_visit: int = 64):
         user.kwargs = fx.node.map_arg(user.kwargs, repl)
 
 
-def export_graph(network: nn.Module, example_input, prefer: str = "export", expand="all") -> ModelGraph:
-    """Trace ``network`` on ``example_input`` (its batch size must be >= 2: export fixes
-    sizes of 1) into a ``ModelGraph``: with ``torch.export`` (one node per ATen op), and
-    ``torch.fx`` for the modules export can't trace (core/hybrid.py). ``prefer="fx"``:
-    fx first, export for the modules fx can't open (``expand``: which ones to open)."""
+def export_graph(network: nn.Module, example_input, prefer: str = "export", expand="all",
+                 mix: bool = True) -> ModelGraph:
+    """Trace ``network`` on ``example_input`` (one batch's inputs, core/inputs.py; its batch
+    size must be >= 2: export fixes sizes of 1) into a ``ModelGraph``: with ``torch.export``
+    (one node per ATen op), and ``torch.fx`` for the modules export can't trace
+    (core/hybrid.py). ``prefer="fx"``: fx first, export for the modules fx can't open
+    (``expand``: which ones to open). ``mix=False``: the ``prefer``red tracer only."""
     from .hybrid import Builder
+    from .inputs import bind, input_leaves, main_name, split_inputs
 
     cls_name = type(network).__name__
-    if not isinstance(example_input, torch.Tensor):
-        raise TraceError(f"tracing with torch.export needs example_input= as one tensor, got "
-                         f"{type(example_input).__name__}")
-    if example_input.dim() and example_input.shape[0] < 2:
-        raise ValueError("tracer='export': use an example_input with a batch of at least 2 "
+    leaves = input_leaves(example_input)
+    if not leaves:
+        raise TraceError(f"example_input holds no tensor: {type(example_input).__name__}")
+    main = split_inputs(example_input)[0]
+    if main.dim() and main.shape[0] < 2:
+        raise ValueError("tracing on an example_input needs a batch of at least 2 "
                          "(torch.export fixes a size of 1, so other batch sizes would fail)")
+    args, kwargs = bind(network, example_input)
     was_training = network.training
     try:
         network.eval()
         with torch.no_grad():
-            key = _output_key(network(example_input), cls_name)
+            key = _output_key(network(*args, **kwargs), cls_name)
     finally:
         network.train(was_training)
-    builder = Builder(network, prefer, expand)
-    graph = builder.build(example_input, key)
+    builder = Builder(network, prefer, expand, mix)
+    names = [n for n, _ in leaves]
+    graph = builder.build((args, kwargs), key, names if len(leaves) > 1 else None)
     if builder.input_dims is not None:
         guard = _InputGuard(builder.input_dims)
     else:
         guard = nn.Identity()
-    mixed = builder.kinds != {"export"}
-    mg = convert(graph, network, builder.consts, guard, _bytes(example_input),
-                 source="mixed" if mixed else "exported", expand=expand)
+    source = ("exported" if builder.kinds == {"export"} else
+              "mixed" if "export" in builder.kinds else "traced")
+    inputs = None
+    if len(leaves) > 1:
+        inputs = [(n, n == main_name(names), _bytes(t)) for n, t in leaves]
+    mg = convert(graph, network, builder.consts, guard, _bytes(main),
+                 source=source, expand=expand, inputs=inputs)
     if any(n.out_bytes is None for n in mg.nodes):        # nodes fx made: measured on the input
         modes = [(m, m.training) for m in network.modules()]
+        cuda = sorted({t.device for _, t in leaves if t.is_cuda}, key=str)
         try:
             network.eval()
             for node in mg.nodes:
                 node.module.eval()
-            with torch.no_grad(), torch.random.fork_rng(devices=[example_input.device] if example_input.is_cuda else []):
+            with torch.no_grad(), torch.random.fork_rng(devices=cuda):
                 outs = mg.run_nodes(example_input)
         finally:
             for node in mg.nodes:
@@ -279,19 +290,23 @@ def export_graph(network: nn.Module, example_input, prefer: str = "export", expa
 
 
 def convert(graph, network: nn.Module, consts: dict, input_module: nn.Module, input_bytes: float,
-            source: str = "exported", expand="all") -> ModelGraph:
+            source: str = "exported", expand="all", inputs: list | None = None) -> ModelGraph:
     """The ``ModelGraph`` of a ``torch.fx`` graph whose nodes come from ``torch.export``
     (ATen ops, ``meta["ts_kind"] == "export"``), from ``torch.fx`` (``"fx"``), or are calls
     of modules neither could open (``"leaf"``); ``meta["ts_scope"]``: the module calls each
-    node is inside. get_attr targets are paths in ``network``, or keys of ``consts``."""
+    node is inside. get_attr targets are paths in ``network``, or keys of ``consts``.
+    ``inputs``: a model with several inputs, ``[(name, is main, bytes)]`` per placeholder
+    (one ``input.<name>`` node each, for those it uses); else ``input_module`` is the input."""
     import torch.fx as fx
+    from .inputs import _Input
 
     cls_name = type(network).__name__
     nodes = list(graph.nodes)
-    placeholder = next(n for n in nodes if n.op == "placeholder")
+    placeholders = [n for n in nodes if n.op == "placeholder"]
+    placeholder = placeholders[0]
     output = next(n for n in nodes if n.op == "output")
     out_val = output.args[0]
-    if out_val is placeholder:
+    if out_val in placeholders:
         raise TraceError(f"{cls_name}.forward returns its input unchanged; nothing to split.")
 
     def kind(n) -> str:
@@ -337,7 +352,7 @@ def convert(graph, network: nn.Module, consts: dict, input_module: nn.Module, in
     # ── which nodes are kept ────────────────────────────────────────────────
     # an update of module state whose result is unused (``num_batches_tracked += 1``)
     side_effects = [n for n, bases in writes.items() if not n.users and bases <= stateful]
-    live = {out_val, placeholder, *side_effects}
+    live = {out_val, *side_effects} | ({placeholder} if inputs is None else set())
     while True:
         for n in reversed(nodes):
             if n in live:
@@ -353,11 +368,22 @@ def convert(graph, network: nn.Module, consts: dict, input_module: nn.Module, in
     # ── build the ModelGraph ────────────────────────────────────────────────
     mg = ModelGraph(source=source)
     mg.expand = expand if isinstance(expand, str) else sorted(expand)
-    mg.nodes.append(LayerNode(index=0, module=input_module, name="input", takes_input=True,
-                              out_bytes=input_bytes))
-    node_to_idx = {placeholder: 0}
+    if inputs is None:
+        mg.nodes.append(LayerNode(index=0, module=input_module, name="input", takes_input=True,
+                                  out_bytes=input_bytes))
+        node_to_idx = {placeholder: 0}
+    else:            # one node per input the model uses; no cut before the last of them
+        used = [(p, spec) for p, spec in zip(placeholders, inputs) if p in live]
+        if not used:
+            raise TraceError(f"{cls_name}.forward uses none of its inputs; nothing to split.")
+        mg.inputs = [name for _, (name, _, _) in used]
+        node_to_idx = {}
+        for p, (name, main, nbytes) in used:
+            node_to_idx[p] = len(mg.nodes)
+            mg.nodes.append(LayerNode(index=len(mg.nodes), module=_Input(name, main),
+                                      name=f"input.{name}", takes_input=True, out_bytes=nbytes))
     uses: dict = {}
-    names = {"input"}
+    names = {node.name for node in mg.nodes}
 
     def unique(name: str) -> str:
         while name in names:
@@ -436,9 +462,14 @@ def convert(graph, network: nn.Module, consts: dict, input_module: nn.Module, in
         order = [i for i in range(len(mg.nodes)) if i != out_idx] + [out_idx]
         _reorder(mg, order)
     mg.no_cut = {k for base, write in written for k in range(base.index, write.index)}
+    mg.no_cut |= set(range(len(mg.inputs or []) - 1))
     for node in mg.nodes:
         for p in node.predecessors:
             mg.nodes[p].successors.append(node.index)
+    for n in nodes:            # a structured value (a module's output tuple, ModelOutput):
+        if n.meta.get("ts_struct") and n in node_to_idx:      # no cut before its items are read
+            node = mg.nodes[node_to_idx[n]]
+            mg.no_cut |= set(range(node.index, max(node.successors, default=node.index)))
     return mg
 
 

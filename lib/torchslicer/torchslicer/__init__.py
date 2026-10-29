@@ -422,12 +422,18 @@ def trace(model, expand=None, pack=None, *, tracer="auto", example_input=None) -
     ``example_input`` mean the same as in :func:`slice`. ``ts.slice(graph, ...)`` then
     cuts exactly this graph.
     """
+    from .core.inputs import count
     if tracer not in ("auto", "fx", "export"):
         raise ValueError(f"tracer must be 'auto', 'fx' or 'export', not {tracer!r}")
     if pack is not None:
         if expand:
             raise ValueError("expand= has no effect with pack=: packed stages are not traced")
         graph = ModelGraph.from_stages(list(pack(model)))
+    elif example_input is not None and count(example_input) > 1:
+        # several inputs: traced on the example, which says how a batch maps to forward's arguments
+        prefer = "export" if tracer == "export" else "fx"
+        graph = ModelGraph.from_export(model, example_input, prefer=prefer, expand=expand,
+                                       mix=tracer != "fx")
     elif tracer == "export":
         if example_input is None:
             raise ValueError("tracer='export' needs example_input=: torch.export runs the model on it")
@@ -492,9 +498,14 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
         expand:   Submodules to trace through so their children become nodes
                   (finer cut granularity), e.g. ``["layer1", "layer2"]``, or
                   ``"all"``. Not allowed with ``pack=``.
-        example_input: An input batch, for strategies that measure the model
+        example_input: One batch's inputs, for strategies that measure the model
                   (``"flops"``, ``"profiled"``) and for ``torch.export``. They run on
                   a copy, so the model's weights, buffers and RNG state are not changed.
+                  A model with several inputs takes them as a tuple (``forward``'s
+                  positional arguments) or a dict (its keyword arguments), here and in
+                  every batch: the graph starts with one ``input.<name>`` node per
+                  tensor, in slice 0, and an input read later crosses cuts packed
+                  (see docs/tutorials/export.md).
         cut_hooks: What crosses the cuts: a ``ts.CutHook`` (every cut), or
                   ``{cut: hook}`` with cut ``k`` = between slice ``k`` and ``k+1``,
                   e.g. ``{0: ts.Quantize(bits=8)}``. Built in: ``Float16``,
@@ -538,7 +549,10 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
         strategy_name = strategy if isinstance(strategy, str) else type(splitter).__name__
     n = 2 if n is None else n
     if example_input is not None and hasattr(splitter, "example_input"):
-        splitter.example_input = example_input
+        from .core.inputs import split_inputs
+        splitter.example_input, aux = split_inputs(example_input)
+        if aux and getattr(splitter, "aux", None) is None:
+            splitter.aux = aux
 
     if isinstance(model, ModelGraph):
         graph = model
@@ -549,7 +563,7 @@ def slice(model, strategy="uniform", n=None, executor=None, pack=None, *,
     else:
         graph = trace(model, expand=_merge_expand(expand, splitter.expand_for(model)),
                       tracer=tracer, example_input=example_input)
-    if multi_tensor:
+    if multi_tensor or getattr(graph, "inputs", None):     # an input read after a cut crosses it
         graph, partitions = _multi_tensor_partitions(graph, splitter, n)
     else:
         partitions = splitter.split(graph, n)

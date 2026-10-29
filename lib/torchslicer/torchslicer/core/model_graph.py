@@ -217,6 +217,25 @@ class _traced_factories:
             setattr(torch, name, real)
 
 
+class _kept_attributes:
+    """Tracing runs a module's code on fake tensors or proxies; what it assigns to its
+    attributes (``self.rope_deltas = ...``) is undone afterwards."""
+
+    def __init__(self, module: nn.Module):
+        self.saved = [(m, dict(m.__dict__)) for m in module.modules()]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        for m, saved in self.saved:
+            for k in list(m.__dict__):
+                if k not in saved:
+                    del m.__dict__[k]
+                elif m.__dict__[k] is not saved[k]:
+                    m.__dict__[k] = saved[k]
+
+
 # ── graph nodes ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -254,6 +273,9 @@ class ModelGraph:
         self.export_input: dict | None = None
         # Gaps that may never be cut (a tensor written in place between them and its write).
         self.no_cut: set = set()
+        # A model with several inputs: their names (core/inputs.py), one ``input.<name>``
+        # node each at the start of the graph. None: one input tensor.
+        self.inputs: list | None = None
 
     # ── constructors ──────────────────────────────────────────────────────────
 
@@ -325,21 +347,24 @@ class ModelGraph:
 
     @classmethod
     def from_export(cls, network: nn.Module, example_input, prefer: str = "export",
-                    expand=None) -> "ModelGraph":
-        """Build the graph on ``example_input`` with ``torch.export`` (one node per ATen op)
-        and ``torch.fx``, module by module (core/hybrid.py): each module is opened by the
-        ``prefer``red tracer, else by the other one, else kept whole. With ``prefer="fx"``,
-        ``expand`` says which modules to open (``"all"`` for ``prefer="export"``). Raises
-        ``TraceError``."""
+                    expand=None, mix: bool = True) -> "ModelGraph":
+        """Build the graph on ``example_input`` (one batch's inputs: a tensor, or a tuple /
+        dict of them, core/inputs.py) with ``torch.export`` (one node per ATen op) and
+        ``torch.fx``, module by module (core/hybrid.py): each module is opened by the
+        ``prefer``red tracer, else by the other one (``mix``), else kept whole. With
+        ``prefer="fx"``, ``expand`` says which modules to open (``"all"`` for
+        ``prefer="export"``). Raises ``TraceError``."""
         from .export_graph import export_graph
+        from .inputs import describe, input_leaves
         expand_set = "all" if prefer == "export" else cls._normalize_expand(network, expand)
-        cuda = isinstance(example_input, torch.Tensor) and example_input.is_cuda
-        with torch.random.fork_rng(devices=[example_input.device] if cuda else []):
-            graph = export_graph(network, example_input, prefer, expand_set)  # leaves the random state alone
-        graph.export_input = {"shape": list(example_input.shape),
-                              "dtype": str(example_input.dtype).removeprefix("torch.")}
+        cuda = sorted({t.device for _, t in input_leaves(example_input) if t.is_cuda}, key=str)
+        with torch.random.fork_rng(devices=cuda):
+            graph = export_graph(network, example_input, prefer, expand_set, mix)  # leaves the random state alone
+        graph.export_input = describe(example_input)
         if prefer != "export":
             graph.export_input.update(prefer=prefer, expand=graph.expand)
+        if not mix:
+            graph.export_input["mix"] = False
         return graph
 
     @staticmethod
@@ -364,7 +389,7 @@ class ModelGraph:
 
     @classmethod
     def _trace(cls, network: nn.Module, expand_set) -> "ModelGraph":
-        with _traced_factories():
+        with _traced_factories(), _kept_attributes(network):
             return cls._trace_fx(network, expand_set)
 
     @classmethod
@@ -423,9 +448,10 @@ class ModelGraph:
         for p in placeholders[1:]:
             if p in live:
                 raise TraceError(
-                    f"{cls_name}.forward uses a second input {p.name!r}; a sliced model takes one "
-                    f"input tensor. Extra inputs (masks, pixel_values, ...) can be passed to the first "
-                    f"stage through an AuxInputStage in a pack= function." + _PACK_HINT
+                    f"{cls_name}.forward uses a second input {p.name!r}. For a model with several "
+                    f"inputs, pass example_input= as one batch's inputs (a tuple or dict of tensors, "
+                    f"e.g. {{'input_ids': ids, 'attention_mask': mask}}): it says how a batch maps to "
+                    f"forward's arguments." + _PACK_HINT
                 )
         if out_val is model_input:
             raise TraceError(f"{cls_name}.forward returns its input unchanged; nothing to split.")
@@ -611,8 +637,11 @@ class ModelGraph:
         return cuts
 
     def run_nodes(self, example_input, aux: dict | None = None) -> list:
-        """Run the graph node by node on ``example_input`` and return every node's output
-        (used by cost-based strategies to measure shapes, FLOPs and time)."""
+        """Run the graph node by node on ``example_input`` (one batch's inputs) and return
+        every node's output (used by cost-based strategies to measure shapes, FLOPs and time)."""
+        if not isinstance(example_input, torch.Tensor) and aux is None:
+            from .inputs import split_inputs
+            example_input, aux = split_inputs(example_input)
         outputs = []
         for node in self.nodes:
             if node.predecessors:

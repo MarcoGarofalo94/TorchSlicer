@@ -112,7 +112,7 @@ python -m torchslicer launch train.py -c run.yaml --target k8s            # or c
 
 | Area | What you get | Guide |
 |---|---|---|
-| **Split anything** | `torch.fx` tracing, `torch.export` for models fx can't trace (Hugging Face transformers, no `pack=`), both mixed module by module, named cuts, `expand=`, strategies `uniform`/`params`/`flops`/`profiled`/`memory`, custom strategies, `pack=` for untraceable models (HF LLMs, MoE), tied weights, cuts through skip connections (`multi_tensor=True`: U-Nets, encoder-decoders; masks rebuilt, not sent) | [custom_strategy](docs/tutorials/custom_strategy.md), [pack](docs/tutorials/pack.md), [multi_tensor](docs/tutorials/multi_tensor.md), [export](docs/tutorials/export.md) |
+| **Split anything** | `torch.fx` tracing, `torch.export` for models fx can't trace (Hugging Face transformers, no `pack=`), both mixed module by module, models with several inputs (vision-language: LLaVA, Qwen2-VL), named cuts, `expand=`, strategies `uniform`/`params`/`flops`/`profiled`/`memory`, custom strategies, `pack=` for untraceable models (HF LLMs, MoE), tied weights, cuts through skip connections (`multi_tensor=True`: U-Nets, encoder-decoders; masks rebuilt, not sent) | [custom_strategy](docs/tutorials/custom_strategy.md), [pack](docs/tutorials/pack.md), [multi_tensor](docs/tutorials/multi_tensor.md), [export](docs/tutorials/export.md) |
 | **Run anywhere** | local / centralized / P2P topologies; one script + one config on local, processes, Docker Compose, Kubernetes, bare metal | [docs/deploy](docs/deploy/README.md), [p2p](docs/tutorials/p2p.md) |
 | **Capability-aware planning** | workers report device, memory and measured GFLOPS; links measured; cuts balanced for heterogeneous speeds, memory caps and link cost | [p2p](docs/tutorials/p2p.md) |
 | **SL settings** | `pipeline` / `vanilla` / `u_shaped` roles, `CutHook`s (fp16/bf16, quantize, top-k, Gaussian noise, recorder), SL metrics | [sl_settings](docs/tutorials/sl_settings.md) |
@@ -154,8 +154,8 @@ ts.slice(model, strategy="profiled", n=4, example_input=x)             # balance
 - Your own strategy: subclass `ts.BaseSplitter` and `ts.register_strategy("name", cls)`
   ([tutorial](docs/tutorials/custom_strategy.md)).
 
-**When tracing fails** (data-dependent control flow, several inputs or outputs, most Hugging
-Face models), `ts.slice` raises `ts.TraceError` instead of guessing. Pass `pack=`, a
+**When tracing fails** (data-dependent control flow, several outputs; several inputs or most
+Hugging Face models without `example_input=`), `ts.slice` raises `ts.TraceError` instead of guessing. Pass `pack=`, a
 function that returns the model as a list of one-tensor-in, one-tensor-out stages
 ([tutorial](docs/tutorials/pack.md); ready-made packs for GPT-2, Llama, BERT and DeepSeek-MoE
 in [`examples/pack/`](examples/pack/)):

@@ -115,6 +115,67 @@ so on. Which module stopped a tracer is read from where the error was raised.
 - `summary()` and `valid_cuts()` show the result: cuts can fall inside any module some
   tracer opened (`cuts=["mid.1.l1"]`), not inside one kept whole.
 
+## Models with several inputs
+
+A vision-language model takes images and text, a text model a mask next to its ids. Pass one
+batch's inputs as `example_input`, as a tuple (`forward`'s positional arguments) or a dict
+(its keyword arguments, as Hugging Face models take them), and give batches of that form:
+
+```python
+class Block(nn.Module):
+    def __init__(self, d):
+        super().__init__()
+        self.qkv, self.o = nn.Linear(d, 3 * d), nn.Linear(d, d)
+
+    def forward(self, h, keep):                       # keep: 1 = a real token
+        q, k, v = self.qkv(h).chunk(3, -1)
+        att = (q @ k.transpose(1, 2)).masked_fill(keep[:, None, :] == 0, float("-inf"))
+        return h + self.o(att.softmax(-1) @ v)
+
+class VisionLanguage(nn.Module):
+    def __init__(self, d=32, vocab=100):
+        super().__init__()
+        self.vision = nn.Sequential(nn.Conv2d(3, d, 4, stride=4), nn.ReLU())  # 16x16 -> 16 tokens
+        self.proj, self.emb = nn.Linear(d, d), nn.Embedding(vocab, d)
+        self.blocks = nn.ModuleList(Block(d) for _ in range(2))
+        self.head = nn.Linear(d, vocab)
+
+    def forward(self, input_ids, pixel_values, attention_mask):
+        img = self.proj(self.vision(pixel_values).flatten(2).transpose(1, 2))
+        h = torch.cat([img, self.emb(input_ids)], 1)
+        keep = torch.cat([attention_mask.new_ones(img.shape[:2]), attention_mask], 1)
+        for b in self.blocks:
+            h = b(h, keep)
+        return self.head(h[:, img.size(1):]).transpose(1, 2)
+
+batch = {"input_ids": torch.randint(0, 100, (8, 12)), "pixel_values": torch.randn(8, 3, 16, 16),
+         "attention_mask": torch.ones(8, 12, dtype=torch.long)}
+labels = torch.randint(0, 100, (8, 12))
+sliced = ts.slice(VisionLanguage(), cuts=["vision", "blocks.0"], example_input=batch)
+sliced.train([(batch, labels)], {"name": "SGD", "params": {"lr": 0.1}}, {"name": "CrossEntropyLoss"})
+```
+
+- The graph starts with one node per input, named after the batch: `input.input_ids`,
+  `input.pixel_values`, `input.attention_mask` (a tuple's are `input.0`, `input.1`, ...).
+  They are all in slice 0, held by the data owner: the raw inputs never go elsewhere.
+- An input read after a cut crosses it like any other value: the mask above crosses both
+  cuts, packed with the hidden state. Such cuts are always allowed (`multi_tensor=True` is
+  implied), and cuts one tensor crosses are unchanged.
+- Any tracer works: `"auto"` and `"fx"` trace with fx (export for the modules fx can't open,
+  under `"auto"`), `"export"` with export. The example also says which inputs are fixed
+  constants (a `None`, a flag): those are traced at their value.
+- Executors send the main input (`input_ids` if the batch has one, else the first) and the
+  others by name with it, to slice 0 only; micro-batches split each one along its batch
+  dimension. Over raw TCP, a batch with several inputs goes over gRPC instead.
+
+Tested on Hugging Face BERT (with `attention_mask`, `token_type_ids`), T5
+(`decoder_input_ids`), LLaVA and Qwen2-VL, each trained exactly as the unsplit model. In
+Qwen2-VL, two kinds of code are kept whole: the vision attention (it splits by a tensor's
+values, `lengths.tolist()`) and `get_rope_index`, a method that loops over the ids in
+Python. A method other than `forward` that export can't trace, and that uses no weight of
+its module, becomes one node calling it (on a copy of the module without its weights;
+checked to give the same result on the example), so the rest of the module stays open.
+
 ## What the graph looks like
 
 One node per ATen op (`addmm`, `layer_norm`, `scaled_dot_product_attention`, ...), like
@@ -141,8 +202,9 @@ block, so without it almost no cut has a single tensor crossing
   stay symbolic: other batch sizes and other lengths run on the same slices.
 - Sizes the model does fix (the image size of a model with a fixed-size head, say) are
   checked at the first slice, with an error that says what was expected.
-- It must be one tensor. The model's output can be a tensor, a dict or `ModelOutput` with
-  `"logits"` (that one is used), or anything holding exactly one tensor.
+- It is one tensor, or several as a tuple or dict (see above). The model's output can be a
+  tensor, a dict or `ModelOutput` with `"logits"` (that one is used), or anything holding
+  exactly one tensor.
 - Tracing doesn't change the model: no weights, buffers or random state.
 
 ## Training and evaluation
@@ -154,11 +216,12 @@ is fixed at its training value.
 
 ## Restoring a run
 
-`ts.restore_model_from_run(model, run_dir)` exports the model again with the recorded input
-shape, so it gets the same graph; nothing to pass.
+`ts.restore_model_from_run(model, run_dir)` exports the model again on an input like the
+recorded one (same shapes and dtypes; integer and boolean inputs up to 4096 values, ids or
+masks, with their values), so it gets the same graph; nothing to pass.
 
 ## When both fail
 
 A module neither tracer can open stays one node; if that is the whole model (fx fails on
-`forward`, and so does export), `ts.TraceError` says why each failed. Export can't take a
-model with several inputs either. Then use `pack=` ([pack.md](pack.md)).
+`forward`, and so does export), `ts.TraceError` says why each failed. Then use `pack=`
+([pack.md](pack.md)).
