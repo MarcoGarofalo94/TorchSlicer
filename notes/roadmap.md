@@ -605,14 +605,19 @@ shown in a Flower-based SplitFed baseline.
     HF GPT-2/Llama/Mixtral slice without `pack=`, bitwise. Deviation from the planned test: export
     graphs are ATen-level, so partitions differ from fx's; equality is checked on training results
     instead. Not done: per-slice `torch.compile`, comm/compute overlap, FLOPs costs from the symbolic
-    shapes (only bytes used), grouping ATen nodes back into modules, multi-input models,
-    maxvit_t export time.
+    shapes (only bytes used), grouping ATen nodes back into modules, maxvit_t export time
+    (multi-input models: done 2026-10-29, below).
   - **fx and export mixed, module by module (2026-10-28)** (owner: "combine both ... a general
     solution"): `core/hybrid.py`; `auto` = fx, then (on failure, with `example_input`) fx per module
     with export for the modules fx can't open; `export` = export with fx for the submodules export
     can't trace (opaque op with shapes from an eager call), alternating to any depth, kept whole when
     neither opens a module. Nested exports guard their input sizes. `nn.TransformerEncoder` now works
     under export (kept whole). validation.md #63–#64; `tests/test_hybrid_tracer.py`; notebook F3.
+  - **Several inputs (2026-10-29)** (owner asked about VLMs): `core/inputs.py`; a tuple / dict
+    `example_input` -> one `input.<name>` node per tensor in slice 0, inputs read later cross cuts
+    packed; executors send them as the existing aux tensors. Opaque *methods* (Qwen2-VL's
+    `get_rope_index`) on a weightless stub. BERT, T5, LLaVA, Qwen2-VL exact; validation.md #65–#66;
+    `tests/test_multi_input.py`. Removed from "not done": multi-input models.
 - **M18, multi-tensor cuts** (added 2026-10-22, owner decision; after the FGCS special-issue paper, not placed in the
   order yet). Today exactly one tensor crosses each cut (`BaseSplitter.validate()`), so U-Net-style encoder-decoder
   CNNs (skips at every level: only cuts near the ends are valid), encoder-decoder transformers (T5, Whisper, BART:
@@ -655,7 +660,7 @@ shown in a Flower-based SplitFed baseline.
       without `pack=`; header overhead (per row) could be per tensor for large batches of small values.
 
 ## Handoff (read this first if you are a new session)
-**2026-10-28: M17 fx/export mixed per module on `feat/m17-export-tracer`** (pushed up to 980a5b9; the mix after it): see M17 above; validation.md #58–#64.
+**2026-10-29: M17 several inputs (VLMs) on `feat/m17-export-tracer`** (pushed up to a794397; multi-input after it, not pushed): see M17 above; validation.md #58–#66.
 **2026-10-27: M18 (multi-tensor cuts + recompute) done on `feat/m18-multi-tensor-cuts`** (forked from `refinement`,
 not pushed): see M18 status above; 532 tests (cut hooks at packed cuts, `planning.multi_tensor`, 18-model sweep
 with fixes #54–#57), matrix new models CPU 45/45 (rerun after the fixes), CUDA 42/42. Open owner decisions:

@@ -2267,3 +2267,54 @@ Owner: "now create new branch and address the torch.export and the ones". Branch
   (an output size that is a function other than "equal to an input size" is fixed, and checked);
   non-tensor outputs of exported modules are constants from the eager run; eager runs are in eval
   mode, so a module whose shapes differ in training would mislead the export.
+
+### M17: models with several inputs (2026-10-29, branch `feat/m17-export-tracer`)
+- Owner asked whether VLMs are covered (they weren't: one input per graph, `TraceError` on a
+  second placeholder; `pack=` + `AuxInputStage` only, untested, everything in stage 0). Design
+  (`core/inputs.py`): a batch's inputs are a tensor, tuple, list or dict (nested), named by their
+  path (`input_ids`, `0`, `images.0`); `bind` maps them to `forward`'s arguments (tuple ->
+  positional, dict of parameter names -> keywords). With `example_input` holding > 1 tensor, every
+  tracer goes through the Builder (`"fx"` with `mix=False`), one placeholder per tensor; the graph
+  starts with one `input.<name>` node (`_Input`) each (`graph.inputs`), no cut between them, and
+  is always cut with the multi-tensor rewrite, so an input read later (a mask in every block)
+  crosses cuts packed. Executors reuse the existing aux path (main tensor + named tensors to slice
+  0; gRPC `aux_inputs`, GPipe chunking); `_unpack_inputs` is now `split_inputs` (a tuple's extra
+  tensors are no longer dropped). Root exports guard each input (`_check_input`, equalities
+  between inputs). Restore: `export_input` = `describe(batch)` (shapes, dtypes; int/bool tensors
+  <= 4096 values with their values, since ids decide where image tokens go) -> `example(desc)`.
+- Opaque methods: Qwen2-VL's `get_rope_index` (a method of `Qwen2VLModel`, Python loops over
+  `input_ids.tolist()`) made export blame the whole `model.model`, which fx can't open (HF
+  decorators): the model was one node. Now the culprit is `(module, method)` when the innermost
+  module frame is a method other than `forward`; if a weightless copy of the module (`_stub`: no
+  submodules, parameters, buffers, hooks) gives the same outputs on every eager call of it, the
+  method alone becomes the opaque op, and then one `_MethodCall` node (shape-checked like
+  `_OpaqueCall`). Else the module as before.
+- Results (one SGD step, n=3, vs unsplit, max |d|): handmade VLM (CNN + projector + 2 masked
+  attention blocks) with tuple and dict batches on auto/fx/export 0; GPipe 2 micro-batches
+  <= 1e-5; centralized gRPC (inputs to a remote slice 0) and P2P TCP <= 1e-5; restore bitwise.
+  Hugging Face, tiny configs: BERT (`input_ids`, `attention_mask`, `token_type_ids`) 151 nodes,
+  T5 (`decoder_input_ids`) 486, LLaVA (CLIP + Llama, `pixel_values`) 330, all exported whole, 0.0;
+  Qwen2-VL (5 inputs incl. `image_grid_thw`, `mm_token_type_ids`) 361 nodes, mixed: the 2 vision
+  attentions (`torch.split(..., lengths.tolist())`) kept whole, `get_rope_index` one call, 0.0.
+- Bugs found:
+  - **#65 a cut after a structured value.** In Qwen2-VL (before opaque methods) `model.model` was
+    one node returning `Qwen2VLModelOutputWithPast`, read by a `_leaf_item` node; a cut between
+    them sent the `ModelOutput` (`AttributeError: ... has no attribute 'numel'` in
+    `tensor_nbytes`). Fix: nodes with a structured output (kept-whole calls, `_rebuild`, method
+    calls) are marked `ts_struct`; no cut until their last reader. Test
+    `test_no_cut_between_a_kept_call_and_the_items_of_its_tuple` (fails without the fix).
+  - **#66 fx left proxies in module attributes.** `self.last = h` in a forward leaves an
+    `fx.Proxy` on the module after tracing (plain `from_module` too, since M0); export restores
+    them itself (checked). Fix: `_kept_attributes` around every fx trace and export attempt.
+    Test `test_tracing_leaves_attributes_set_in_forward_alone`.
+  - (While building: the method check ran an eager pass with the opaque patches still installed
+    -> "called 1 times ... traced 2 times"; culprit handling now runs after the patches are removed.)
+- Tests `tests/test_multi_input.py` (24): naming and `split_inputs` conventions, describe/example,
+  3 tracers x tuple/dict equal unsplit, mask crossing two named cuts, GPipe, flops strategy +
+  summary on a dict, errors (fx without example; batch missing an input), opaque method (stub has
+  no weights, source mixed, attribute untouched), a method reading a weight keeps the module whole,
+  attributes, tuple no-cut, centralized gRPC + P2P TCP, restore tuple/dict, HF LLaVA + Qwen2-VL.
+- Limits: inputs go to slice 0 only (no DAG of entry points); a batch's structure must match the
+  example's (a list of a different length is another graph); over raw TCP a batch with several
+  inputs goes over gRPC; offload and client nodes use the same `split_inputs` but weren't run
+  with several inputs; Qwen2-VL's vision attention stays whole (no cut inside it).
